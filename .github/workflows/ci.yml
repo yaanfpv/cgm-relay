@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - name: checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: setup-go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            while IFS= read -r f; do
+              echo "::error file=${f},title=gofmt::not gofmt-formatted; run gofmt -w ${f}"
+            done <<< "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        id: vet
+        run: go vet ./... 2>&1 | tee "$RUNNER_TEMP/vet.log"
+
+      - name: annotate vet failure
+        if: failure() && steps.vet.outcome == 'failure'
+        run: bash .github/annotate-go-output.sh vet "$RUNNER_TEMP/vet.log"
+
+      - name: test
+        id: test
+        env:
+          CGO_ENABLED: 1
+        run: go test -race -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: annotate test failure
+        if: failure() && steps.test.outcome == 'failure'
+        run: bash .github/annotate-go-output.sh test "$RUNNER_TEMP/test.log"
+
+      - name: build
+        id: build
+        run: go build ./... 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: annotate build failure
+        if: failure() && steps.build.outcome == 'failure'
+        run: bash .github/annotate-go-output.sh build "$RUNNER_TEMP/build.log"

@@ -1,0 +1,56 @@
+# The relay's own data: a reading store, its WAL files and keys are never committed
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+/config.json
+/config.toml
+
+# Build output
+/cgm-relay
+/dist/
+/bin/
+*.test
+*.out
+coverage.*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+.history/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+
+# Secrets
+.env
+.env.local
+.env.*
+!.env.example
+!.env.template
+credentials.json
+secrets.json
+.secrets/
+.tokens/
+auth.json
+**/secrets/
+**/credentials/
+**/private/
+*.pem
+*.key
+*-key.json
+*_key.json
+*-token.json
+*_token.json
+.netrc
