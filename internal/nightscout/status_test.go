@@ -66,7 +66,7 @@ type nightguardStatusPayload struct {
 }
 
 // TestStatusJSONCarriesNightguardUnits checks that status.json carries
-// "settings.units" naming mg/dl, since nightguard's
+// "settings.units" naming mg/dl, since Nightguard's
 // NightscoutService.units(from:) treats a missing or empty value as
 // "Nightscout did not return configured glucose units." and rejects the
 // site in views/PrefsView.swift's add-a-site flow.
@@ -83,13 +83,13 @@ func TestStatusJSONCarriesNightguardUnits(t *testing.T) {
 
 	var status nightguardStatusPayload
 	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
-		t.Fatalf("decode as nightguard's own status payload: %v", err)
+		t.Fatalf("decode as Nightguard's own status payload: %v", err)
 	}
 	if status.Settings.Units == "" {
-		t.Fatal(`status.json's "settings.units" field is empty; nightguard's units(from:) rejects the site without it`)
+		t.Fatal(`status.json's "settings.units" field is empty; Nightguard's units(from:) rejects the site without it`)
 	}
 	if !strings.Contains(strings.ToLower(status.Settings.Units), "mg") {
-		t.Errorf(`settings.units = %q, want it to name mg/dl (nightguard's units(from:) checks for "mg")`, status.Settings.Units)
+		t.Errorf(`settings.units = %q, want it to name mg/dl (Nightguard's units(from:) checks for "mg")`, status.Settings.Units)
 	}
 }
 

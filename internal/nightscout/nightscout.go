@@ -73,10 +73,20 @@ func (h *handler) registerRoutes() {
 	h.mux.HandleFunc("GET /api/v1/profile", h.handleEmptyList)
 }
 
-// ServeHTTP authenticates the request, then dispatches it to the matching
-// Nightscout endpoint. Every endpoint requires a valid credential; a
-// request that fails checkAuth never reaches routing at all.
+// ServeHTTP routes the request, then authenticates it before running the
+// matched endpoint. A path this handler does not implement is answered
+// with 404 before any credential is checked, matching a real Nightscout
+// server: some follower apps (e.g. Nightguard, probing /api/v3/version to
+// decide whether to fall back to this v1 subset) treat any response other
+// than 404 or 405 to an unimplemented path as a fatal error, so answering
+// an unknown path with 401 would break them outright. Every implemented
+// endpoint still requires a valid credential; a request that fails
+// checkAuth never reaches its handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if _, pattern := h.mux.Handler(r); pattern == "" {
+		http.NotFound(w, r)
+		return
+	}
 	if !h.checkAuth(r) {
 		http.Error(w, "nightscout: missing or invalid credential", http.StatusUnauthorized)
 		return

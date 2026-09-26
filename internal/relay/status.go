@@ -61,14 +61,17 @@ func (w *statusCapturingWriter) WriteHeader(status int) {
 
 // trackClients wraps the Nightscout API handler with User-Agent
 // tracking. It records the requesting client's last-seen time in
-// tracker, but only for a request the handler actually served: the
-// handler's checkAuth is the only place it ever writes a 401, so any
-// other status code means the request carried a valid credential.
+// tracker, but only for a request that reached an endpoint the handler
+// implements with a valid credential: a 401 means checkAuth rejected it,
+// and a 404 means the path was never routed to checkAuth at all (an
+// unimplemented path, such as a follower app's own capability probe,
+// answers 404 before any credential check), so neither tells us a real
+// follower app is configured against this relay.
 func trackClients(next http.Handler, tracker *clientTracker, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusCapturingWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		if sw.status == http.StatusUnauthorized {
+		if sw.status == http.StatusUnauthorized || sw.status == http.StatusNotFound {
 			return
 		}
 		userAgent := r.UserAgent()

@@ -60,8 +60,11 @@ func TestEveryEndpointRequiresAuth(t *testing.T) {
 					q.Set("token", "wrong-token")
 					r.URL.RawQuery = q.Encode()
 				}, http.StatusUnauthorized},
-				{"wrong api-secret header", func(r *http.Request) {
+				{"wrong api-secret header (wrong hash)", func(r *http.Request) {
 					r.Header.Set("api-secret", wrongTokenSHA1Hex)
+				}, http.StatusUnauthorized},
+				{"wrong api-secret header (wrong raw token)", func(r *http.Request) {
+					r.Header.Set("api-secret", "wrong-token")
 				}, http.StatusUnauthorized},
 				{"empty token query param", func(r *http.Request) {
 					q := r.URL.Query()
@@ -73,11 +76,14 @@ func TestEveryEndpointRequiresAuth(t *testing.T) {
 					q.Set("token", testToken)
 					r.URL.RawQuery = q.Encode()
 				}, http.StatusOK},
-				{"right api-secret header", func(r *http.Request) {
+				{"right api-secret header, SHA-1 hex of the token", func(r *http.Request) {
 					r.Header.Set("api-secret", sha1Hex(testToken))
 				}, http.StatusOK},
-				{"right api-secret header, uppercase hex", func(r *http.Request) {
+				{"right api-secret header, SHA-1 hex uppercased", func(r *http.Request) {
 					r.Header.Set("api-secret", strings.ToUpper(sha1Hex(testToken)))
+				}, http.StatusOK},
+				{"right api-secret header, raw token", func(r *http.Request) {
+					r.Header.Set("api-secret", testToken)
 				}, http.StatusOK},
 			}
 

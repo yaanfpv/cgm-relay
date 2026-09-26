@@ -8,16 +8,27 @@ import (
 	"strings"
 )
 
-// checkAuth reports whether r carries a valid credential: either the raw
-// token as a "token" query parameter, or an "api-secret" header equal to
-// the hex-encoded SHA-1 of the token. Both forms are compared in constant
-// time, so neither leaks how much of the credential a caller got right.
+// checkAuth reports whether r carries a valid credential, in any of the
+// three forms Nightscout follower apps send: the raw token as a "token"
+// query parameter (xDrip4iOS, LoopFollow, Nightguard when no API secret is
+// configured), an "api-secret" header holding the hex-encoded SHA-1 of the
+// token (xDrip4iOS, xDrip+), or an "api-secret" header holding the raw
+// token itself (Nightguard's legacy v1 requests, per its own comment that
+// cgm-remote-monitor accepts an access token there). Every comparison is
+// constant-time, so neither leaks how much of the credential a caller got
+// right; the SHA-1 form is compared case-insensitively since hex digests
+// arrive in both cases across these apps.
 func (h *handler) checkAuth(r *http.Request) bool {
 	if token := r.URL.Query().Get("token"); token != "" && constantTimeEqual(token, h.token) {
 		return true
 	}
-	if secret := r.Header.Get("api-secret"); secret != "" && constantTimeEqual(strings.ToLower(secret), h.tokenSHA1Hex) {
-		return true
+	if secret := r.Header.Get("api-secret"); secret != "" {
+		if constantTimeEqual(strings.ToLower(secret), h.tokenSHA1Hex) {
+			return true
+		}
+		if constantTimeEqual(secret, h.token) {
+			return true
+		}
 	}
 	return false
 }

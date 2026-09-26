@@ -28,8 +28,9 @@ func (f fakePollerStatus) Status() poller.Status { return f.status }
 
 // TestClientTrackerRecordsOnlyAuthenticatedRequests checks the exclusion
 // rule directly against trackClients: a request the wrapped handler
-// answers with 401 is never recorded, and every other status code is,
-// keyed by the request's User-Agent.
+// answers with 401 (rejected credential) or 404 (an unimplemented path,
+// never even reaching a credential check) is never recorded, and every
+// other status code is, keyed by the request's User-Agent.
 func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -39,6 +40,7 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 		wantKey     string
 	}{
 		{name: "unauthenticated", status: http.StatusUnauthorized, userAgent: "xDrip4iOS/1.0", wantTracked: false},
+		{name: "an unimplemented path", status: http.StatusNotFound, userAgent: "Nightguard/1.0", wantTracked: false},
 		{name: "authenticated ok", status: http.StatusOK, userAgent: "LoopFollow/1.0", wantTracked: true, wantKey: "LoopFollow/1.0"},
 		{name: "authenticated but a bad request", status: http.StatusBadRequest, userAgent: "Nightguard/1.0", wantTracked: true, wantKey: "Nightguard/1.0"},
 		{name: "authenticated with no user agent", status: http.StatusOK, userAgent: "", wantTracked: true, wantKey: unknownUserAgent},

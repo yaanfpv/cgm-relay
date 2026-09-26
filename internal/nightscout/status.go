@@ -4,7 +4,7 @@ import "net/http"
 
 // statusPayload is the shape of /api/v1/status.json. Follower apps such as
 // xDrip4iOS decode only "status" (its NightscoutStatusPayload type), so
-// that field is the load-bearing one; Settings is required by nightguard
+// that field is the load-bearing one; Settings is required by Nightguard
 // (see statusSettings), and the rest matches the fields real Nightscout
 // sites also report.
 type statusPayload struct {
@@ -15,7 +15,7 @@ type statusPayload struct {
 	Settings        statusSettings `json:"settings"`
 }
 
-// statusSettings carries the site's display unit. nightguard's own
+// statusSettings carries the site's display unit. Nightguard's own
 // NightscoutService.swift (units(from:), called from readStatus and, in
 // turn, from views/PrefsView.swift's add-a-site flow) requires a
 // "settings" object with a "units" string and refuses the site outright
