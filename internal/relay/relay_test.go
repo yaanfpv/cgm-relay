@@ -239,6 +239,61 @@ func TestRunFromStdinConfig(t *testing.T) {
 	}
 }
 
+// TestRunUsesConfiguredLibreLinkUpBaseURL checks Run's own production
+// wiring: with no relay.WithSource override at all, Run itself builds
+// its LibreLinkUp source from cfg.LibreLinkUpBaseURL and reads an entry
+// back over real HTTP, proving the engine actually talks to the fake
+// rather than the official service.
+func TestRunUsesConfiguredLibreLinkUpBaseURL(t *testing.T) {
+	fake := llufake.New(t)
+	readingTime := recentReadingTime()
+	fake.SetGraph(&llufake.Measurement{
+		FactoryTimestamp: readingTime.Format(factoryTimestampLayout),
+		ValueInMgPerDl:   142,
+		TrendArrow:       3,
+	}, nil)
+
+	cfg := testConfig(t)
+	cfg.LibreLinkUpBaseURL = fake.URL
+	addrs, stop := runRelay(t, cfg)
+	defer stop()
+
+	url := fmt.Sprintf("http://%s/api/v1/entries/current.json?token=%s", addrs.Nightscout, cfg.Token)
+	var entries []map[string]any
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		body := mustReadAndClose(t, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: status = %d, body = %s", url, resp.StatusCode, body)
+		}
+		if err := json.Unmarshal(body, &entries); err != nil {
+			t.Fatalf("decode entries: %v (body: %s)", err, body)
+		}
+		if len(entries) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no entry was served within 5s of Run becoming ready")
+	}
+	if got := int(entries[0]["sgv"].(float64)); got != 142 {
+		t.Errorf("sgv = %d, want 142", got)
+	}
+
+	reqs := fake.Requests()
+	if len(reqs) == 0 {
+		t.Fatal("the fake received no requests; Run did not use cfg.LibreLinkUpBaseURL to build its source")
+	}
+	if reqs[0].Path != "/llu/auth/login" {
+		t.Errorf("first request path = %q, want /llu/auth/login", reqs[0].Path)
+	}
+}
+
 // TestRunStatusEndpointTracksAuthenticatedClients drives llufake and two
 // API clients with different User-Agents, then reads /status to check it
 // reports the latest reading and tracks only the authenticated clients.

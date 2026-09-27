@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ const (
 	envKeyPath       = "CGM_RELAY_KEY_PATH"
 	envRetentionDays = "CGM_RELAY_RETENTION_DAYS"
 	envKey           = "CGM_RELAY_KEY"
+	envBaseURL       = "CGM_RELAY_LIBRELINKUP_BASE_URL"
 )
 
 // Load resolves the full runtime configuration: the config file at its
@@ -105,6 +107,9 @@ func readFileConfig(path string) (Config, error) {
 	if cfg.StatusAddr != "" && !IsLoopbackAddr(cfg.StatusAddr) {
 		return Config{}, fmt.Errorf("config: %s: status_addr must be a loopback address, got %q", path, cfg.StatusAddr)
 	}
+	if !IsAllowedLibreLinkUpBaseURL(cfg.LibreLinkUpBaseURL) {
+		return Config{}, fmt.Errorf("config: %s: librelinkup_base_url must be https, or plain http to a loopback address, got %q", path, cfg.LibreLinkUpBaseURL)
+	}
 	return cfg, nil
 }
 
@@ -134,6 +139,12 @@ func applyEnvOverrides(cfg *Config) error {
 	}
 	if v, ok := os.LookupEnv(envKeyPath); ok {
 		cfg.KeyPath = v
+	}
+	if v, ok := os.LookupEnv(envBaseURL); ok {
+		if !IsAllowedLibreLinkUpBaseURL(v) {
+			return fmt.Errorf("config: %s must be https, or plain http to a loopback address, got %q", envBaseURL, v)
+		}
+		cfg.LibreLinkUpBaseURL = v
 	}
 	if v, ok := os.LookupEnv(envRetentionDays); ok {
 		days, err := strconv.Atoi(v)
@@ -196,6 +207,30 @@ func IsLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// IsAllowedLibreLinkUpBaseURL reports whether v is an acceptable
+// librelinkup_base_url value: empty (meaning: talk to the official
+// LibreLinkUp service, unchanged), https to any host, or plain http to a
+// loopback address only. Every other scheme, a malformed URL, and plain
+// http to a non-loopback host are all refused, so this field can never
+// point the relay at a plaintext endpoint on the open network.
+func IsAllowedLibreLinkUpBaseURL(v string) bool {
+	if v == "" {
+		return true
+	}
+	u, err := neturl.Parse(v)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return u.Host != ""
+	case "http":
+		return IsLoopbackAddr(u.Host)
+	default:
+		return false
+	}
 }
 
 // decodeKey base64-decodes s and checks the result is exactly keySize

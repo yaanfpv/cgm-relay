@@ -19,6 +19,10 @@
 //	CGM_RELAY_RETENTION_DAYS  days of readings to keep
 //	CGM_RELAY_KEY             the store encryption key itself, base64,
 //	                          in place of a key file (for containers)
+//	CGM_RELAY_LIBRELINKUP_BASE_URL
+//	                          point sign-in and every fetch at something
+//	                          other than the official LibreLinkUp
+//	                          service; see Config.LibreLinkUpBaseURL
 //
 // See LoadFromReader for the alternate path `cgm-relay serve
 // --config-stdin` uses: a single JSON object piped on stdin, in place of
@@ -66,6 +70,15 @@ type Config struct {
 	// Token is the bearer token a Nightscout-compatible follower app
 	// presents to read from this relay.
 	Token string `json:"token"`
+	// LibreLinkUpBaseURL, when set, points sign-in and every fetch at
+	// something other than the official LibreLinkUp service: a
+	// development-only escape for driving the relay against a fake
+	// instead of a real account. Empty means the official service,
+	// unchanged. IsAllowedLibreLinkUpBaseURL is the one validation every
+	// source (file, environment, stdin) applies: https to any host, or
+	// plain http to a loopback address only, so this can never be
+	// pointed at a plaintext endpoint on the open network.
+	LibreLinkUpBaseURL string `json:"librelinkup_base_url"`
 	// ListenAddr is the host:port the relay's HTTP server listens on.
 	ListenAddr string `json:"listen_addr"`
 	// StatusAddr is the host:port the relay's local status endpoint

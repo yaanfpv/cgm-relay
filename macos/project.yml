@@ -1,0 +1,64 @@
+name: CGMRelay
+options:
+  bundleIdPrefix: com.yaanfpv
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "6"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+
+packages:
+  CGMRelayCore:
+    path: Packages/CGMRelayCore
+
+targets:
+  CGMRelay:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Sources
+    settings:
+      base:
+        PRODUCT_NAME: "CGM Relay"
+        PRODUCT_BUNDLE_IDENTIFIER: com.yaanfpv.cgmrelay
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - package: CGMRelayCore
+    postCompileScripts:
+      - name: "Embed CGM Relay Engine"
+        script: |
+          set -euo pipefail
+          engine_src="${PROJECT_DIR}/.build/engine/cgm-relay"
+          if [ ! -x "${engine_src}" ]; then
+            echo "error: universal engine binary not found at ${engine_src} -- run macos/scripts/build.sh first" >&2
+            exit 1
+          fi
+          dest_dir="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          mkdir -p "${dest_dir}"
+          cp "${engine_src}" "${dest_dir}/cgm-relay"
+          chmod +x "${dest_dir}/cgm-relay"
+        inputFiles:
+          - $(PROJECT_DIR)/.build/engine/cgm-relay
+        outputFiles:
+          - $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/cgm-relay
+
+schemes:
+  CGMRelay:
+    build:
+      targets:
+        CGMRelay: all
+    run:
+      config: Debug
+    archive:
+      config: Release

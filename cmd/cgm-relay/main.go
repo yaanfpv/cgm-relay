@@ -14,7 +14,36 @@ import (
 
 	"github.com/yaanfpv/cgm-relay/internal/config"
 	"github.com/yaanfpv/cgm-relay/internal/relay"
+	"github.com/yaanfpv/cgm-relay/internal/store"
 )
+
+// exitCodeGenericFailure is returned for every serve failure this file does
+// not otherwise distinguish.
+const exitCodeGenericFailure = 1
+
+// exitCodeStoreKeyMismatch is returned when the saved readings cannot be
+// opened with the configured key: a permanent condition, unlike an ordinary
+// crash, so a caller supervising this process (a menu bar app, say) can
+// tell "restarting will not help" apart from every other failure by exit
+// code alone, with no need to parse stderr. The macOS menu bar app's
+// EngineSupervisor.storeKeyMismatchExitCode must always agree with this
+// value.
+const exitCodeStoreKeyMismatch = 3
+
+// exitCodeStoreInUse is returned when another process already holds the
+// saved readings open: also permanent from this process's own point of
+// view, since restarting will keep losing the same race, though the other
+// copy quitting can resolve it without either process changing anything.
+// The macOS menu bar app's EngineSupervisor.storeInUseExitCode must
+// always agree with this value.
+const exitCodeStoreInUse = 4
+
+// exitCodeStoreDamaged is returned when the saved readings file exists but
+// cannot be read as a database at all: also permanent, since the same
+// file will fail to open again every time. The macOS menu bar app's
+// EngineSupervisor.storeDamagedExitCode must always agree with this
+// value.
+const exitCodeStoreDamaged = 5
 
 func main() {
 	if len(os.Args) < 2 {
@@ -48,7 +77,8 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  serve   sign in, poll for readings, and serve the Nightscout API")
 	fmt.Fprintln(w, "          --config-stdin  read the configuration as one JSON object")
 	fmt.Fprintln(w, "                          from stdin, in place of the config file and")
-	fmt.Fprintln(w, "                          environment")
+	fmt.Fprintln(w, "                          environment, and keep running only until")
+	fmt.Fprintln(w, "                          stdin closes")
 }
 
 // runSetup implements the setup command.
@@ -67,16 +97,26 @@ func runSetup(args []string) {
 // from stdin as a single JSON object when --config-stdin is set,
 // otherwise from the config file and environment as Load describes -- and
 // runs the relay until an interrupt or termination signal asks it to
-// stop, which it treats as a clean shutdown rather than a failure.
+// stop, which it treats as a clean shutdown rather than a failure. With
+// --config-stdin, stdin itself is a second way to be told to stop: the
+// caller (a menu bar app, say) holds it open for as long as it means the
+// engine to keep running, so its own end reaches the engine even when
+// nothing sends it a signal.
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	configStdin := fs.Bool("config-stdin", false, "read the configuration as one JSON object from stdin, in place of the config file and environment")
+	configStdin := fs.Bool("config-stdin", false, "read the configuration as one JSON object from stdin, in place of the config file and environment, and keep running only until stdin closes")
 	fs.Parse(args)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	var cfg config.Config
 	var loadErr error
 	if *configStdin {
 		cfg, loadErr = config.LoadFromReader(os.Stdin)
+		if loadErr == nil {
+			watchStdinForShutdown(os.Stdin, os.Stderr, stop)
+		}
 	} else {
 		cfg, loadErr = config.Load()
 	}
@@ -85,11 +125,43 @@ func runServe(args []string) {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	if err := relay.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(os.Stderr, "cgm-relay: serve: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCodeForServeError(os.Stderr, err))
 	}
+}
+
+// exitCodeForServeError writes the line a person running `serve` should
+// see for err to w, and returns the process exit code for it. Split out
+// from runServe, which only calls os.Exit, so the choice itself is
+// exercised by a test rather than only by a subprocess.
+func exitCodeForServeError(w io.Writer, err error) int {
+	switch {
+	case errors.Is(err, store.ErrWrongKey):
+		fmt.Fprintln(w, "cgm-relay: serve: the saved readings cannot be opened with this key")
+		return exitCodeStoreKeyMismatch
+	case errors.Is(err, store.ErrInUse):
+		fmt.Fprintln(w, "cgm-relay: serve: the saved readings are already in use by another copy of CGM Relay")
+		return exitCodeStoreInUse
+	case errors.Is(err, store.ErrDamaged):
+		fmt.Fprintln(w, "cgm-relay: serve: the saved readings file is damaged and cannot be read")
+		return exitCodeStoreDamaged
+	default:
+		fmt.Fprintf(w, "cgm-relay: serve: %v\n", err)
+		return exitCodeGenericFailure
+	}
+}
+
+// watchStdinForShutdown reads r to EOF in the background, says so on
+// logw, and then calls stop. r is the caller's own stdin under
+// --config-stdin: the caller keeps it open for as long as it means the
+// engine to run, so its own EOF -- a clean close, a crash, or a force
+// quit, the OS closes every pipe a dead process still held open -- is the
+// same "shut down" signal stop already carries for SIGTERM. The line on
+// logw is what tells someone who piped in a file why the relay stopped.
+func watchStdinForShutdown(r io.Reader, logw io.Writer, stop func()) {
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		fmt.Fprintln(logw, "cgm-relay: serve: stdin closed, shutting down")
+		stop()
+	}()
 }

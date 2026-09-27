@@ -116,7 +116,11 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 
 	source := st.source
 	if source == nil {
-		source = librelinkup.New(cfg.LibreLinkUpEmail, cfg.LibreLinkUpPassword)
+		var sourceOpts []librelinkup.Option
+		if cfg.LibreLinkUpBaseURL != "" {
+			sourceOpts = append(sourceOpts, librelinkup.WithBaseURL(cfg.LibreLinkUpBaseURL))
+		}
+		source = librelinkup.New(cfg.LibreLinkUpEmail, cfg.LibreLinkUpPassword, sourceOpts...)
 	}
 
 	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour

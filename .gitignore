@@ -16,6 +16,14 @@
 *.out
 coverage.*
 
+# macOS menu bar app build artifacts (macos/) -- project.yml and the
+# Swift sources are tracked; everything XcodeGen or Xcode itself
+# generates from them is not.
+/macos/*.xcodeproj/
+/macos/.build/
+/macos/Packages/CGMRelayCore/.build/
+/macos/Packages/CGMRelayCore/.swiftpm/
+
 # OS and editor files
 .DS_Store
 Thumbs.db

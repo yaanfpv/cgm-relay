@@ -475,6 +475,154 @@ func TestLoadRefusesNonLoopbackStatusAddr(t *testing.T) {
 	}
 }
 
+// TestLoadLibreLinkUpBaseURL checks that librelinkup_base_url defaults to
+// empty (the official LibreLinkUp service, unchanged) and can be set from
+// either the file or the environment, with the environment winning when
+// both are present.
+func TestLoadLibreLinkUpBaseURL(t *testing.T) {
+	t.Run("absent defaults to empty", func(t *testing.T) {
+		withCleanEnv(t)
+		t.Setenv("CGM_RELAY_EMAIL", "person@example.test")
+		t.Setenv("CGM_RELAY_PASSWORD", "some-password")
+		t.Setenv("CGM_RELAY_TOKEN", "some-token")
+		t.Setenv("CGM_RELAY_KEY", testKeyBase64('K'))
+
+		got, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got.LibreLinkUpBaseURL != "" {
+			t.Errorf("LibreLinkUpBaseURL = %q, want empty", got.LibreLinkUpBaseURL)
+		}
+	})
+
+	t.Run("set from the file", func(t *testing.T) {
+		withCleanEnv(t)
+		paths, err := config.DefaultPaths()
+		if err != nil {
+			t.Fatalf("DefaultPaths: %v", err)
+		}
+		writeConfigFile(t, paths.ConfigFile, config.Config{
+			LibreLinkUpEmail:    "person@example.test",
+			LibreLinkUpPassword: "some-password",
+			Token:               "some-token",
+			LibreLinkUpBaseURL:  "https://fake.example.test",
+			RetentionDays:       30,
+		})
+		writeKeyFile(t, paths.KeyFile, 'K')
+
+		got, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got.LibreLinkUpBaseURL != "https://fake.example.test" {
+			t.Errorf("LibreLinkUpBaseURL = %q, want %q", got.LibreLinkUpBaseURL, "https://fake.example.test")
+		}
+	})
+
+	t.Run("environment wins over the file", func(t *testing.T) {
+		withCleanEnv(t)
+		paths, err := config.DefaultPaths()
+		if err != nil {
+			t.Fatalf("DefaultPaths: %v", err)
+		}
+		writeConfigFile(t, paths.ConfigFile, config.Config{
+			LibreLinkUpEmail:    "person@example.test",
+			LibreLinkUpPassword: "some-password",
+			Token:               "some-token",
+			LibreLinkUpBaseURL:  "https://file.example.test",
+			RetentionDays:       30,
+		})
+		writeKeyFile(t, paths.KeyFile, 'K')
+		t.Setenv("CGM_RELAY_LIBRELINKUP_BASE_URL", "http://127.0.0.1:9999")
+
+		got, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got.LibreLinkUpBaseURL != "http://127.0.0.1:9999" {
+			t.Errorf("LibreLinkUpBaseURL = %q, want %q", got.LibreLinkUpBaseURL, "http://127.0.0.1:9999")
+		}
+	})
+}
+
+// TestLoadRefusesInvalidLibreLinkUpBaseURL checks that a librelinkup_base_url
+// this relay is not willing to sign in and fetch against is refused
+// outright, from either the file or the environment, naming the setting.
+func TestLoadRefusesInvalidLibreLinkUpBaseURL(t *testing.T) {
+	cases := []struct {
+		name      string
+		fileValue string // set on the file's Config; ignored when envValue != ""
+		envValue  string // "" = do not set the environment override
+		wantErr   string
+	}{
+		{name: "file plain http to a non-loopback host", fileValue: "http://10.0.0.5:8080", wantErr: "librelinkup_base_url"},
+		{name: "file unsupported scheme", fileValue: "ftp://example.test", wantErr: "librelinkup_base_url"},
+		{name: "file malformed URL", fileValue: "not a url", wantErr: "librelinkup_base_url"},
+		{name: "env plain http to a non-loopback host", envValue: "http://192.168.1.5:8080", wantErr: "CGM_RELAY_LIBRELINKUP_BASE_URL"},
+		{name: "env unsupported scheme", envValue: "ftp://example.test", wantErr: "CGM_RELAY_LIBRELINKUP_BASE_URL"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			withCleanEnv(t)
+			paths, err := config.DefaultPaths()
+			if err != nil {
+				t.Fatalf("DefaultPaths: %v", err)
+			}
+			cfg := config.Config{
+				LibreLinkUpEmail:    "person@example.test",
+				LibreLinkUpPassword: "some-password",
+				Token:               "some-token",
+				RetentionDays:       30,
+			}
+			if c.fileValue != "" {
+				cfg.LibreLinkUpBaseURL = c.fileValue
+			}
+			writeConfigFile(t, paths.ConfigFile, cfg)
+			writeKeyFile(t, paths.KeyFile, 'K')
+			if c.envValue != "" {
+				t.Setenv("CGM_RELAY_LIBRELINKUP_BASE_URL", c.envValue)
+			}
+
+			_, err = config.Load()
+			if err == nil {
+				t.Fatal("Load succeeded with a disallowed librelinkup_base_url, want an error")
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("error = %v, want it to mention %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestIsAllowedLibreLinkUpBaseURL checks the validation Load, applyEnvOverrides
+// and LoadFromReader all share: empty, https to any host, and plain http
+// to a loopback address are allowed; every other scheme, a malformed URL,
+// and plain http to a non-loopback host are refused.
+func TestIsAllowedLibreLinkUpBaseURL(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"", true},
+		{"https://api.libreview.io", true},
+		{"https://fake.example.test", true},
+		{"http://127.0.0.1:9999", true},
+		{"http://localhost:9999", true},
+		{"http://[::1]:9999", true},
+		{"http://10.0.0.5:9999", false},
+		{"http://example.test", false},
+		{"ftp://example.test", false},
+		{"not a url", false},
+		{"api.libreview.io", false}, // no scheme at all
+	}
+	for _, c := range cases {
+		if got := config.IsAllowedLibreLinkUpBaseURL(c.value); got != c.want {
+			t.Errorf("IsAllowedLibreLinkUpBaseURL(%q) = %v, want %v", c.value, got, c.want)
+		}
+	}
+}
+
 // TestIsLoopbackAddr checks the loopback classifier Load and relay.Run
 // both share, across the forms a config value or an environment variable
 // can actually take.
@@ -525,6 +673,9 @@ func assertConfigEqual(t *testing.T, got, want config.Config) {
 	}
 	if got.RetentionDays != want.RetentionDays {
 		t.Errorf("RetentionDays = %d, want %d", got.RetentionDays, want.RetentionDays)
+	}
+	if got.LibreLinkUpBaseURL != want.LibreLinkUpBaseURL {
+		t.Errorf("LibreLinkUpBaseURL = %q, want %q", got.LibreLinkUpBaseURL, want.LibreLinkUpBaseURL)
 	}
 	if string(got.Key) != string(want.Key) {
 		t.Errorf("Key = %x, want %x", got.Key, want.Key)

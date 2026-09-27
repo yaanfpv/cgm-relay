@@ -1,9 +1,7 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -21,15 +19,17 @@ import (
 // "key" instead, and the returned Config's KeyPath is left empty.
 // Defaults and every validation Load applies -- the default database path
 // under DefaultPaths, the required fields, the key length, retention of
-// at least one day, and a loopback-only status address -- apply the same
-// way here, sharing the same helpers. A field name it does not recognise,
-// or anything after the object, is refused rather than ignored.
+// at least one day, a loopback-only status address, and an allowed
+// LibreLinkUp base URL -- apply the same way here, sharing the same
+// helpers. A field name it does not recognise is refused rather than
+// ignored.
+//
+// LoadFromReader decodes exactly one JSON value and returns as soon as it
+// has one: it never reads r to EOF first. r is the caller's own stdin, a
+// lifeline held open for as long as the caller is running; its own later
+// EOF is a separate shutdown signal the caller (cmd/cgm-relay) watches
+// for, not something this decode step waits for or refuses.
 func LoadFromReader(r io.Reader) (Config, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return Config{}, fmt.Errorf("config: read stdin config: %w", err)
-	}
-
 	// The caller is a program rather than a person editing a file, so a
 	// misspelt field is a bug on its side; ignoring it would fall back to a
 	// default without a word (a misspelt listen_addr binds loopback only).
@@ -41,13 +41,10 @@ func LoadFromReader(r io.Reader) (Config, error) {
 		Key           *string `json:"key"`
 		RetentionDays *int    `json:"retention_days"`
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
 		return Config{}, fmt.Errorf("config: parse stdin config: %w", err)
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return Config{}, errors.New("config: parse stdin config: unexpected data after the JSON object")
 	}
 
 	cfg := in.Config
@@ -60,6 +57,9 @@ func LoadFromReader(r io.Reader) (Config, error) {
 	}
 	if cfg.StatusAddr != "" && !IsLoopbackAddr(cfg.StatusAddr) {
 		return Config{}, fmt.Errorf("config: stdin config: status_addr must be a loopback address, got %q", cfg.StatusAddr)
+	}
+	if !IsAllowedLibreLinkUpBaseURL(cfg.LibreLinkUpBaseURL) {
+		return Config{}, fmt.Errorf("config: stdin config: librelinkup_base_url must be https, or plain http to a loopback address, got %q", cfg.LibreLinkUpBaseURL)
 	}
 
 	// An empty path would open SQLite's temporary database, which is

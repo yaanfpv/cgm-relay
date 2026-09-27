@@ -3,10 +3,12 @@ package config_test
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yaanfpv/cgm-relay/internal/config"
 )
@@ -75,6 +77,41 @@ func TestLoadFromReader(t *testing.T) {
 		assertConfigEqual(t, got, want)
 	})
 
+	t.Run("librelinkup_base_url is optional, absent means the official service", func(t *testing.T) {
+		input := fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "key": %q
+}`, testKeyBase64('K'))
+
+		got, err := config.LoadFromReader(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.LibreLinkUpBaseURL != "" {
+			t.Errorf("LibreLinkUpBaseURL = %q, want empty", got.LibreLinkUpBaseURL)
+		}
+	})
+
+	t.Run("librelinkup_base_url points the engine at a fake", func(t *testing.T) {
+		input := fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "librelinkup_base_url": "http://127.0.0.1:9999",
+  "key": %q
+}`, testKeyBase64('K'))
+
+		got, err := config.LoadFromReader(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.LibreLinkUpBaseURL != "http://127.0.0.1:9999" {
+			t.Errorf("LibreLinkUpBaseURL = %q, want %q", got.LibreLinkUpBaseURL, "http://127.0.0.1:9999")
+		}
+	})
+
 	t.Run("key_path is ignored even when it names a real file with a different key", func(t *testing.T) {
 		keyFile := filepath.Join(t.TempDir(), "key")
 		if err := os.WriteFile(keyFile, []byte(testKeyBase64('D')+"\n"), 0o600); err != nil {
@@ -122,6 +159,32 @@ func TestLoadFromReader(t *testing.T) {
 		}
 		if got.DatabasePath != paths.DatabaseFile {
 			t.Errorf("DatabasePath = %q, want %q (an empty path is SQLite's temporary database, lost on every restart)", got.DatabasePath, paths.DatabaseFile)
+		}
+	})
+
+	t.Run("decodes as soon as it has one object, without waiting for the reader to reach EOF", func(t *testing.T) {
+		r, w := io.Pipe()
+		t.Cleanup(func() { w.Close() })
+
+		input := fmt.Sprintf(`{"librelinkup_email": "person@example.test", "librelinkup_password": "some-password", "token": "some-token", "key": %q}`, testKeyBase64('K'))
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := config.LoadFromReader(r)
+			done <- err
+		}()
+
+		if _, err := w.Write([]byte(input)); err != nil {
+			t.Fatalf("write to pipe: %v", err)
+		}
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("LoadFromReader: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("LoadFromReader waited for EOF instead of returning once it had decoded one object; the pipe was never closed")
 		}
 	})
 }
@@ -192,11 +255,11 @@ func TestLoadFromReaderIgnoresFileAndEnvironment(t *testing.T) {
 }
 
 // TestLoadFromReaderRefusesInvalid checks that malformed JSON, an
-// unrecognised field, data after the object, each required field missing
-// in turn, a short key, a non-loopback status address, and an invalid
-// retention are all refused before anything binds, naming the field, and
-// that no case's error ever carries the password, the email, or the valid
-// encryption key used elsewhere in the same table.
+// unrecognised field, each required field missing in turn, a short key, a
+// non-loopback status address, and an invalid retention are all refused
+// before anything binds, naming the field, and that no case's error ever
+// carries the password, the email, or the valid encryption key used
+// elsewhere in the same table.
 func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 	const email = "leak-check@example.test"
 	const password = "s3cr3t-should-never-appear-in-any-error"
@@ -217,11 +280,6 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 			name:    "unknown field",
 			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "listen_adr": "100.64.0.1:1337", "key": %q}`, email, password, goodKey),
 			wantErr: "listen_adr",
-		},
-		{
-			name:    "data after the object",
-			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "key": %q} {}`, email, password, goodKey),
-			wantErr: "after the JSON object",
 		},
 		{
 			name:    "missing email",
@@ -262,6 +320,16 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 			name:    "retention negative",
 			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "retention_days": -5, "key": %q}`, email, password, goodKey),
 			wantErr: "retention_days",
+		},
+		{
+			name:    "librelinkup_base_url plain http to a non-loopback host",
+			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "librelinkup_base_url": "http://10.0.0.5:8080", "key": %q}`, email, password, goodKey),
+			wantErr: "librelinkup_base_url",
+		},
+		{
+			name:    "librelinkup_base_url unsupported scheme",
+			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "librelinkup_base_url": "ftp://example.test", "key": %q}`, email, password, goodKey),
+			wantErr: "librelinkup_base_url",
 		},
 	}
 	for _, c := range cases {
