@@ -101,6 +101,7 @@ func runRelay(t *testing.T, cfg config.Config, opts ...relay.Option) (relay.Addr
 // TestRunServesAnEntryOverHTTP runs the relay in-process against llufake
 // and reads an entry back over real HTTP with the token.
 func TestRunServesAnEntryOverHTTP(t *testing.T) {
+	t.Parallel()
 	fake := llufake.New(t)
 	readingTime := recentReadingTime()
 	fake.SetGraph(&llufake.Measurement{
@@ -182,6 +183,7 @@ func TestRunServesAnEntryOverHTTP(t *testing.T) {
 // credentials, so the email and password mapping is TestLoadFromReader's
 // to prove.
 func TestRunFromStdinConfig(t *testing.T) {
+	t.Parallel()
 	fake := llufake.New(t)
 	readingTime := recentReadingTime()
 	fake.SetGraph(&llufake.Measurement{
@@ -245,6 +247,7 @@ func TestRunFromStdinConfig(t *testing.T) {
 // back over real HTTP, proving the engine actually talks to the fake
 // rather than the official service.
 func TestRunUsesConfiguredLibreLinkUpBaseURL(t *testing.T) {
+	t.Parallel()
 	fake := llufake.New(t)
 	readingTime := recentReadingTime()
 	fake.SetGraph(&llufake.Measurement{
@@ -298,6 +301,7 @@ func TestRunUsesConfiguredLibreLinkUpBaseURL(t *testing.T) {
 // API clients with different User-Agents, then reads /status to check it
 // reports the latest reading and tracks only the authenticated clients.
 func TestRunStatusEndpointTracksAuthenticatedClients(t *testing.T) {
+	t.Parallel()
 	fake := llufake.New(t)
 	readingTime := recentReadingTime()
 	fake.SetGraph(&llufake.Measurement{
@@ -405,6 +409,7 @@ func getWithUserAgent(t *testing.T, url, userAgent string) []byte {
 // client that simply dials the loopback address, as Go's own http.Client
 // does -- is still answered normally.
 func TestRunStatusEndpointRefusesSpoofedHost(t *testing.T) {
+	t.Parallel()
 	fake := llufake.New(t)
 	readingTime := recentReadingTime()
 	fake.SetGraph(&llufake.Measurement{
@@ -435,7 +440,7 @@ func TestRunStatusEndpointRefusesSpoofedHost(t *testing.T) {
 			if resp.StatusCode != http.StatusForbidden {
 				t.Errorf("Host %q: status = %d, want 403 (body: %s)", spoofedHost, resp.StatusCode, body)
 			}
-			if strings.Contains(string(body), "177") {
+			if relay.ContainsValue(string(body), "177") {
 				t.Errorf("Host %q: refused response body carries the reading value: %s", spoofedHost, body)
 			}
 		})
@@ -461,6 +466,7 @@ func TestRunStatusEndpointRefusesSpoofedHost(t *testing.T) {
 // unspecified bind ("0.0.0.0" vs "::" vs "[::]") is a platform detail of
 // the network stack, not something Run controls.
 func TestRunBindsExactlyConfiguredAddress(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name         string
 		addr         string
@@ -471,6 +477,7 @@ func TestRunBindsExactlyConfiguredAddress(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			fake := llufake.New(t)
 			source := librelinkup.New("person@example.test", "some-password", librelinkup.WithBaseURL(fake.URL))
 
@@ -518,7 +525,9 @@ func (s *syncBuffer) Len() int {
 // run ever writes the account password, the Nightscout token, or the
 // store key to the log.
 func TestRunLogsNoSecrets(t *testing.T) {
+	t.Parallel()
 	t.Run("failing sign-in", func(t *testing.T) {
+		t.Parallel()
 		fake := llufake.New(t)
 		fake.RejectCredentials()
 		source := librelinkup.New("person@example.test", "leak-check-password-should-never-log", librelinkup.WithBaseURL(fake.URL))
@@ -537,6 +546,7 @@ func TestRunLogsNoSecrets(t *testing.T) {
 	})
 
 	t.Run("normal run", func(t *testing.T) {
+		t.Parallel()
 		fake := llufake.New(t)
 		readingTime := recentReadingTime()
 		fake.SetGraph(&llufake.Measurement{
@@ -555,7 +565,7 @@ func TestRunLogsNoSecrets(t *testing.T) {
 			t.Fatal("no log output at all; the startup lines should always be written")
 		}
 		assertNoSecrets(t, logs.String(), cfg)
-		if strings.Contains(logs.String(), "111") {
+		if relay.ContainsValue(logs.String(), "111") {
 			t.Error("log output carries the synthetic glucose value")
 		}
 	})

@@ -3,7 +3,6 @@ package nightscout
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -95,7 +94,7 @@ func (h *handler) handleEntries(w http.ResponseWriter, r *http.Request) {
 	if count == 0 {
 		// Nothing asked for, so nothing to read: nothing is decrypted and
 		// the store is never queried.
-		writeJSON(w, []entry{})
+		writeJSON(w, r, []entry{})
 		return
 	}
 
@@ -120,7 +119,7 @@ func (h *handler) handleEntries(w http.ResponseWriter, r *http.Request) {
 	for _, rd := range readings {
 		entries = append(entries, entryOf(rd))
 	}
-	writeJSON(w, entries)
+	writeJSON(w, r, entries)
 }
 
 // entriesRangeQuery builds the exact store.RangeQuery for q's find[date]
@@ -232,7 +231,7 @@ func (h *handler) handleCurrent(w http.ResponseWriter, r *http.Request) {
 	for _, rd := range readings {
 		entries = append(entries, entryOf(rd))
 	}
-	writeJSON(w, entries)
+	writeJSON(w, r, entries)
 }
 
 // parseMillisParam parses q's value for key as a millisecond Unix
@@ -251,13 +250,22 @@ func parseMillisParam(q url.Values, key string) (ms int64, present bool, err err
 }
 
 // writeJSON writes v as a JSON response body with the standard Nightscout
-// content type.
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		// The header and part of the body may already be on the wire, so
-		// the client just sees a truncated response; logging is all that
-		// is left to do about it.
-		log.Printf("nightscout: encode response: %v", err)
+// content type, gzip-encoded when r's combined Accept-Encoding accepts
+// gzip and the encoded body is large enough for compression to be worth
+// its own container overhead (see writeMaybeGzipped in compress.go). v is
+// marshaled to bytes before anything is written to w, so a marshal
+// failure becomes a clean 500 instead of a response already partly on
+// the wire, the way json.NewEncoder writing directly to w once did. The
+// trailing newline json.NewEncoder.Encode always appends is added back
+// here explicitly, so switching away from it changes nothing about the
+// bytes a client that never asks for gzip receives.
+func writeJSON(w http.ResponseWriter, r *http.Request, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "nightscout: encode response: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
+	body = append(body, '\n')
+	w.Header().Set("Content-Type", "application/json")
+	writeMaybeGzipped(w, r, body)
 }

@@ -42,6 +42,7 @@ var nightscoutEndpoints = []string{
 // get 401, and that the token query parameter and the api-secret header
 // each independently let a request through when correct.
 func TestEveryEndpointRequiresAuth(t *testing.T) {
+	t.Parallel()
 	for _, path := range nightscoutEndpoints {
 		t.Run(path, func(t *testing.T) {
 			h, err := nightscout.New(&fakeStore{}, testToken, nil)

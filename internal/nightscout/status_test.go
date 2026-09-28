@@ -22,6 +22,7 @@ type xdripStatusPayload struct {
 // rather than the real wall clock, so serverTimeEpoch is checkable
 // exactly.
 func TestStatusJSON(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	h, err := nightscout.New(&fakeStore{}, testToken, fixedClock(now))
 	if err != nil {
@@ -71,6 +72,7 @@ type nightguardStatusPayload struct {
 // "Nightscout did not return configured glucose units." and rejects the
 // site in views/PrefsView.swift's add-a-site flow.
 func TestStatusJSONCarriesNightguardUnits(t *testing.T) {
+	t.Parallel()
 	h, err := nightscout.New(&fakeStore{}, testToken, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -101,6 +103,7 @@ func TestStatusJSONCarriesNightguardUnits(t *testing.T) {
 // a missing "authorized" object as a read-only site rather than a
 // rejection, and never requires any other field.
 func TestStatusJSONDecodesAsAnObjectForLoopFollow(t *testing.T) {
+	t.Parallel()
 	h, err := nightscout.New(&fakeStore{}, testToken, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -123,6 +126,7 @@ func TestStatusJSONDecodesAsAnObjectForLoopFollow(t *testing.T) {
 // that the request does not throw, discarding the body, so a 200 with any
 // body is a shape it accepts.
 func TestExperimentsTest(t *testing.T) {
+	t.Parallel()
 	h, err := nightscout.New(&fakeStore{}, testToken, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -138,6 +142,7 @@ func TestExperimentsTest(t *testing.T) {
 // NightscoutImportService decodes all three as), and that an empty relay
 // answers with an empty array rather than an error.
 func TestEmptyCollectionEndpoints(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{
 		"/api/v1/treatments.json",
 		"/api/v1/devicestatus.json",

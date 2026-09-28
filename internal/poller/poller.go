@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/store"
 )
 
 // Interval is how often Run requests a fresh reading.
@@ -25,13 +26,12 @@ const PruneInterval = 24 * time.Hour
 const DefaultFetchTimeout = 45 * time.Second
 
 // Store is the subset of a reading store that Run needs: enough to persist
-// a fetched reading and enforce retention, without depending on the
-// concrete store package.
+// one poll cycle's readings and enforce retention.
 type Store interface {
-	// InsertCurrent stores r as the account's current reading.
-	InsertCurrent(ctx context.Context, r cgm.Reading) (inserted bool, err error)
-	// InsertHistory stores r as a history reading, filling a gap.
-	InsertHistory(ctx context.Context, r cgm.Reading) (inserted bool, err error)
+	// StorePoll stores one poll cycle's history readings and current
+	// reading, if any; see store.Store.StorePoll for exactly how each
+	// reading's own outcome is decided.
+	StorePoll(ctx context.Context, history []cgm.Reading, current *cgm.Reading) (store.PollResult, error)
 	// Prune removes readings older than retention, measured back from now.
 	Prune(ctx context.Context, now time.Time, retention time.Duration) (removed int64, err error)
 }

@@ -10,10 +10,11 @@ import (
 )
 
 // TestRunStoresOneCurrentReadingPerTick drives ten ticks past Run's
-// initial, immediate fetch and checks that InsertCurrent was called
+// initial, immediate fetch and checks that the current reading was stored
 // exactly once per tick, each with a distinct reading, so neither a missed
 // tick nor a duplicate store can hide in the count.
 func TestRunStoresOneCurrentReadingPerTick(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 	src := &fakeSource{respond: func(call int) sourceResponse {
@@ -47,7 +48,7 @@ func TestRunStoresOneCurrentReadingPerTick(t *testing.T) {
 	got := st.currentTimes()
 	const wantCalls = ticks + 1 // the immediate fetch, plus one per tick
 	if len(got) != wantCalls {
-		t.Fatalf("InsertCurrent called %d times, want %d", len(got), wantCalls)
+		t.Fatalf("current reading stored %d times, want %d", len(got), wantCalls)
 	}
 	seen := map[time.Time]bool{}
 	for _, ts := range got {
@@ -58,11 +59,12 @@ func TestRunStoresOneCurrentReadingPerTick(t *testing.T) {
 	}
 }
 
-// TestRunRoutesHistoryAndSkipsNilCurrent checks that history readings only
-// ever go through InsertHistory, that a nil current reading stores nothing
-// and is not treated as an error, and that a later tick with a real
-// current reading still stores normally.
+// TestRunRoutesHistoryAndSkipsNilCurrent checks that history readings are
+// passed through as StorePoll's history slice, that a nil current reading
+// stores nothing and is not treated as an error, and that a later tick
+// with a real current reading still stores normally.
 func TestRunRoutesHistoryAndSkipsNilCurrent(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 
@@ -94,10 +96,10 @@ func TestRunRoutesHistoryAndSkipsNilCurrent(t *testing.T) {
 	}
 
 	if got := st.historyTimes(); len(got) != 2 {
-		t.Fatalf("InsertHistory called %d times, want 2 (from %v)", len(got), got)
+		t.Fatalf("history readings stored %d times, want 2 (from %v)", len(got), got)
 	}
 	if got := st.currentTimes(); len(got) != 1 || got[0] != nextReading {
-		t.Fatalf("InsertCurrent calls = %v, want exactly one at %s", got, nextReading)
+		t.Fatalf("current reading stores = %v, want exactly one at %s", got, nextReading)
 	}
 	if status := p.Status(); status.LastError != "" {
 		t.Errorf("Status().LastError = %q after a nil current reading, want empty (a nil current is not an error)", status.LastError)

@@ -73,16 +73,28 @@ func (h *handler) registerRoutes() {
 	h.mux.HandleFunc("GET /api/v1/profile", h.handleEmptyList)
 }
 
-// ServeHTTP routes the request, then authenticates it before running the
-// matched endpoint. A path this handler does not implement is answered
-// with 404 before any credential is checked, matching a real Nightscout
-// server: some follower apps (e.g. Nightguard, probing /api/v3/version to
-// decide whether to fall back to this v1 subset) treat any response other
-// than 404 or 405 to an unimplemented path as a fatal error, so answering
-// an unknown path with 401 would break them outright. Every implemented
-// endpoint still requires a valid credential; a request that fails
-// checkAuth never reaches its handler.
+// ServeHTTP sets Vary: Accept-Encoding on every response this handler
+// writes, whatever its outcome, before routing the request and
+// authenticating it. Setting it here, first, in the one place every
+// request passes through, means a future 404, auth-failure or handler
+// error branch cannot add a response that misses it; nothing downstream
+// sets it again. It is owed on every response, not only a compressed
+// one, because the decision writeMaybeGzipped makes depends on this
+// header: without Vary, a cache could key a response on the URL alone
+// and later serve a gzip body to a client that never asked for one, or
+// vice versa, on any status code.
+//
+// After that, the request is routed, then authenticated before running
+// the matched endpoint. A path this handler does not implement is
+// answered with 404 before any credential is checked, matching a real
+// Nightscout server: some follower apps (e.g. Nightguard, probing
+// /api/v3/version to decide whether to fall back to this v1 subset)
+// treat any response other than 404 or 405 to an unimplemented path as a
+// fatal error, so answering an unknown path with 401 would break them
+// outright. Every implemented endpoint still requires a valid
+// credential; a request that fails checkAuth never reaches its handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Vary", "Accept-Encoding")
 	if _, pattern := h.mux.Handler(r); pattern == "" {
 		http.NotFound(w, r)
 		return

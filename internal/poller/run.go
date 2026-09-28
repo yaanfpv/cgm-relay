@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/store"
 )
 
 // authRetryInterval bounds how often Run retries after the source reports
@@ -77,16 +78,24 @@ func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int) (time
 	*rateLimitAttempt = 0
 	p.recordSuccess()
 
-	for _, r := range history {
-		if _, insertErr := p.store.InsertHistory(ctx, r); insertErr != nil {
-			p.recordStoreError()
+	result, storeErr := p.store.StorePoll(ctx, history, current)
+	if storeErr != nil {
+		// The whole write failed -- nothing from this cycle was stored.
+		// The per-row outcomes in result are meaningless here (see
+		// StorePoll), so there is nothing left to check them against.
+		p.recordStoreError()
+	} else {
+		for _, hr := range result.History {
+			if hr.Outcome == store.PollInvalid {
+				p.recordStoreError()
+			}
 		}
-	}
-	if current != nil {
-		if _, insertErr := p.store.InsertCurrent(ctx, *current); insertErr != nil {
-			p.recordStoreError()
-		} else {
-			p.recordStored(*current)
+		if current != nil && result.Current != nil {
+			if result.Current.Outcome == store.PollInvalid {
+				p.recordStoreError()
+			} else {
+				p.recordStored(*current)
+			}
 		}
 	}
 

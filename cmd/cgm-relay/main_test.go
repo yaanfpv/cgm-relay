@@ -26,6 +26,7 @@ import (
 // caller wiring cgm-relay in from a menu bar app can discover the flag
 // without reading source.
 func TestUsageListsConfigStdinFlag(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	printUsageTo(&buf)
 	if !strings.Contains(buf.String(), "--config-stdin") {
@@ -41,6 +42,7 @@ func TestUsageListsConfigStdinFlag(t *testing.T) {
 // the way a caller's own crash or force quit reaches the engine even
 // though no signal was ever sent.
 func TestConfigStdinLifelineShutsDownRelay(t *testing.T) {
+	t.Parallel()
 	fake := llufake.New(t)
 	readingTime := time.Now().UTC().Truncate(time.Second)
 	fake.SetGraph(&llufake.Measurement{
@@ -151,6 +153,7 @@ func TestConfigStdinLifelineShutsDownRelay(t *testing.T) {
 // other serve failure uses, and a plain line naming the problem with
 // neither key anywhere in it.
 func TestExitCodeForServeErrorDistinguishesStoreKeyMismatch(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "readings.db")
 	right := bytes.Repeat([]byte{'R'}, 32)
 	wrong := bytes.Repeat([]byte{'W'}, 32)
@@ -208,6 +211,7 @@ func TestExitCodeForServeErrorDistinguishesStoreKeyMismatch(t *testing.T) {
 // lose -- is reported with its own exit code and a plain line naming the
 // problem in terms of another copy of the app, never "lock" or "flock".
 func TestExitCodeForServeErrorDistinguishesStoreInUse(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "readings.db")
 	key := bytes.Repeat([]byte{'I'}, 32)
 
@@ -259,6 +263,7 @@ func TestExitCodeForServeErrorDistinguishesStoreInUse(t *testing.T) {
 // is reported with its own exit code and a plain line, apart from the
 // exit code 1 an ordinary crash gets.
 func TestExitCodeForServeErrorDistinguishesStoreDamaged(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "readings.db")
 	if err := os.WriteFile(dbPath, bytes.Repeat([]byte{0xFF}, 512), 0o600); err != nil {
 		t.Fatalf("write garbage file: %v", err)
@@ -300,6 +305,7 @@ func TestExitCodeForServeErrorDistinguishesStoreDamaged(t *testing.T) {
 // today's plain behaviour: exit code 1, and the error's own text on
 // stderr.
 func TestExitCodeForServeErrorKeepsGenericFailuresAtOne(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	original := errors.New("relay: listen on 127.0.0.1:1337: address already in use")
 

@@ -16,6 +16,7 @@ import (
 // that schedule, the normal Interval right after a success, and the
 // schedule restarting at 60s rather than continuing from 300s.
 func TestRunRateLimitBackoffAndReset(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 
@@ -71,6 +72,7 @@ func TestRunRateLimitBackoffAndReset(t *testing.T) {
 // Status without marking sign-in as failing, which is a distinct kind of
 // trouble.
 func TestRunRateLimitReportsStatus(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 	src := scriptedSource([]sourceResponse{{err: &cgm.RateLimitError{RetryAfter: 30 * time.Second}}})

@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"crypto/cipher"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -41,9 +42,24 @@ var ErrDamaged = errors.New("store: database file is damaged")
 // Store is an encrypted, on-disk reading store backed by SQLite. A Store
 // must be closed with Close when the caller is done with it.
 type Store struct {
-	db   *sql.DB
-	key  []byte
-	lock *dbLock
+	db *sql.DB
+	// cipher is built once, here in Open, and shared by every seal and
+	// open this Store performs afterward, instead of building a fresh
+	// cipher.AEAD per row.
+	//
+	// Sharing it is safe because this Store builds the plain, external-
+	// nonce variant of Go's GCM (cipher.NewGCM), not a counter-nonce
+	// variant such as GCMWithCounterNonce -- the counter-nonce kind keeps
+	// an internal, mutable counter Seal itself advances, but the plain
+	// kind keeps no mutable state after construction, so concurrent Seal
+	// and Open calls only ever touch the nonce and data each call
+	// supplies itself. See TestCipherConcurrentSealOpen for the
+	// concurrency proof. This holds for the standard library's own
+	// implementation; it would need revisiting if the build ever links a
+	// FIPS or BoringCrypto-backed Go toolchain, since some of those cache
+	// a C context that is not safe to share this way.
+	cipher cipher.AEAD
+	lock   *dbLock
 }
 
 // Open opens (creating if necessary) the SQLite database at path, sealing
@@ -84,7 +100,14 @@ func Open(ctx context.Context, path string, key []byte) (*Store, error) {
 		return nil, classifyOpenError(path, fmt.Errorf("store: create schema: %w", err))
 	}
 
-	s := &Store{db: db, key: append([]byte(nil), key...), lock: lock}
+	gcm, err := newGCM(key)
+	if err != nil {
+		db.Close()
+		lock.release()
+		return nil, err
+	}
+
+	s := &Store{db: db, cipher: gcm, lock: lock}
 	if err := s.verifyOrSeedCheckValue(ctx, path); err != nil {
 		db.Close()
 		lock.release()
@@ -112,17 +135,17 @@ func classifyOpenError(path string, err error) error {
 }
 
 // verifyOrSeedCheckValue seals the fixed check value into a fresh database,
-// or, if one is already stored, tries to open it with s.key and fails with
-// ErrWrongKey if that does not work. Reading or writing that one row is the
-// step where a page corrupt anywhere other than the schema itself first
-// surfaces, so both its failure paths go through classifyOpenError exactly
-// like the journal-mode and schema steps in Open above.
+// or, if one is already stored, tries to open it with s.cipher and fails
+// with ErrWrongKey if that does not work. Reading or writing that one row
+// is the step where a page corrupt anywhere other than the schema itself
+// first surfaces, so both its failure paths go through classifyOpenError
+// exactly like the journal-mode and schema steps in Open above.
 func (s *Store) verifyOrSeedCheckValue(ctx context.Context, path string) error {
 	var sealed []byte
 	err := s.db.QueryRowContext(ctx, "SELECT sealed FROM check_value WHERE id = 1").Scan(&sealed)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		fresh, sealErr := sealBytes(s.key, checkValueAAD, checkValuePlaintext)
+		fresh, sealErr := sealWithAEAD(s.cipher, checkValueAAD, checkValuePlaintext)
 		if sealErr != nil {
 			return fmt.Errorf("store: seal check value: %w", sealErr)
 		}
@@ -134,7 +157,7 @@ func (s *Store) verifyOrSeedCheckValue(ctx context.Context, path string) error {
 		return classifyOpenError(path, fmt.Errorf("store: read check value: %w", err))
 	}
 
-	if _, openErr := openBytes(s.key, checkValueAAD, sealed); openErr != nil {
+	if _, openErr := openWithAEAD(s.cipher, checkValueAAD, sealed); openErr != nil {
 		return fmt.Errorf("%w: %v", ErrWrongKey, openErr)
 	}
 	return nil

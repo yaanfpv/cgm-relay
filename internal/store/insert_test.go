@@ -10,11 +10,12 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/store"
 )
 
-// TestInsertHistoryGap checks the near-duplicate gap rule for history
-// readings at each side of the HistoryGap boundary: an offset within the
-// gap (inclusive) from an already-stored reading is dropped, and one
-// strictly outside it is stored.
-func TestInsertHistoryGap(t *testing.T) {
+// TestStorePollHistoryGapAgainstStoredReading checks the near-duplicate gap
+// rule for a history reading against a reading already stored before the
+// StorePoll call: an offset within HistoryGap (inclusive) of the stored
+// reading is skipped, and one strictly outside it is stored.
+func TestStorePollHistoryGapAgainstStoredReading(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		offset     time.Duration
@@ -32,33 +33,77 @@ func TestInsertHistoryGap(t *testing.T) {
 			s, _ := openTemp(t, ctx)
 			anchor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 
-			inserted, err := s.InsertHistory(ctx, cgm.Reading{
-				Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic",
-			})
+			seed := cgm.Reading{Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic"}
+			seedResult, err := s.StorePoll(ctx, []cgm.Reading{seed}, nil)
 			if err != nil {
-				t.Fatalf("seed InsertHistory: %v", err)
+				t.Fatalf("seed StorePoll: %v", err)
 			}
-			if !inserted {
-				t.Fatal("seed reading was not stored")
+			if seedResult.History[0].Outcome != store.PollStored {
+				t.Fatalf("seed outcome = %+v, want PollStored", seedResult.History[0])
 			}
 
-			gotInserted, err := s.InsertHistory(ctx, cgm.Reading{
-				Time: anchor.Add(c.offset), MgDl: 101, Trend: cgm.TrendFlat, Source: "synthetic",
-			})
+			candidate := cgm.Reading{Time: anchor.Add(c.offset), MgDl: 101, Trend: cgm.TrendFlat, Source: "synthetic"}
+			result, err := s.StorePoll(ctx, []cgm.Reading{candidate}, nil)
 			if err != nil {
-				t.Fatalf("InsertHistory: %v", err)
+				t.Fatalf("StorePoll: %v", err)
 			}
-			if gotInserted != c.wantStored {
-				t.Errorf("InsertHistory at offset %s: inserted = %v, want %v", c.offset, gotInserted, c.wantStored)
+			gotStored := result.History[0].Outcome == store.PollStored
+			if gotStored != c.wantStored {
+				t.Errorf("offset %s: outcome = %+v, want stored=%v", c.offset, result.History[0], c.wantStored)
 			}
 		})
 	}
 }
 
-// TestInsertCurrentIgnoresGapButDedupsExactTimestamp checks that
-// InsertCurrent, unlike InsertHistory, is never skipped merely for being
-// close to an existing row -- only an exact timestamp match is a no-op.
-func TestInsertCurrentIgnoresGapButDedupsExactTimestamp(t *testing.T) {
+// TestStorePollHistoryGapAgainstSameBatchNeighbor checks the identical gap
+// rule when the near-duplicate is not already stored, but is an earlier
+// history reading in the very same StorePoll call: a history reading must
+// decide the near-duplicate question against a history reading accepted
+// earlier in its own batch exactly as it would against one already in the
+// store, at every boundary offset.
+func TestStorePollHistoryGapAgainstSameBatchNeighbor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		offset     time.Duration
+		wantStored bool
+	}{
+		{"0s: exact duplicate", 0, false},
+		{"149s: inside the gap", 149 * time.Second, false},
+		{"150s: at the gap boundary, inclusive", 150 * time.Second, false},
+		{"151s: just outside the gap", 151 * time.Second, true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := openTemp(t, ctx)
+			anchor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+			anchorReading := cgm.Reading{Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic"}
+			candidate := cgm.Reading{Time: anchor.Add(c.offset), MgDl: 101, Trend: cgm.TrendFlat, Source: "synthetic"}
+
+			result, err := s.StorePoll(ctx, []cgm.Reading{anchorReading, candidate}, nil)
+			if err != nil {
+				t.Fatalf("StorePoll: %v", err)
+			}
+			if result.History[0].Outcome != store.PollStored {
+				t.Fatalf("anchor outcome = %+v, want PollStored", result.History[0])
+			}
+			gotStored := result.History[1].Outcome == store.PollStored
+			if gotStored != c.wantStored {
+				t.Errorf("offset %s: candidate outcome = %+v, want stored=%v", c.offset, result.History[1], c.wantStored)
+			}
+		})
+	}
+}
+
+// TestStorePollCurrentIgnoresGapButDedupsExactTimestamp checks that a
+// current reading, unlike a history reading, is never skipped merely for
+// being close in time to an existing row -- only an exact timestamp match
+// is a no-op.
+func TestStorePollCurrentIgnoresGapButDedupsExactTimestamp(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		offset     time.Duration
@@ -75,33 +120,34 @@ func TestInsertCurrentIgnoresGapButDedupsExactTimestamp(t *testing.T) {
 			s, _ := openTemp(t, ctx)
 			anchor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 
-			inserted, err := s.InsertCurrent(ctx, cgm.Reading{
-				Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic",
-			})
+			seed := cgm.Reading{Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic"}
+			seedResult, err := s.StorePoll(ctx, nil, &seed)
 			if err != nil {
-				t.Fatalf("seed InsertCurrent: %v", err)
+				t.Fatalf("seed StorePoll: %v", err)
 			}
-			if !inserted {
-				t.Fatal("seed reading was not stored")
+			if seedResult.Current == nil || seedResult.Current.Outcome != store.PollStored {
+				t.Fatalf("seed outcome = %+v, want PollStored", seedResult.Current)
 			}
 
-			gotInserted, err := s.InsertCurrent(ctx, cgm.Reading{
-				Time: anchor.Add(c.offset), MgDl: 101, Trend: cgm.TrendFlat, Source: "synthetic",
-			})
+			candidate := cgm.Reading{Time: anchor.Add(c.offset), MgDl: 101, Trend: cgm.TrendFlat, Source: "synthetic"}
+			result, err := s.StorePoll(ctx, nil, &candidate)
 			if err != nil {
-				t.Fatalf("InsertCurrent: %v", err)
+				t.Fatalf("StorePoll: %v", err)
 			}
-			if gotInserted != c.wantStored {
-				t.Errorf("InsertCurrent at offset %s: inserted = %v, want %v", c.offset, gotInserted, c.wantStored)
+			gotStored := result.Current != nil && result.Current.Outcome == store.PollStored
+			if gotStored != c.wantStored {
+				t.Errorf("offset %s: outcome = %+v, want stored=%v", c.offset, result.Current, c.wantStored)
 			}
 		})
 	}
 }
 
-// TestInsertRejectsInvalidReading checks that neither insert path can put a
-// reading with a zero Time or a non-positive MgDl into the store: both
-// return store.ErrInvalidReading and leave the table empty.
-func TestInsertRejectsInvalidReading(t *testing.T) {
+// TestStorePollRejectsInvalidReading checks that neither a history reading
+// nor a current reading with a zero Time or a non-positive MgDl value is
+// ever stored: each is reported with PollInvalid, wrapping
+// store.ErrInvalidReading, and leaves the table empty.
+func TestStorePollRejectsInvalidReading(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		r    cgm.Reading
@@ -120,64 +166,115 @@ func TestInsertRejectsInvalidReading(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		t.Run("InsertCurrent/"+c.name, func(t *testing.T) {
+		t.Run("current/"+c.name, func(t *testing.T) {
 			ctx := context.Background()
 			s, _ := openTemp(t, ctx)
 
-			inserted, err := s.InsertCurrent(ctx, c.r)
-			if err == nil {
-				t.Fatal("InsertCurrent accepted an invalid reading, want an error")
+			result, err := s.StorePoll(ctx, nil, &c.r)
+			if err != nil {
+				t.Fatalf("StorePoll returned an error, want a per-reading PollInvalid outcome instead: %v", err)
 			}
-			if !errors.Is(err, store.ErrInvalidReading) {
-				t.Errorf("error = %v, want it to wrap store.ErrInvalidReading", err)
+			if result.Current == nil || result.Current.Outcome != store.PollInvalid {
+				t.Fatalf("current outcome = %+v, want PollInvalid", result.Current)
 			}
-			if inserted {
-				t.Error("InsertCurrent reported inserted=true for a rejected reading")
+			if !errors.Is(result.Current.Err, store.ErrInvalidReading) {
+				t.Errorf("Err = %v, want it to wrap store.ErrInvalidReading", result.Current.Err)
 			}
 			assertTableEmpty(t, ctx, s)
 		})
 
-		t.Run("InsertHistory/"+c.name, func(t *testing.T) {
+		t.Run("history/"+c.name, func(t *testing.T) {
 			ctx := context.Background()
 			s, _ := openTemp(t, ctx)
 
-			inserted, err := s.InsertHistory(ctx, c.r)
-			if err == nil {
-				t.Fatal("InsertHistory accepted an invalid reading, want an error")
+			result, err := s.StorePoll(ctx, []cgm.Reading{c.r}, nil)
+			if err != nil {
+				t.Fatalf("StorePoll returned an error, want a per-reading PollInvalid outcome instead: %v", err)
 			}
-			if !errors.Is(err, store.ErrInvalidReading) {
-				t.Errorf("error = %v, want it to wrap store.ErrInvalidReading", err)
+			if result.History[0].Outcome != store.PollInvalid {
+				t.Fatalf("history outcome = %+v, want PollInvalid", result.History[0])
 			}
-			if inserted {
-				t.Error("InsertHistory reported inserted=true for a rejected reading")
+			if !errors.Is(result.History[0].Err, store.ErrInvalidReading) {
+				t.Errorf("Err = %v, want it to wrap store.ErrInvalidReading", result.History[0].Err)
 			}
 			assertTableEmpty(t, ctx, s)
 		})
 	}
 
-	// An invalid history reading next to a stored one must still be refused,
-	// never mistaken for a near-duplicate and skipped without an error.
-	t.Run("InsertHistory/MgDl 0 within the gap of a stored reading", func(t *testing.T) {
+	// An invalid history reading next to a stored one must still be
+	// refused, never mistaken for a near-duplicate and skipped without
+	// being reported as invalid.
+	t.Run("history/MgDl 0 within the gap of a stored reading", func(t *testing.T) {
 		ctx := context.Background()
 		s, _ := openTemp(t, ctx)
 		anchor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 
-		if _, err := s.InsertCurrent(ctx, cgm.Reading{
-			Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic",
-		}); err != nil {
-			t.Fatalf("seed InsertCurrent: %v", err)
+		seed := cgm.Reading{Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic"}
+		if _, err := s.StorePoll(ctx, nil, &seed); err != nil {
+			t.Fatalf("seed StorePoll: %v", err)
 		}
 
-		inserted, err := s.InsertHistory(ctx, cgm.Reading{
-			Time: anchor.Add(time.Minute), MgDl: 0, Trend: cgm.TrendFlat, Source: "synthetic",
-		})
-		if !errors.Is(err, store.ErrInvalidReading) {
-			t.Fatalf("error = %v, want it to wrap store.ErrInvalidReading", err)
+		invalid := cgm.Reading{Time: anchor.Add(time.Minute), MgDl: 0, Trend: cgm.TrendFlat, Source: "synthetic"}
+		result, err := s.StorePoll(ctx, []cgm.Reading{invalid}, nil)
+		if err != nil {
+			t.Fatalf("StorePoll: %v", err)
 		}
-		if inserted {
-			t.Error("InsertHistory reported inserted=true for a rejected reading")
+		if result.History[0].Outcome != store.PollInvalid {
+			t.Fatalf("outcome = %+v, want PollInvalid", result.History[0])
+		}
+		if !errors.Is(result.History[0].Err, store.ErrInvalidReading) {
+			t.Errorf("Err = %v, want it to wrap store.ErrInvalidReading", result.History[0].Err)
 		}
 	})
+}
+
+// TestStorePollInvalidHistoryPointDoesNotBlockValidCurrent checks the
+// central claim behind batching every poll's writes into one call: an
+// invalid history reading is reported for itself and never keeps the
+// current reading -- or any other history reading -- in the same call
+// from being stored normally.
+func TestStorePollInvalidHistoryPointDoesNotBlockValidCurrent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openTemp(t, ctx)
+	anchor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	invalidHistory := cgm.Reading{Time: anchor.Add(-time.Hour), MgDl: 0, Trend: cgm.TrendFlat, Source: "synthetic"}
+	validHistory := cgm.Reading{Time: anchor.Add(-30 * time.Minute), MgDl: 90, Trend: cgm.TrendFlat, Source: "synthetic"}
+	current := cgm.Reading{Time: anchor, MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic"}
+
+	result, err := s.StorePoll(ctx, []cgm.Reading{invalidHistory, validHistory}, &current)
+	if err != nil {
+		t.Fatalf("StorePoll: %v", err)
+	}
+
+	if result.History[0].Outcome != store.PollInvalid {
+		t.Errorf("invalid history outcome = %+v, want PollInvalid", result.History[0])
+	}
+	if !errors.Is(result.History[0].Err, store.ErrInvalidReading) {
+		t.Errorf("invalid history Err = %v, want it to wrap store.ErrInvalidReading", result.History[0].Err)
+	}
+	if result.History[1].Outcome != store.PollStored {
+		t.Errorf("valid history outcome = %+v, want PollStored", result.History[1])
+	}
+	if result.Current == nil || result.Current.Outcome != store.PollStored {
+		t.Fatalf("current outcome = %+v, want PollStored", result.Current)
+	}
+
+	rows, err := s.Range(ctx, store.RangeQuery{})
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("table has %d rows, want exactly the valid history reading and the current reading (%v)", len(rows), mgDlsOf(rows))
+	}
+	got := map[int]bool{}
+	for _, r := range rows {
+		got[r.MgDl] = true
+	}
+	if !got[90] || !got[100] {
+		t.Errorf("stored MgDl values = %v, want exactly {90, 100}", mgDlsOf(rows))
+	}
 }
 
 func assertTableEmpty(t *testing.T, ctx context.Context, s *store.Store) {

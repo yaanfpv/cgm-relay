@@ -24,13 +24,11 @@ var checkValueAAD = []byte("cgm-relay/check-value/v1")
 // this same row with the caller's key and fails loudly if that key is wrong.
 var checkValuePlaintext = []byte("cgm-relay-store-check-v1")
 
-// sealBytes seals plaintext under key, binding it to aad, and returns
-// nonce||ciphertext. A fresh random nonce is generated per call.
-func sealBytes(key, aad, plaintext []byte) ([]byte, error) {
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
+// sealWithAEAD seals plaintext under gcm, binding it to aad, and returns
+// nonce||ciphertext. A fresh random nonce is generated per call; every
+// *Store method shares one long-lived cipher.AEAD instance rather than
+// building a fresh one per call.
+func sealWithAEAD(gcm cipher.AEAD, aad, plaintext []byte) ([]byte, error) {
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("store: generate nonce: %w", err)
@@ -39,14 +37,11 @@ func sealBytes(key, aad, plaintext []byte) ([]byte, error) {
 	return sealed, nil
 }
 
-// openBytes reverses sealBytes: it splits sealed into its nonce and
-// ciphertext, then authenticates and decrypts against aad. It fails if key,
-// aad, or sealed does not match what sealBytes produced.
-func openBytes(key, aad, sealed []byte) ([]byte, error) {
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
+// openWithAEAD reverses sealWithAEAD: it splits sealed into its nonce and
+// ciphertext, then authenticates and decrypts against aad using gcm. It
+// fails if gcm's key, aad, or sealed does not match what sealWithAEAD
+// produced.
+func openWithAEAD(gcm cipher.AEAD, aad, sealed []byte) ([]byte, error) {
 	if len(sealed) < gcm.NonceSize() {
 		return nil, fmt.Errorf("store: sealed payload too short: %d bytes", len(sealed))
 	}

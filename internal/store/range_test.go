@@ -21,17 +21,18 @@ func seedRange(t *testing.T, ctx context.Context, s *store.Store, base time.Time
 			Trend:  cgm.TrendFlat,
 			Source: "synthetic",
 		}
-		inserted, err := s.InsertCurrent(ctx, r)
+		result, err := s.StorePoll(ctx, nil, &r)
 		if err != nil {
-			t.Fatalf("seed InsertCurrent[%d]: %v", i, err)
+			t.Fatalf("seed StorePoll[%d]: %v", i, err)
 		}
-		if !inserted {
-			t.Fatalf("seed row %d was not stored", i)
+		if result.Current == nil || result.Current.Outcome != store.PollStored {
+			t.Fatalf("seed row %d outcome = %+v, want PollStored", i, result.Current)
 		}
 	}
 }
 
 func TestRangeOrdersNewestFirst(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -46,6 +47,7 @@ func TestRangeOrdersNewestFirst(t *testing.T) {
 }
 
 func TestRangeLowerBoundInclusive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -59,6 +61,7 @@ func TestRangeLowerBoundInclusive(t *testing.T) {
 }
 
 func TestRangeUpperBoundExclusiveByDefault(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -72,6 +75,7 @@ func TestRangeUpperBoundExclusiveByDefault(t *testing.T) {
 }
 
 func TestRangeUpperBoundInclusive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -88,6 +92,7 @@ func TestRangeUpperBoundInclusive(t *testing.T) {
 }
 
 func TestRangeLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -101,6 +106,7 @@ func TestRangeLimit(t *testing.T) {
 }
 
 func TestRangeCombinesBoundsAndLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)

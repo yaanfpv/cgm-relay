@@ -600,6 +600,7 @@ func TestLoadRefusesInvalidLibreLinkUpBaseURL(t *testing.T) {
 // to a loopback address are allowed; every other scheme, a malformed URL,
 // and plain http to a non-loopback host are refused.
 func TestIsAllowedLibreLinkUpBaseURL(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		value string
 		want  bool
@@ -627,6 +628,7 @@ func TestIsAllowedLibreLinkUpBaseURL(t *testing.T) {
 // both share, across the forms a config value or an environment variable
 // can actually take.
 func TestIsLoopbackAddr(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		addr string
 		want bool

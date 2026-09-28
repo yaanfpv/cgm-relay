@@ -15,6 +15,13 @@ import (
 // silently dropped.
 const unknownUserAgent = "unknown"
 
+// maxTrackedClients bounds clientTracker.seen so a client that varies its
+// User-Agent per request (a leaked-token scanner, or a scripted probe)
+// cannot grow the map without bound: an unseen User-Agent that would
+// exceed this cap evicts whichever entry has the oldest last-seen time
+// first.
+const maxTrackedClients = 256
+
 // clientTracker records the last time each follower client, identified by
 // its User-Agent header, made an authenticated request to the Nightscout
 // API. trackClients is its only writer; the status handler is its only
@@ -31,7 +38,30 @@ func newClientTracker() *clientTracker {
 func (t *clientTracker) record(userAgent string, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if _, alreadyTracked := t.seen[userAgent]; !alreadyTracked && len(t.seen) >= maxTrackedClients {
+		t.evictOldestLocked()
+	}
 	t.seen[userAgent] = at
+}
+
+// evictOldestLocked removes the entry with the smallest last-seen time,
+// making room for one new client once the cap is reached. Refreshing an
+// already-tracked client's own last-seen time never calls this: only a
+// genuinely new User-Agent can grow the map past the cap. The caller must
+// hold t.mu.
+func (t *clientTracker) evictOldestLocked() {
+	var oldestKey string
+	var oldestAt time.Time
+	found := false
+	for k, v := range t.seen {
+		if !found || v.Before(oldestAt) {
+			oldestKey, oldestAt = k, v
+			found = true
+		}
+	}
+	if found {
+		delete(t.seen, oldestKey)
+	}
 }
 
 // snapshot returns a copy of every client's last-seen time, safe for a

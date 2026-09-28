@@ -21,6 +21,7 @@ var _ nightscout.ReadingRange = (*store.Store)(nil)
 // a token, because a handler with no token would serve readings to anyone
 // who could reach it.
 func TestNewRejectsEmptyToken(t *testing.T) {
+	t.Parallel()
 	h, err := nightscout.New(&fakeStore{}, "", nil)
 	if err == nil {
 		t.Fatal("New with an empty token returned no error, want one")
@@ -33,6 +34,7 @@ func TestNewRejectsEmptyToken(t *testing.T) {
 // TestNewRejectsNilReadings checks that New refuses a nil ReadingRange
 // rather than building a handler that would panic on its first request.
 func TestNewRejectsNilReadings(t *testing.T) {
+	t.Parallel()
 	h, err := nightscout.New(nil, "s3cr3t", nil)
 	if err == nil {
 		t.Fatal("New with a nil ReadingRange returned no error, want one")
@@ -46,6 +48,7 @@ func TestNewRejectsNilReadings(t *testing.T) {
 // back to time.Now) rather than the handler panicking on its first call to
 // an endpoint that reports the time.
 func TestNewAcceptsNilClock(t *testing.T) {
+	t.Parallel()
 	if _, err := nightscout.New(&fakeStore{}, "s3cr3t", nil); err != nil {
 		t.Fatalf("New with a nil clock: %v", err)
 	}
@@ -64,6 +67,7 @@ func fixedClock(t time.Time) nightscout.Clock {
 // 404 or 405 as a fatal error rather than falling back to the v1 API this
 // handler implements, so an unimplemented path must never reach checkAuth.
 func TestUnimplementedPathReturns404BeforeAuth(t *testing.T) {
+	t.Parallel()
 	h, err := nightscout.New(&fakeStore{}, testToken, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -340,6 +344,7 @@ var followerRequests = []followerRequest{
 // — so only the single request is checked, and row.note carries why that
 // app tolerates it.
 func TestFollowerAppRequests(t *testing.T) {
+	t.Parallel()
 	for _, row := range followerRequests {
 		t.Run(row.name, func(t *testing.T) {
 			h, err := nightscout.New(&fakeStore{}, testToken, nil)

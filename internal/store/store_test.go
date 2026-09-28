@@ -15,6 +15,7 @@ import (
 )
 
 func TestRoundTripThroughCloseAndReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 	key := testKey('R')
@@ -30,12 +31,12 @@ func TestRoundTripThroughCloseAndReopen(t *testing.T) {
 		Trend:  cgm.TrendFortyFiveDown,
 		Source: "synthetic",
 	}
-	inserted, err := s.InsertCurrent(ctx, want)
+	result, err := s.StorePoll(ctx, nil, &want)
 	if err != nil {
-		t.Fatalf("InsertCurrent: %v", err)
+		t.Fatalf("StorePoll: %v", err)
 	}
-	if !inserted {
-		t.Fatal("InsertCurrent reported inserted=false for a new timestamp")
+	if result.Current == nil || result.Current.Outcome != store.PollStored {
+		t.Fatalf("StorePoll current outcome = %+v, want PollStored", result.Current)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -69,6 +70,7 @@ func TestRoundTripThroughCloseAndReopen(t *testing.T) {
 }
 
 func TestOpenWithWrongKeyFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 
@@ -93,6 +95,7 @@ func TestOpenWithWrongKeyFails(t *testing.T) {
 }
 
 func TestOpenRejectsWrongKeyLength(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 
@@ -107,6 +110,7 @@ func TestOpenRejectsWrongKeyLength(t *testing.T) {
 // gets a distinct, documented error rather than racing the first for the
 // same file underneath SQLite.
 func TestOpenWhileAlreadyOpenReturnsErrInUse(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 	key := testKey('L')
@@ -130,6 +134,7 @@ func TestOpenWhileAlreadyOpenReturnsErrInUse(t *testing.T) {
 // lock Open took, so a database can be reopened once the first user is
 // done with it -- the ordinary reopen-after-close case, not just a crash.
 func TestOpenAfterCloseReleasesTheLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 	key := testKey('M')
@@ -155,6 +160,7 @@ func TestOpenAfterCloseReleasesTheLock(t *testing.T) {
 // here -- never leaves the lock file held, so a caller retrying with the
 // right key is not blocked by its own earlier failed attempt.
 func TestFailedOpenReleasesTheLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 	right := testKey('N')
@@ -187,6 +193,7 @@ func TestFailedOpenReleasesTheLock(t *testing.T) {
 // ErrDamaged rather than the generic error an ordinary I/O failure would
 // produce.
 func TestOpenDamagedFileReturnsErrDamaged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 	if err := os.WriteFile(path, bytes.Repeat([]byte{0xFF}, 512), 0o600); err != nil {
@@ -209,6 +216,7 @@ func TestOpenDamagedFileReturnsErrDamaged(t *testing.T) {
 // would otherwise fall through as, which would bring back the endless
 // restart ErrDamaged exists to remove, for a database instead of a page.
 func TestOpenWithCorruptCheckValuePageReturnsErrDamaged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readings.db")
 	key := testKey('Q')

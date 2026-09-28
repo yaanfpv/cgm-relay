@@ -14,6 +14,7 @@ import (
 // are removed), one just past the cutoff is removed, and one well inside
 // the window is untouched.
 func TestPruneBoundary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _ := openTemp(t, ctx)
 
@@ -33,7 +34,7 @@ func TestPruneBoundary(t *testing.T) {
 		},
 	}
 	for name, r := range readings {
-		if _, err := s.InsertCurrent(ctx, r); err != nil {
+		if _, err := s.StorePoll(ctx, nil, &r); err != nil {
 			t.Fatalf("seed %q: %v", name, err)
 		}
 	}
@@ -63,6 +64,7 @@ func TestPruneBoundary(t *testing.T) {
 // 15 days, since callers wire it in as the default and a silent change to
 // it would change retention behaviour with no code review catching it.
 func TestPruneDefaultRetentionConstant(t *testing.T) {
+	t.Parallel()
 	want := 15 * 24 * time.Hour
 	if store.DefaultRetention != want {
 		t.Errorf("DefaultRetention = %v, want %v", store.DefaultRetention, want)

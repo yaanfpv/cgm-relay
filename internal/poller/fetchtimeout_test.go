@@ -13,6 +13,7 @@ import (
 // the loop: Run reports the timeout through Status, keeps going, and
 // retries at the next Interval.
 func TestRunFetchTimeoutIsReportedAndRetried(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	src := newBlockingSource() // never returns on its own; only its ctx ends it
 	st := &fakeStore{}
@@ -55,6 +56,7 @@ func TestRunFetchTimeoutIsReportedAndRetried(t *testing.T) {
 // fetch timeout is configured, so the timeout mechanism never delays
 // ordinary shutdown.
 func TestRunStopsPromptlyEvenWithAFetchTimeoutConfigured(t *testing.T) {
+	t.Parallel()
 	src := newBlockingSource()
 	st := &fakeStore{}
 	p := poller.New(src, st, 15*24*time.Hour, poller.WithFetchTimeout(time.Minute))

@@ -28,7 +28,7 @@ type statusSettings struct {
 // handleStatus serves /api/v1/status.json.
 func (h *handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	now := h.clock().UTC()
-	writeJSON(w, statusPayload{
+	writeJSON(w, r, statusPayload{
 		Status:          "ok",
 		APIEnabled:      true,
 		ServerTime:      now.Format("2006-01-02T15:04:05.000Z"),
@@ -41,5 +41,5 @@ func (h *handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 // as xDrip4iOS use only to confirm a credential is accepted: they discard
 // the body and treat any non-error response as success.
 func (h *handler) handleAuthTest(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeJSON(w, r, map[string]string{"status": "ok"})
 }

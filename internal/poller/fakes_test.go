@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/store"
 )
 
 // sourceResponse is one scripted return value for fakeSource.Fetch.
@@ -74,24 +75,35 @@ type fakeStore struct {
 	pruneErr    error
 }
 
-func (f *fakeStore) InsertCurrent(_ context.Context, r cgm.Reading) (bool, error) {
+// StorePoll records every reading it is given: each scripted error is
+// consumed by the next reading of its own kind (history or current) and
+// reported as that one reading's own PollInvalid outcome, never as
+// StorePoll's own returned error, and never affecting any other reading
+// in the same call -- fakeStore has no reason to fail the whole write,
+// since it never touches a real database.
+func (f *fakeStore) StorePoll(_ context.Context, history []cgm.Reading, current *cgm.Reading) (store.PollResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := shiftErr(&f.currentErrs); err != nil {
-		return false, err
-	}
-	f.current = append(f.current, r)
-	return true, nil
-}
 
-func (f *fakeStore) InsertHistory(_ context.Context, r cgm.Reading) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := shiftErr(&f.historyErrs); err != nil {
-		return false, err
+	result := store.PollResult{History: make([]store.ReadingResult, len(history))}
+	for i, r := range history {
+		if err := shiftErr(&f.historyErrs); err != nil {
+			result.History[i] = store.ReadingResult{Outcome: store.PollInvalid, Err: err}
+			continue
+		}
+		f.history = append(f.history, r)
+		result.History[i] = store.ReadingResult{Outcome: store.PollStored}
 	}
-	f.history = append(f.history, r)
-	return true, nil
+
+	if current != nil {
+		if err := shiftErr(&f.currentErrs); err != nil {
+			result.Current = &store.ReadingResult{Outcome: store.PollInvalid, Err: err}
+		} else {
+			f.current = append(f.current, *current)
+			result.Current = &store.ReadingResult{Outcome: store.PollStored}
+		}
+	}
+	return result, nil
 }
 
 func (f *fakeStore) Prune(_ context.Context, now time.Time, _ time.Duration) (int64, error) {

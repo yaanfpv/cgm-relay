@@ -20,12 +20,30 @@ BUILD_DIR="${MACOS_DIR}/.build"
 ENGINE_DIR="${BUILD_DIR}/engine"
 DERIVED_DATA_DIR="${BUILD_DIR}/DerivedData"
 
-echo "==> Building the engine for arm64 and amd64 (CGO_ENABLED=0)"
+echo "==> Building the engine for arm64 and amd64 concurrently (CGO_ENABLED=0)"
 mkdir -p "${ENGINE_DIR}"
 (
   cd "${REPO_ROOT}"
-  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay
-  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay
+  # The two builds share GOCACHE/GOMODCACHE but touch no other common
+  # state (distinct GOARCH, distinct -o paths), and the Go toolchain
+  # documents its module and build caches as safe for concurrent use, so
+  # running them side by side and waiting on each by its own PID is safe.
+  # Both PIDs are always waited on, even when one fails first, so a
+  # failure never leaves the other build running past this subshell.
+  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
+  arm64_pid=$!
+  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
+  amd64_pid=$!
+
+  arm64_status=0
+  amd64_status=0
+  wait "$arm64_pid" || arm64_status=$?
+  wait "$amd64_pid" || amd64_status=$?
+
+  if [ "$arm64_status" -ne 0 ] || [ "$amd64_status" -ne 0 ]; then
+    echo "==> Engine build failed (arm64 exit=${arm64_status}, amd64 exit=${amd64_status})" >&2
+    exit 1
+  fi
 )
 
 lipo -create -output "${ENGINE_DIR}/cgm-relay" "${ENGINE_DIR}/cgm-relay-arm64" "${ENGINE_DIR}/cgm-relay-amd64"

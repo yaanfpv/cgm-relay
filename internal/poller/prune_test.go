@@ -15,6 +15,7 @@ import (
 // immediately on the first cycle, then once per elapsed day, never zero
 // times and never once per tick.
 func TestRunPrunesOncePerDay(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 
@@ -54,6 +55,7 @@ func TestRunPrunesOncePerDay(t *testing.T) {
 // elapsed -- otherwise a relay that never stays up for a full day would
 // never prune at all.
 func TestRunPrunesOnFirstCycleEvenIfCancelledEarly(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 
@@ -85,6 +87,7 @@ func TestRunPrunesOnFirstCycleEvenIfCancelledEarly(t *testing.T) {
 // TestRunPruneFailureIsReportedNotFatal checks that a failed Prune call is
 // reported through Status rather than stopping Run.
 func TestRunPruneFailureIsReportedNotFatal(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 

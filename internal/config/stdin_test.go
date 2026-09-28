@@ -261,6 +261,7 @@ func TestLoadFromReaderIgnoresFileAndEnvironment(t *testing.T) {
 // carries the password, the email, or the valid encryption key used
 // elsewhere in the same table.
 func TestLoadFromReaderRefusesInvalid(t *testing.T) {
+	t.Parallel()
 	const email = "leak-check@example.test"
 	const password = "s3cr3t-should-never-appear-in-any-error"
 	goodKey := testKeyBase64('K')
@@ -334,6 +335,7 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := config.LoadFromReader(strings.NewReader(c.input))
 			if err == nil {
 				t.Fatal("LoadFromReader succeeded, want a refusal")

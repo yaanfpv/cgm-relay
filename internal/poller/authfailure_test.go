@@ -14,6 +14,7 @@ import (
 // than once every five minutes while it persists, and that a subsequent
 // success clears the flag.
 func TestRunAuthFailureBacksOffAndClears(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 

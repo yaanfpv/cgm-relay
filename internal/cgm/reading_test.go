@@ -8,6 +8,7 @@ import (
 )
 
 func TestTrendString(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		trend Trend
 		want  string
@@ -30,6 +31,7 @@ func TestTrendString(t *testing.T) {
 }
 
 func TestAuthErrorMatchesIsAndAs(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("bad session")
 	err := fmt.Errorf("fetch failed: %w", &AuthError{Err: cause})
 
@@ -51,6 +53,7 @@ func TestAuthErrorMatchesIsAndAs(t *testing.T) {
 }
 
 func TestRateLimitErrorMatchesIsAndAs(t *testing.T) {
+	t.Parallel()
 	err := fmt.Errorf("fetch failed: %w", &RateLimitError{RetryAfter: 30 * time.Second})
 
 	if !errors.Is(err, ErrRateLimited) {
@@ -67,6 +70,7 @@ func TestRateLimitErrorMatchesIsAndAs(t *testing.T) {
 }
 
 func TestTransientErrorMatchesIsAndAs(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("timeout")
 	err := fmt.Errorf("fetch failed: %w", &TransientError{Err: cause})
 

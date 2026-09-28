@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Compress a large Nightscout API response with gzip when the requesting app asks for it, so a follower catching up on hours of history downloads far fewer bytes over a slow connection; a small response, or a request that never asks for gzip, is written exactly as before.
+- Fix the local status endpoint's follower-client list so it can no longer grow without bound: it now keeps the 256 most recently seen clients and drops the longest-silent one to make room for a new one.
 - Add the reading model, source interface, and an encrypted SQLite store for glucose readings.
 - Add a LibreLinkUp source that signs in, follows region redirects, and refreshes an expired session automatically.
 - Add the minute-by-minute poller that fetches readings, fills history gaps, backs off on rate limits and auth failures, and prunes old readings on start and once a day.

@@ -17,6 +17,7 @@ var _ poller.Store = (*store.Store)(nil)
 // wiring up the status endpoint sees an honest "nothing yet" rather than a
 // fabricated success.
 func TestNewStatusIsZeroValue(t *testing.T) {
+	t.Parallel()
 	p := poller.New(scriptedSource(nil), &fakeStore{}, 15*24*time.Hour)
 	got := p.Status()
 	want := poller.Status{}

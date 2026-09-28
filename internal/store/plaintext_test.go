@@ -22,6 +22,7 @@ import (
 // the same value and trend still produce different ciphertexts, which is
 // what a fresh random nonce per row buys.
 func TestNoPlaintextOnDisk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "readings.db")
@@ -42,8 +43,8 @@ func TestNoPlaintextOnDisk(t *testing.T) {
 		{Time: base.Add(2 * time.Hour), MgDl: markerB, Trend: cgm.TrendSingleUp, Source: "synthetic"},
 	}
 	for _, r := range readings {
-		if _, err := s.InsertCurrent(ctx, r); err != nil {
-			t.Fatalf("InsertCurrent: %v", err)
+		if _, err := s.StorePoll(ctx, nil, &r); err != nil {
+			t.Fatalf("StorePoll: %v", err)
 		}
 	}
 

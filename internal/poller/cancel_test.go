@@ -14,6 +14,7 @@ import (
 // never spawns a goroutine of its own, so its own return over the done
 // channel is a complete proof that nothing of Run's is left running.
 func TestRunStopsWithinOneSecondMidWait(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 	src := scriptedSource([]sourceResponse{
@@ -43,6 +44,7 @@ func TestRunStopsWithinOneSecondMidWait(t *testing.T) {
 // Source.Fetch and checks Run still returns promptly rather than waiting
 // for the fetch to finish some other way.
 func TestRunStopsWithinOneSecondMidFetch(t *testing.T) {
+	t.Parallel()
 	src := newBlockingSource()
 	st := &fakeStore{}
 	p := poller.New(src, st, 15*24*time.Hour)

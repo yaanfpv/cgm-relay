@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,7 @@ func (f fakePollerStatus) Status() poller.Status { return f.status }
 // never even reaching a credential check) is never recorded, and every
 // other status code is, keyed by the request's User-Agent.
 func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		status      int
@@ -47,6 +49,7 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			tracker := newClientTracker()
 			now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,11 +87,61 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 	}
 }
 
+// TestClientTrackerCapsAndEvictsTheOldest checks the tracker's cap
+// directly: recording 300 distinct User-Agents leaves at most
+// maxTrackedClients entries, the most recently seen client present, and
+// the longest-silent one gone. It also checks that refreshing an
+// existing key's own last-seen time is a plain update, never an
+// eviction-triggering growth of the map.
+func TestClientTrackerCapsAndEvictsTheOldest(t *testing.T) {
+	t.Parallel()
+	tracker := newClientTracker()
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	const total = 300
+	for i := 0; i < total; i++ {
+		tracker.record(fmt.Sprintf("client-%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	seen := tracker.snapshot()
+	if len(seen) != maxTrackedClients {
+		t.Fatalf("len(seen) = %d, want %d", len(seen), maxTrackedClients)
+	}
+
+	newestKey := fmt.Sprintf("client-%d", total-1)
+	if _, ok := seen[newestKey]; !ok {
+		t.Errorf("the most recently seen client (%q) was evicted, want it to survive", newestKey)
+	}
+	oldestKey := "client-0"
+	if _, ok := seen[oldestKey]; ok {
+		t.Errorf("the longest-silent client (%q) survived, want it evicted", oldestKey)
+	}
+
+	// The oldest surviving client is the one just past the eviction
+	// cutoff: total - maxTrackedClients clients were evicted in
+	// insertion order, since every insert's timestamp strictly increases.
+	oldestSurvivor := fmt.Sprintf("client-%d", total-maxTrackedClients)
+	if _, ok := seen[oldestSurvivor]; !ok {
+		t.Fatalf("expected oldest survivor %q not present, seen has %d entries", oldestSurvivor, len(seen))
+	}
+
+	refreshedAt := base.Add(time.Duration(total+100) * time.Second)
+	tracker.record(oldestSurvivor, refreshedAt)
+	seen = tracker.snapshot()
+	if len(seen) != maxTrackedClients {
+		t.Errorf("re-recording an existing client changed len(seen) to %d, want %d (an update must never evict)", len(seen), maxTrackedClients)
+	}
+	if !seen[oldestSurvivor].Equal(refreshedAt) {
+		t.Errorf("re-recording %q did not update its last-seen time: got %v, want %v", oldestSurvivor, seen[oldestSurvivor], refreshedAt)
+	}
+}
+
 // TestStatusHandlerReportsPollerAndClients checks that the handler
 // carries the poller's last fetch, last reading, sign-in state and last
 // error exactly as its Status reports them, plus every client the
 // tracker has seen.
 func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
+	t.Parallel()
 	lastFetch := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	lastReading := lastFetch.Add(-30 * time.Second)
 	fake := fakePollerStatus{status: poller.Status{
@@ -151,6 +204,7 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 // completed a fetch reports no last_fetch_time or last_reading_time,
 // rather than the zero time formatted as if it meant something.
 func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
+	t.Parallel()
 	h := newStatusHandler(fakePollerStatus{}, newClientTracker())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
@@ -179,6 +233,7 @@ func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 // answer a request carrying the dialled loopback address (what an
 // ordinary client, including Go's own http.Client, actually sends).
 func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
+	t.Parallel()
 	fake := fakePollerStatus{status: poller.Status{LastReadingMgDl: 145}}
 	h := newStatusHandler(fake, newClientTracker())
 
@@ -196,6 +251,7 @@ func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.host, func(t *testing.T) {
+			t.Parallel()
 			req := httptest.NewRequest(http.MethodGet, "/status", nil)
 			req.Host = c.host
 			rec := httptest.NewRecorder()
@@ -205,7 +261,7 @@ func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 				t.Fatalf("Host %q: status = %d, want %d (body: %s)", c.host, rec.Code, c.wantStatus, rec.Body.String())
 			}
 			if c.wantStatus == http.StatusForbidden {
-				if strings.Contains(rec.Body.String(), "145") {
+				if ContainsValue(rec.Body.String(), "145") {
 					t.Errorf("Host %q: a refused request's body carries the reading value: %s", c.host, rec.Body.String())
 				}
 				var asJSON map[string]any
@@ -222,6 +278,7 @@ func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 // the http.Server zero value, which would let a slow or hung client block
 // a connection forever.
 func TestStartServerAppliesTimeouts(t *testing.T) {
+	t.Parallel()
 	rs, err := startServer("127.0.0.1:0", http.NotFoundHandler())
 	if err != nil {
 		t.Fatalf("startServer: %v", err)
@@ -239,5 +296,64 @@ func TestStartServerAppliesTimeouts(t *testing.T) {
 	}
 	if rs.srv.IdleTimeout <= 0 {
 		t.Error("IdleTimeout is not set")
+	}
+}
+
+// ContainsValue reports whether text carries value, a plain decimal
+// numeral, as a standalone number rather than as a digit run inside some
+// other number: it is exported so relay_test's own leak checks can share
+// it. A match only counts when neither the character right before it nor
+// the one right after it is itself an ASCII digit, so a value logged next
+// to an ephemeral port (which can contain any digit run) never trips it,
+// while the same digits printed next to a unit, a colon, or at either
+// edge of text still do.
+func ContainsValue(text, value string) bool {
+	for start := 0; ; {
+		idx := strings.Index(text[start:], value)
+		if idx == -1 {
+			return false
+		}
+		at := start + idx
+		before, after := at-1, at+len(value)
+		precededByDigit := before >= 0 && isASCIIDigit(text[before])
+		followedByDigit := after < len(text) && isASCIIDigit(text[after])
+		if !precededByDigit && !followedByDigit {
+			return true
+		}
+		start = at + 1
+	}
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+// TestContainsValue proves ContainsValue's whole reason for existing:
+// unlike a bare strings.Contains, it does not trip on a value's digits
+// turning up by coincidence inside an unrelated, longer number, while it
+// still catches the same value printed next to a unit, a colon, or
+// nothing at all.
+func TestContainsValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "value's digits trail inside a longer port number", text: "serving the status endpoint on 127.0.0.1:51112", want: false},
+		{name: "value's digits lead inside a longer port number", text: "serving the status endpoint on 127.0.0.1:49111", want: false},
+		{name: "value printed with a space and a unit", text: "reading 111 mg/dL", want: true},
+		{name: "value printed right against a unit with no space", text: "reading 111mg/dL", want: true},
+		{name: "value printed right after a colon", text: "last_reading_mg_dl:111", want: true},
+		{name: "value is the entire text", text: "111", want: true},
+		{name: "value absent entirely", text: "serving the Nightscout API on 127.0.0.1:54321", want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ContainsValue(c.text, "111"); got != c.want {
+				t.Errorf("ContainsValue(%q, %q) = %v, want %v", c.text, "111", got, c.want)
+			}
+		})
 	}
 }

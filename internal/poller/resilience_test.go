@@ -14,6 +14,7 @@ import (
 // from the source is reported in Status without stopping Run, and that Run
 // retries at the normal Interval rather than backing off.
 func TestRunTransientFailureRetriesAtInterval(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 
@@ -48,7 +49,7 @@ func TestRunTransientFailureRetriesAtInterval(t *testing.T) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
 	if got := st.currentTimes(); len(got) != 1 || got[0] != recovered {
-		t.Fatalf("InsertCurrent calls = %v, want exactly one at %s", got, recovered)
+		t.Fatalf("current reading stores = %v, want exactly one at %s", got, recovered)
 	}
 }
 
@@ -56,6 +57,7 @@ func TestRunTransientFailureRetriesAtInterval(t *testing.T) {
 // insert (mirroring store.ErrInvalidReading) is reported in Status and
 // does not stop Run: the next tick's reading is still stored normally.
 func TestRunInvalidReadingIsSkippedNotFatal(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 
@@ -88,6 +90,6 @@ func TestRunInvalidReadingIsSkippedNotFatal(t *testing.T) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
 	if got := st.currentTimes(); len(got) != 1 || got[0] != second {
-		t.Fatalf("InsertCurrent calls = %v, want exactly the second tick's reading stored", got)
+		t.Fatalf("current reading stores = %v, want exactly the second tick's reading stored", got)
 	}
 }

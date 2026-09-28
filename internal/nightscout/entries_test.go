@@ -1,7 +1,10 @@
 package nightscout_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -91,6 +94,7 @@ func assertMgDlSequence(t *testing.T, got []jsonEntry, want []int) {
 // that direction comes through as Nightscout's own name (via
 // cgm.Trend.String, not reimplemented here) and date is milliseconds.
 func TestEntriesFieldShape(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	fs := &fakeStore{readings: []cgm.Reading{
 		{Time: base, MgDl: 142, Trend: cgm.TrendFortyFiveDown, Source: "librelinkup"},
@@ -132,6 +136,7 @@ func TestEntriesFieldShape(t *testing.T) {
 // between two requests for the same stored reading, since a follower app
 // may use it to deduplicate.
 func TestEntriesIDIsStableForTheSameReading(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	fs := &fakeStore{readings: []cgm.Reading{reading(base, 100)}}
 	h, err := nightscout.New(fs, testToken, nil)
@@ -150,6 +155,7 @@ func TestEntriesIDIsStableForTheSameReading(t *testing.T) {
 // entries request shapes: entries/sgv.json and entries.json behave
 // identically here since every stored reading is an sgv entry.
 func TestEntriesOrderedNewestFirst(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	fs := &fakeStore{readings: seedFive(base)}
 
@@ -176,6 +182,7 @@ func seedFive(base time.Time) []cgm.Reading {
 }
 
 func TestEntriesDefaultCountIsTen(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	readings := make([]cgm.Reading, 15)
 	for i := range readings {
@@ -191,6 +198,7 @@ func TestEntriesDefaultCountIsTen(t *testing.T) {
 }
 
 func TestEntriesExplicitCount(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	h, err := nightscout.New(&fakeStore{readings: seedFive(base)}, testToken, nil)
 	if err != nil {
@@ -208,6 +216,7 @@ func TestEntriesExplicitCount(t *testing.T) {
 // xDrip4iOS's gap audit sends (find[date][$lt] computed from a wall-clock
 // interval, not from a stored reading's own timestamp).
 func TestEntriesDateBounds(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	// minute i has MgDl i+1, so minute 2 (MgDl 3) is date base+2min in ms.
 	seed := seedFive(base)
@@ -291,6 +300,7 @@ func TestEntriesDateBounds(t *testing.T) {
 // Go's own integer division truncates toward zero rather than flooring,
 // which is the wrong direction below zero.
 func TestEntriesDateBoundsBeforeEpoch(t *testing.T) {
+	t.Parallel()
 	base := time.Unix(-120, 0).UTC() // two minutes before the Unix epoch
 	seed := seedFive(base)
 	minuteMs := func(i int) int64 { return base.Add(time.Duration(i) * time.Minute).UnixMilli() }
@@ -328,6 +338,7 @@ func TestEntriesDateBoundsBeforeEpoch(t *testing.T) {
 // TestCurrentEntry checks the newest-single-reading endpoint, both with
 // data and with an empty store (a follower's very first poll).
 func TestCurrentEntry(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
 	t.Run("with readings, returns the newest one", func(t *testing.T) {
@@ -355,6 +366,7 @@ func TestCurrentEntry(t *testing.T) {
 // or date bound answers 400 with a plain message, never a panic and never
 // data returned as though the bound were absent.
 func TestEntriesMalformedParametersReturn400(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
 	cases := []struct {
@@ -399,6 +411,7 @@ func itoa64(n int64) string {
 // TestEntriesStoreErrorReturns500 checks that a failure reading the store
 // surfaces as a 500 rather than a panic or a response claiming success.
 func TestEntriesStoreErrorReturns500(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"/api/v1/entries.json", "/api/v1/entries/current.json"} {
 		t.Run(path, func(t *testing.T) {
 			h, err := nightscout.New(&fakeStore{err: errFakeStore}, testToken, nil)
@@ -418,6 +431,7 @@ func TestEntriesStoreErrorReturns500(t *testing.T) {
 // readings asks the store for exactly 2 rows, and a count=0 request never
 // queries the store at all.
 func TestEntriesLimitsStoreQuery(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	readings := make([]cgm.Reading, 20)
 	for i := range readings {
@@ -468,4 +482,313 @@ func TestEntriesLimitsStoreQuery(t *testing.T) {
 			t.Errorf("store was asked with Limit = %d, want exactly 3", fs.lastQuery.Limit)
 		}
 	})
+}
+
+// manyReadings returns n readings one minute apart starting at base, in
+// the same shape seedFive uses, generalized to sizes large enough to cross
+// the gzip size floor.
+func manyReadings(base time.Time, n int) []cgm.Reading {
+	out := make([]cgm.Reading, n)
+	for i := range out {
+		out[i] = reading(base.Add(time.Duration(i)*time.Minute), 80+i%50)
+	}
+	return out
+}
+
+// doRequestAcceptEncoding issues an authenticated GET to path with query
+// added, attaching one Accept-Encoding field line per entry in lines via
+// net/http's own Header.Add, so more than one entry sends the header
+// exactly as a client that split it across separate field lines would. A
+// nil slice sends no Accept-Encoding header at all; a slice holding a
+// single "" sends the header present with an empty value -- two shapes
+// RFC 9110 12.5.3 both end up treating as "no gzip", by different paths,
+// so a test needs a way to reach each one distinctly.
+func doRequestAcceptEncoding(t *testing.T, h http.Handler, path string, query url.Values, lines []string) *httptest.ResponseRecorder {
+	t.Helper()
+	if query == nil {
+		query = url.Values{}
+	}
+	if query.Get("token") == "" {
+		query.Set("token", testToken)
+	}
+	req := httptest.NewRequest(http.MethodGet, path+"?"+query.Encode(), nil)
+	for _, line := range lines {
+		req.Header.Add("Accept-Encoding", line)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// decodeMaybeGzipped returns rec's body, gunzipped first if
+// Content-Encoding says so, so a test can assert on one decoded byte slice
+// regardless of which path fired.
+func decodeMaybeGzipped(t *testing.T, rec *httptest.ResponseRecorder) []byte {
+	t.Helper()
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		return rec.Body.Bytes()
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gr.Close()
+	out, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("gunzip response body: %v", err)
+	}
+	return out
+}
+
+// TestWriteJSONCompressesOnlyWhenAskedAndLargeEnough is the table test
+// over every Accept-Encoding shape the compression gate must parse per
+// RFC 9110 12.5.3, driven through the real entries.json handler with a
+// body large enough to cross the gzip size floor, plus the size-floor case
+// itself. For every case it checks Vary is present, Content-Encoding
+// matches whether compression should have fired, Content-Length (when set
+// at all) matches the actual response bytes rather than the
+// pre-compression size, the decoded body still ends with the trailing
+// newline json.NewEncoder.Encode always wrote, and that decompressing (or,
+// on the plain path, simply reading) the body yields exactly the same
+// bytes a request with no Accept-Encoding header at all would have gotten
+// for the same stored data -- the "follower apps see exactly the
+// Nightscout shapes they parse today" invariant, checked byte for byte
+// rather than merely field for field.
+func TestWriteJSONCompressesOnlyWhenAskedAndLargeEnough(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	small := manyReadings(base, 5)   // well under the 1 KB gzip floor
+	large := manyReadings(base, 500) // comfortably over it
+
+	cases := []struct {
+		name                string
+		acceptEncodingLines []string
+		readings            []cgm.Reading
+		count               string
+		wantCompressed      bool
+	}{
+		{"empty header", nil, large, "500", false},
+		{"gzip accepted, small body stays plain (under the floor)", []string{"gzip"}, small, "5", false},
+		{"plain gzip", []string{"gzip"}, large, "500", true},
+		{"gzip among other codings", []string{"deflate, gzip, br"}, large, "500", true},
+		{"uppercase token", []string{"GZIP"}, large, "500", true},
+		{"mixed-case token", []string{"GzIp"}, large, "500", true},
+		{"wildcard accepts everything", []string{"*"}, large, "500", true},
+		{"gzip with q=0 explicitly refuses it", []string{"gzip;q=0"}, large, "500", false},
+		{"gzip with q=0.000 explicitly refuses it", []string{"gzip;q=0.000"}, large, "500", false},
+		{"gzip with a positive q accepts it", []string{"gzip;q=0.5"}, large, "500", true},
+		{"gzip with q=1 accepts it", []string{"gzip;q=1"}, large, "500", true},
+		{"wildcard with q=0 refuses everything, including gzip", []string{"*;q=0"}, large, "500", false},
+		{"identity only, no gzip or wildcard token", []string{"identity"}, large, "500", false},
+		{"gzip present alongside a zero-weighted wildcard", []string{"*;q=0, gzip"}, large, "500", true},
+		{"whitespace around tokens and params", []string{" gzip ; q=0.3 "}, large, "500", true},
+		{"trailing comma with no following token", []string{"gzip,"}, large, "500", true},
+		// The rows below pin RFC 9110 12.5.3's negotiation rule in full,
+		// including the cases the compression gate used to get wrong: an
+		// explicit "gzip" entry, whatever its own weight, always decides
+		// over a "*" entry, in either order; an alias or a malformed weight
+		// is read correctly; and a client that splits Accept-Encoding across
+		// more than one field line is honoured on the combined list, not
+		// only its first line.
+		{"explicit gzip refusal beats a following wildcard", []string{"gzip;q=0, *"}, large, "500", false},
+		{"explicit gzip refusal beats a preceding wildcard", []string{"*, gzip;q=0"}, large, "500", false},
+		{"the x-gzip alias is accepted", []string{"x-gzip"}, large, "500", true},
+		{"uppercase token and uppercase q parameter name", []string{"GZIP;Q=0.5"}, large, "500", true},
+		{"a q value above 1 is not a qvalue and is ignored", []string{"gzip;q=1.5"}, large, "500", false},
+		{"a non-numeric q value is not a qvalue and is ignored", []string{"gzip;q=abc"}, large, "500", false},
+		{"a q value with four decimal digits is not a qvalue and is ignored", []string{"gzip;q=0.0001"}, large, "500", false},
+		{"gzip on a second field line is honoured, not only the first line's br", []string{"br", "gzip"}, large, "500", true},
+		{"a refusal on the first field line still beats a wildcard on the second", []string{"gzip;q=0", "*"}, large, "500", false},
+		{"the header present with an empty value, distinct from absent", []string{""}, large, "500", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, err := nightscout.New(&fakeStore{readings: c.readings}, testToken, nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			rec := doRequestAcceptEncoding(t, h, "/api/v1/entries.json", url.Values{"count": {c.count}}, c.acceptEncodingLines)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+			}
+
+			if v := rec.Header().Get("Vary"); v != "Accept-Encoding" {
+				t.Errorf("Vary = %q, want %q on every response", v, "Accept-Encoding")
+			}
+
+			gotCompressed := rec.Header().Get("Content-Encoding") == "gzip"
+			if gotCompressed != c.wantCompressed {
+				t.Fatalf("Content-Encoding = %q (compressed = %v), want compressed = %v", rec.Header().Get("Content-Encoding"), gotCompressed, c.wantCompressed)
+			}
+
+			if cl := rec.Header().Get("Content-Length"); cl != "" {
+				n, err := strconv.Atoi(cl)
+				if err != nil || n != rec.Body.Len() {
+					t.Errorf("Content-Length = %q, want empty or exactly the recorded response length %d", cl, rec.Body.Len())
+				}
+			}
+
+			decoded := decodeMaybeGzipped(t, rec)
+			if len(decoded) == 0 || decoded[len(decoded)-1] != '\n' {
+				t.Errorf("decoded body does not end with a newline, want the trailing newline json.NewEncoder.Encode always wrote: %q", decoded)
+			}
+
+			// Reference: the same store and the same request, but with no
+			// Accept-Encoding header at all, so its response is never
+			// compressed -- the exact bytes a client that never asks for
+			// gzip receives today.
+			refHandler, err := nightscout.New(&fakeStore{readings: c.readings}, testToken, nil)
+			if err != nil {
+				t.Fatalf("New (reference): %v", err)
+			}
+			ref := doRequestAcceptEncoding(t, refHandler, "/api/v1/entries.json", url.Values{"count": {c.count}}, nil)
+			if !bytes.Equal(decoded, ref.Body.Bytes()) {
+				t.Errorf("decompressed body differs from the uncompressed reference response\ndecoded: %s\nref:     %s", decoded, ref.Body.Bytes())
+			}
+		})
+	}
+}
+
+// checkVaryAndStatus asserts rec's status is wantStatus and that it
+// carries Vary: Accept-Encoding regardless, the one property every row in
+// TestVaryAlwaysSetRegardlessOfStatus exists to check.
+func checkVaryAndStatus(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int) {
+	t.Helper()
+	if rec.Code != wantStatus {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, wantStatus, rec.Body.String())
+	}
+	if v := rec.Header().Get("Vary"); v != "Accept-Encoding" {
+		t.Errorf("Vary = %q, want %q", v, "Accept-Encoding")
+	}
+}
+
+// TestVaryAlwaysSetRegardlessOfStatus checks that Vary: Accept-Encoding is
+// on every response this handler writes, whatever its status: a 200 and a
+// 401 on every registered endpoint, every 400 handleEntries can answer, a
+// 500 from a failing reading source on both entries routes and current,
+// and a 404 for a path this handler does not implement. Every one of
+// these but the 200s bypasses writeJSON entirely, so a fix that set the
+// header only there would miss them all silently.
+func TestVaryAlwaysSetRegardlessOfStatus(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("200 on every registered endpoint", func(t *testing.T) {
+		for _, path := range nightscoutEndpoints {
+			t.Run(path, func(t *testing.T) {
+				h, err := nightscout.New(&fakeStore{}, testToken, nil)
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				checkVaryAndStatus(t, doRequest(t, h, path, nil), http.StatusOK)
+			})
+		}
+	})
+
+	t.Run("401 on every registered endpoint", func(t *testing.T) {
+		for _, path := range nightscoutEndpoints {
+			t.Run(path, func(t *testing.T) {
+				h, err := nightscout.New(&fakeStore{}, testToken, nil)
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				checkVaryAndStatus(t, rec, http.StatusUnauthorized)
+			})
+		}
+	})
+
+	badInputCases := []struct {
+		name  string
+		query url.Values
+	}{
+		{"a malformed count", url.Values{"count": {"banana"}}},
+		{"a malformed millisecond bound", url.Values{"find[date][$gte]": {"yesterday"}}},
+		{"an unsupported find[date] operator", url.Values{"find[date][$ne]": {"1000"}}},
+	}
+	for _, c := range badInputCases {
+		t.Run("400 on "+c.name, func(t *testing.T) {
+			h, err := nightscout.New(&fakeStore{readings: seedFive(base)}, testToken, nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			checkVaryAndStatus(t, doRequest(t, h, "/api/v1/entries.json", c.query), http.StatusBadRequest)
+		})
+	}
+
+	t.Run("500 from a failing reading source", func(t *testing.T) {
+		for _, path := range []string{
+			"/api/v1/entries.json",
+			"/api/v1/entries/sgv.json",
+			"/api/v1/entries/current.json",
+		} {
+			t.Run(path, func(t *testing.T) {
+				h, err := nightscout.New(&fakeStore{err: errFakeStore}, testToken, nil)
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				checkVaryAndStatus(t, doRequest(t, h, path, nil), http.StatusInternalServerError)
+			})
+		}
+	})
+
+	t.Run("404 for an unimplemented path", func(t *testing.T) {
+		h, err := nightscout.New(&fakeStore{}, testToken, nil)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/nonexistent.json", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		checkVaryAndStatus(t, rec, http.StatusNotFound)
+	})
+}
+
+// TestHeadRequestOnLargeGzippedResponse checks, through a real HTTP server
+// rather than httptest.NewRecorder (which does not model HEAD-body
+// suppression), that a HEAD request to a large, gzip-eligible
+// entries.json response still reports the same headers the equivalent GET
+// would while carrying no body: Go's transport layer suppresses a HEAD
+// response's body, not the handler, so this compression logic is not
+// exposed to a HEAD-specific truncation risk.
+func TestHeadRequestOnLargeGzippedResponse(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	h, err := nightscout.New(&fakeStore{readings: manyReadings(base, 500)}, testToken, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodHead, srv.URL+"/api/v1/entries.json?token="+testToken+"&count=500", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("HEAD request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding = %q, want %q", ce, "gzip")
+	}
+	if v := resp.Header.Get("Vary"); v != "Accept-Encoding" {
+		t.Errorf("Vary = %q, want %q", v, "Accept-Encoding")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read HEAD response body: %v", err)
+	}
+	if len(body) != 0 {
+		t.Errorf("HEAD response body has %d bytes, want 0", len(body))
+	}
 }
