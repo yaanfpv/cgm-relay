@@ -128,7 +128,7 @@ struct DatabaseRecoveryTests {
         #expect(flock(fd, LOCK_EX | LOCK_NB) == 0, "the test's own holder could not take the lock")
         close(fd) // releases the flock, as a process quitting would.
 
-        try DatabaseRecovery.moveAside(databasePath: original, now: Self.fixedNow)
+        try Self.moveAsideRetryingTransientLock(databasePath: original, now: Self.fixedNow)
 
         #expect(!FileManager.default.fileExists(atPath: original))
         let destination = DatabaseRecovery.movedAsidePath(for: original, now: Self.fixedNow)
@@ -211,7 +211,7 @@ struct DatabaseRecoveryTests {
         // nothing failing this time, must finish under firstDestination
         // rather than choosing a new timestamp.
         let retryNow = Self.fixedNow.addingTimeInterval(1)
-        try DatabaseRecovery.moveAside(databasePath: original, now: retryNow)
+        try Self.moveAsideRetryingTransientLock(databasePath: original, now: retryNow)
 
         let secondDestination = DatabaseRecovery.movedAsidePath(for: original, now: retryNow)
         #expect(FileManager.default.fileExists(atPath: firstDestination), "the whole set must land under the first dated base")
@@ -221,6 +221,27 @@ struct DatabaseRecoveryTests {
         #expect(!FileManager.default.fileExists(atPath: original), "the original path must hold none of the set")
         #expect(!FileManager.default.fileExists(atPath: original + "-wal"))
         #expect(!FileManager.default.fileExists(atPath: original + "-shm"))
+    }
+
+    /// moveAsideRetryingTransientLock retries moveAside on `.locked` alone, for up to one second.
+    /// Tests in this process run in parallel and some start real child processes; a child caught
+    /// between fork and exec holds a copy of every open descriptor, close-on-exec or not, so a lock
+    /// this test has just released can still read as held for a moment. Only callers that re-take
+    /// a lock they themselves just released use this.
+    private static func moveAsideRetryingTransientLock(
+        databasePath: String,
+        now: Date,
+        fileManager: FileManager = .default,
+        deadline: Date = Date().addingTimeInterval(1)
+    ) throws {
+        while true {
+            do {
+                try DatabaseRecovery.moveAside(databasePath: databasePath, now: now, fileManager: fileManager)
+                return
+            } catch DatabaseRecoveryError.locked where Date() < deadline {
+                usleep(2_000)
+            }
+        }
     }
 
     @Test("a stale record naming a base that already holds a complete set is ignored, and the new database at the original path moves to a fresh base")
