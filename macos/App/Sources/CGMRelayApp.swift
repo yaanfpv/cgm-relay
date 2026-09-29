@@ -16,9 +16,9 @@ private let devLogger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "deb
 #endif
 
 /// CGMRelayApp is the whole app: a menu bar item, with no Dock icon
-/// (LSUIElement, set in Info.plist) except while Settings is open, and no
-/// visible window until Settings is opened. It never shows its own window
-/// on launch.
+/// (LSUIElement, set in Info.plist) except while Settings or setup is open.
+/// It shows a window on launch only while first-launch setup is
+/// incomplete.
 @main
 struct CGMRelayApp: App {
     @StateObject private var model: AppModel
@@ -34,7 +34,10 @@ struct CGMRelayApp: App {
                 credentialStore: store,
                 settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride),
                 databasePath: CGMRelayApp.databasePath(keychainServiceOverride: keychainServiceOverride),
-                librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL()
+                librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL(),
+                tailscale: RealTailscaleController(
+                    executableURL: CGMRelayApp.tailscaleExecutable(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
+                )
             )
         )
     }
@@ -44,8 +47,20 @@ struct CGMRelayApp: App {
             MenuContentView(model: model)
         } label: {
             MenuBarLabel(dot: model.menuState.dot, statusDescription: model.menuState.shortStatus)
+                .modifier(SetupPresenter(model: model))
         }
         .menuBarExtraStyle(.window)
+
+        // First-launch setup: opened by SetupPresenter after a launch that
+        // finds setup incomplete, and by the menu's "Finish setup…", never
+        // by the system on its own.
+        Window("Set Up CGM Relay", id: SetupWindow.id) {
+            SetupView(model: model)
+                .onDisappear { WindowActivation.returnToMenuBarOnlyIfNoWindowsRemain() }
+        }
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
 
         // A Settings scene, not a plain Window: the system titles and
         // manages the window itself (a Cmd-, shortcut and a Settings…/
@@ -59,7 +74,7 @@ struct CGMRelayApp: App {
         // type hosted the window.
         Settings {
             SettingsView(model: model)
-                .onDisappear { NSApp.setActivationPolicy(.accessory) }
+                .onDisappear { WindowActivation.returnToMenuBarOnlyIfNoWindowsRemain() }
         }
         .windowResizability(.contentSize)
         // A starting guess only: matches SettingsView's own fixed pane
@@ -154,6 +169,24 @@ struct CGMRelayApp: App {
         return UserDefaults.standard.string(forKey: "CGMRelayLibreLinkUpBaseURL")
         #else
         return nil
+        #endif
+    }
+
+    /// tailscaleExecutable is the Tailscale command line tool this launch
+    /// uses. A release build looks in Tailscale's standard locations; a
+    /// debug build never touches the real Tailscale and only runs a fake
+    /// named by `-CGMRelayTailscalePath <path>`, honoured only together
+    /// with an explicit throwaway `-CGMRelayKeychainService`, exactly like
+    /// the synthetic account seed (TailscaleLocator holds the decision).
+    private static func tailscaleExecutable(explicitKeychainServiceOverride: String?) -> URL? {
+        #if DEBUG
+        return TailscaleLocator.resolve(
+            isDebugBuild: true,
+            fakePath: UserDefaults.standard.string(forKey: "CGMRelayTailscalePath"),
+            explicitKeychainServiceOverride: explicitKeychainServiceOverride
+        )
+        #else
+        return TailscaleLocator.resolve(isDebugBuild: false, fakePath: nil, explicitKeychainServiceOverride: nil)
         #endif
     }
 

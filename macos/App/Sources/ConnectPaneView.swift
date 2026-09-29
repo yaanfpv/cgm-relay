@@ -7,17 +7,43 @@ import SwiftUI
 /// It never offers an address the engine is not actually listening on or a
 /// phone could never reach (model.connectPaneAddressState's own contract),
 /// and shows a plain reason instead of a guess whenever there is none
-/// right now.
-struct ConnectPaneView: View {
+/// right now. Setup's last step is this same view, laid out more compactly,
+/// with its own way out of the blocked state and its own trailing sections.
+/// The token is read from the Keychain once when the view appears and again
+/// after a rotation, and held in state.
+struct ConnectPaneView<Extra: View>: View {
     @ObservedObject var model: AppModel
-    let openAdvancedPane: () -> Void
+    let blockedSecondary: String
+    /// blockedAction is the button offered when this Mac cannot be reached
+    /// yet, or nil where the surrounding window already has a way out.
+    let blockedAction: (label: String, run: () -> Void)?
+    let showsTokenRotation: Bool
+    /// isCompact puts the QR code beside the address and token and drops
+    /// the section header, for a window that must not scroll.
+    let isCompact: Bool
+    let extra: (_ token: String) -> Extra
 
+    init(
+        model: AppModel,
+        blockedSecondary: String,
+        blockedAction: (label: String, run: () -> Void)?,
+        showsTokenRotation: Bool,
+        isCompact: Bool,
+        @ViewBuilder extra: @escaping (_ token: String) -> Extra
+    ) {
+        self.model = model
+        self.blockedSecondary = blockedSecondary
+        self.blockedAction = blockedAction
+        self.showsTokenRotation = showsTokenRotation
+        self.isCompact = isCompact
+        self.extra = extra
+    }
+
+    @State private var token = ""
     @State private var tokenRevealed = false
     @State private var isConfirmingRotate = false
     @State private var isRotating = false
     @State private var rotateErrorMessage: String?
-
-    private var token: String { model.currentToken() ?? "" }
 
     var body: some View {
         Form {
@@ -26,19 +52,26 @@ struct ConnectPaneView: View {
                 blockedSection(
                     symbol: "laptopcomputer",
                     message: "A follower app on your phone can't reach this Mac yet.",
-                    secondary: "Switch to My tailnet or My local network in Advanced to change that.",
-                    actionLabel: "Open Advanced…",
-                    action: openAdvancedPane
+                    secondary: blockedSecondary,
+                    actionLabel: blockedAction?.label,
+                    action: blockedAction?.run
                 )
             case .unavailable(let reason):
                 blockedSection(symbol: "clock", message: reason, secondary: nil, actionLabel: nil, action: nil)
             case .ready(let address):
                 readySection(address: address)
+                extra(token)
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
-        .onAppear { model.refreshNetworkAddresses() }
+        .onAppear {
+            token = model.currentToken() ?? ""
+            model.refreshNetworkAddresses()
+            if model.settings.tailscaleHTTPSEnabled {
+                Task { await model.refreshTailscale() }
+            }
+        }
     }
 
     /// blockedSection is every state a follower app cannot yet connect
@@ -80,7 +113,25 @@ struct ConnectPaneView: View {
         }
     }
 
+    @ViewBuilder
     private func readySection(address: String) -> some View {
+        if isCompact {
+            Section {
+                HStack(alignment: .center, spacing: 16) {
+                    qrTile(address: address)
+                    VStack(alignment: .leading, spacing: 10) {
+                        addressRow(address: address)
+                        Divider()
+                        tokenRow
+                    }
+                }
+            }
+        } else {
+            standardReadySection(address: address)
+        }
+    }
+
+    private func standardReadySection(address: String) -> some View {
         Section {
             qrTile(address: address)
             addressRow(address: address)
@@ -88,11 +139,13 @@ struct ConnectPaneView: View {
         } header: {
             Text("Point a follower app (xDrip4iOS, LoopFollow, Nightguard) at this address.")
         } footer: {
-            VStack(alignment: .leading, spacing: 8) {
-                rotateButton
-                if let rotateErrorMessage {
-                    Text(rotateErrorMessage)
-                        .foregroundStyle(.red)
+            if showsTokenRotation {
+                VStack(alignment: .leading, spacing: 8) {
+                    rotateButton
+                    if let rotateErrorMessage {
+                        Text(rotateErrorMessage)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
         }
@@ -150,8 +203,8 @@ struct ConnectPaneView: View {
     /// own contrast is a functional requirement, not a decoration.
     private func qrTile(address: String) -> some View {
         HStack {
-            Spacer()
-            if let qrImage = try? QRCodeGenerator.nsImage(for: "\(address)/?token=\(token)") {
+            if !isCompact { Spacer() }
+            if !token.isEmpty, let qrImage = try? QRCodeGenerator.nsImage(for: "\(address)/?token=\(token)") {
                 Image(nsImage: qrImage)
                     .interpolation(.none)
                     .resizable()
@@ -163,7 +216,7 @@ struct ConnectPaneView: View {
                     )
                     .accessibleImageName("QR code: scan with a follower app to connect using this address and token")
             }
-            Spacer()
+            if !isCompact { Spacer() }
         }
         .padding(.vertical, 4)
     }
@@ -193,7 +246,9 @@ struct ConnectPaneView: View {
         Task {
             isRotating = true
             rotateErrorMessage = nil
-            if await model.rotateToken() == nil {
+            if let newToken = await model.rotateToken() {
+                token = newToken
+            } else {
                 rotateErrorMessage = "Couldn't create a new token. Try again."
             }
             isRotating = false
@@ -204,5 +259,20 @@ struct ConnectPaneView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(value, forType: .string)
+    }
+}
+
+extension ConnectPaneView where Extra == EmptyView {
+    /// The Settings window's Connect pane: the blocked state points at
+    /// Advanced, and there is nothing after the address card.
+    init(model: AppModel, openAdvancedPane: @escaping () -> Void) {
+        self.init(
+            model: model,
+            blockedSecondary: "Switch to My tailnet or My local network in Advanced to change that.",
+            blockedAction: ("Open Advanced…", openAdvancedPane),
+            showsTokenRotation: true,
+            isCompact: false,
+            extra: { _ in EmptyView() }
+        )
     }
 }

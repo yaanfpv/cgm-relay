@@ -11,12 +11,25 @@ public enum BoundedProcessResult: Sendable, Equatable {
     case failedToLaunch
 }
 
+/// BoundedProcessOutput is a bounded run's result together with everything
+/// the process wrote to stdout and stderr, for a caller that has to read
+/// the process's answer (not only its exit code) and never shows it as is.
+public struct BoundedProcessOutput: Sendable, Equatable {
+    public var result: BoundedProcessResult
+    public var output: Data
+
+    public init(result: BoundedProcessResult, output: Data) {
+        self.result = result
+        self.output = output
+    }
+}
+
 /// BoundedProcessRunning runs a short-lived child process to completion:
 /// write standardInputData to its stdin, close it, and wait for the
 /// process to exit on its own within timeout. Unlike ProcessLauncher,
 /// which supervises a process meant to keep running indefinitely, this is
-/// for a one-shot command (check-account) whose only output this app ever
-/// reads is its exit code.
+/// for a one-shot command: check-account, read by its exit code alone, or
+/// a Tailscale command, whose answer runCapturingOutput also returns.
 public protocol BoundedProcessRunning: Sendable {
     func run(
         executableURL: URL,
@@ -24,17 +37,32 @@ public protocol BoundedProcessRunning: Sendable {
         standardInputData: Data,
         timeout: Duration
     ) async -> BoundedProcessResult
+
+    /// runCapturingOutput is `run` that also keeps the child's stdout and
+    /// stderr, interleaved as written.
+    func runCapturingOutput(
+        executableURL: URL,
+        arguments: [String],
+        standardInputData: Data,
+        timeout: Duration
+    ) async -> BoundedProcessOutput
 }
 
 /// RealBoundedProcessRunner runs the process with Foundation.Process,
 /// giving it the same minimal, explicit environment RealProcessLauncher
 /// gives the supervised engine: a one-shot command needs no more of this
-/// app's own environment than the supervised one does. Its own stdout and
-/// stderr are discarded outright -- check-account promises to print no
-/// secret, but this type has no reason to keep anything it says either,
-/// since its only contract with a caller is the exit code.
+/// app's own environment than the supervised one does. `run` discards the
+/// child's stdout and stderr outright -- check-account promises to print no
+/// secret, and its only contract with a caller is the exit code;
+/// `runCapturingOutput` keeps them for a caller that must read the answer.
 public struct RealBoundedProcessRunner: BoundedProcessRunning {
-    public init() {}
+    /// extraEnvironment is added to the minimal child environment, for a
+    /// caller whose child needs one variable more than the engine does.
+    private let extraEnvironment: [String: String]
+
+    public init(extraEnvironment: [String: String] = [:]) {
+        self.extraEnvironment = extraEnvironment
+    }
 
     public func run(
         executableURL: URL,
@@ -42,12 +70,45 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
         standardInputData: Data,
         timeout: Duration
     ) async -> BoundedProcessResult {
+        await execute(
+            executableURL: executableURL,
+            arguments: arguments,
+            standardInputData: standardInputData,
+            timeout: timeout,
+            captureOutput: false
+        ).result
+    }
+
+    public func runCapturingOutput(
+        executableURL: URL,
+        arguments: [String],
+        standardInputData: Data,
+        timeout: Duration
+    ) async -> BoundedProcessOutput {
+        await execute(
+            executableURL: executableURL,
+            arguments: arguments,
+            standardInputData: standardInputData,
+            timeout: timeout,
+            captureOutput: true
+        )
+    }
+
+    private func execute(
+        executableURL: URL,
+        arguments: [String],
+        standardInputData: Data,
+        timeout: Duration,
+        captureOutput: Bool
+    ) async -> BoundedProcessOutput {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
         process.environment = RealProcessLauncher.childEnvironment(from: ProcessInfo.processInfo.environment)
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+            .merging(extraEnvironment) { _, added in added }
+        let outputPipe = captureOutput ? Pipe() : nil
+        process.standardOutput = outputPipe ?? FileHandle.nullDevice
+        process.standardError = outputPipe ?? FileHandle.nullDevice
         let inputPipe = Pipe()
         process.standardInput = inputPipe
         disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
@@ -63,8 +124,13 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
         do {
             try process.run()
         } catch {
-            return .failedToLaunch
+            return BoundedProcessOutput(result: .failedToLaunch, output: Data())
         }
+
+        // The parent's copy of the write end must close, or the read below
+        // never sees end of file after the child exits.
+        try? outputPipe?.fileHandleForWriting.close()
+        let collectedOutput = outputPipe.map { OutputCollection(reading: $0.fileHandleForReading) }
 
         let writeHandle = inputPipe.fileHandleForWriting
         do {
@@ -78,7 +144,7 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
         }
         try? writeHandle.close()
 
-        return await withTaskGroup(of: Int32?.self) { group in
+        let result: BoundedProcessResult = await withTaskGroup(of: Int32?.self) { group in
             group.addTask { await exitSignal.wait() }
             group.addTask {
                 try? await Task.sleep(for: timeout)
@@ -112,6 +178,38 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
             }
             _ = await group.next()
             return .timedOut
+        }
+        return BoundedProcessOutput(result: result, output: await collectedOutput?.data() ?? Data())
+    }
+}
+
+/// OutputCollection drains a pipe to end of file off the cooperative pool,
+/// so a child that writes more than a pipe buffer never blocks on a full
+/// pipe while the runner waits for its exit. Once the child is gone,
+/// `data()` waits only briefly for the end of file: a descendant that
+/// inherited the pipe and outlives it must not hold the caller.
+private final class OutputCollection: @unchecked Sendable {
+    private static let drainGrace: DispatchTimeInterval = .seconds(2)
+
+    private let done = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var collected = Data()
+
+    init(reading handle: FileHandle) {
+        DispatchQueue.global().async { [self] in
+            while let chunk = try? handle.read(upToCount: 65536), !chunk.isEmpty {
+                lock.withLock { collected.append(chunk) }
+            }
+            done.signal()
+        }
+    }
+
+    func data() async -> Data {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { [self] in
+                _ = done.wait(timeout: .now() + Self.drainGrace)
+                continuation.resume(returning: lock.withLock { collected })
+            }
         }
     }
 }

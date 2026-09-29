@@ -211,8 +211,7 @@ var followerRequests = []followerRequest{
 		path:       "/api/v1/treatments",
 		query:      url.Values{"count": {"1"}},
 		credential: credentialTokenQuery,
-		wantStatus: http.StatusNotFound,
-		note:       "harmless: both callers only `guard case .success` else log a warning and return Date()/nil (lines 1794-1805, 1845-1856) — neither is fatal to following",
+		wantStatus: http.StatusOK,
 	},
 	{
 		name:       "Nightguard N7: nightguard@master NightscoutService.swift readLatestTreatements line 2046, legacy path \"api/v1/treatments.json\"",
@@ -242,8 +241,7 @@ var followerRequests = []followerRequest{
 		method:     http.MethodGet,
 		path:       "/api/v1/devicestatus",
 		credential: credentialAPISecretSHA1,
-		wantStatus: http.StatusNotFound,
-		note:       "harmless: gated by the opt-in dataFlowPolicy.importsStatusFromNightscout therapy-import setting (off by default), and updateDeviceStatus's own catch only traces the error — it never blocks entries or profile",
+		wantStatus: http.StatusOK,
 	},
 	{
 		name:       "xDrip4iOS X4: xdripswift@develop NightscoutSyncManager.swift testNightscoutCredentials 2004-2026, nightscoutAuthTestPath = \"/api/v1/experiments/test\"",
@@ -265,8 +263,7 @@ var followerRequests = []followerRequest{
 		method:     http.MethodGet,
 		path:       "/api/v1/treatments",
 		credential: credentialAPISecretSHA1,
-		wantStatus: http.StatusNotFound,
-		note:       "harmless: a separate, rate-limited (60s), independently enqueued call (lines 123-131) whose own onFailure only posts a status message — it does not affect the entries download",
+		wantStatus: http.StatusOK,
 	},
 	{
 		name:       "xDrip+ P3: xDrip@master NightscoutFollow.java getDeviceStatus 61-62, gated by NsServerCapabilities.supportsDeviceStatus and self-disabled after a 4xx (133-141, 205-216)",
@@ -296,8 +293,7 @@ var followerRequests = []followerRequest{
 		method:     http.MethodGet,
 		path:       "/api/v1/profiles.json",
 		credential: credentialTokenQuery,
-		wantStatus: http.StatusNotFound,
-		note:       "harmless: webLoadNSProfile's .failure case only logs (Profile.swift 23-24), independent of every other periodic fetch",
+		wantStatus: http.StatusOK,
 	},
 	{
 		name:       "LoopFollow L4: LoopFollow@main NightscoutUtils.swift EventType.endpoint 52-53, Treatments.swift 49-51 (cage/carbsToday/sage/iage)",
@@ -331,6 +327,65 @@ var followerRequests = []followerRequest{
 		wantStatus: http.StatusNotFound,
 		note:       "harmless: webLoadNSDBSize's .failure case only logs (DBSize.swift), which clears the db-size info pill via updateDBSize's own guard; dbSizeTaskAction reschedules itself unconditionally every 6 hours regardless of success or failure (DBSizeTask.swift), so a 404 here never blocks or delays any other periodic task",
 	},
+}
+
+// aliasPairs maps each path a follower app requests an empty collection by
+// to the path that answers the same collection under its other spelling.
+// Each alias must answer exactly what its sibling answers.
+var aliasPairs = []struct{ alias, sibling string }{
+	{"/api/v1/treatments", "/api/v1/treatments.json"},
+	{"/api/v1/devicestatus", "/api/v1/devicestatus.json"},
+	{"/api/v1/profiles.json", "/api/v1/profile"},
+}
+
+// TestAliasesAnswerAsTheirSibling checks, for every credential form the
+// relay accepts, that an alias returns the same status, content type and
+// body as its sibling, and is served only with the right token.
+func TestAliasesAnswerAsTheirSibling(t *testing.T) {
+	t.Parallel()
+	h, err := nightscout.New(&fakeStore{}, testToken, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	forms := []struct {
+		name string
+		form credentialForm
+	}{
+		{"token query", credentialTokenQuery},
+		{"api-secret SHA-1", credentialAPISecretSHA1},
+		{"api-secret raw", credentialAPISecretRaw},
+	}
+	get := func(path string, form credentialForm, secret string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if secret != "" {
+			applyCredential(req, form, secret)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, p := range aliasPairs {
+		for _, f := range forms {
+			for _, secret := range []string{testToken, "", "wrong-token"} {
+				t.Run(p.alias+" "+f.name+" secret="+secret, func(t *testing.T) {
+					want := get(p.sibling, f.form, secret)
+					got := get(p.alias, f.form, secret)
+					if served := got.Code == http.StatusOK; served != (secret == testToken) {
+						t.Fatalf("alias status = %d for secret %q, want it served only with the right token", got.Code, secret)
+					}
+					if got.Code != want.Code {
+						t.Errorf("alias status = %d, sibling %s answers %d", got.Code, p.sibling, want.Code)
+					}
+					if gc, wc := got.Header().Get("Content-Type"), want.Header().Get("Content-Type"); gc != wc {
+						t.Errorf("alias Content-Type = %q, sibling answers %q", gc, wc)
+					}
+					if got.Body.String() != want.Body.String() {
+						t.Errorf("alias body = %q, sibling answers %q", got.Body.String(), want.Body.String())
+					}
+				})
+			}
+		}
+	}
 }
 
 // TestFollowerAppRequests runs every row in followerRequests against a

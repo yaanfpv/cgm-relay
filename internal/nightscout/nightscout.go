@@ -68,9 +68,16 @@ func (h *handler) registerRoutes() {
 	h.mux.HandleFunc("GET /api/v1/entries/current.json", h.handleCurrent)
 	h.mux.HandleFunc("GET /api/v1/status.json", h.handleStatus)
 	h.mux.HandleFunc("GET /api/v1/experiments/test", h.handleAuthTest)
-	h.mux.HandleFunc("GET /api/v1/treatments.json", h.handleEmptyList)
-	h.mux.HandleFunc("GET /api/v1/devicestatus.json", h.handleEmptyList)
-	h.mux.HandleFunc("GET /api/v1/profile", h.handleEmptyList)
+	// Each empty collection is also served at every spelling a follower app
+	// requests it by (with or without ".json", "profile" or "profiles.json"),
+	// so each spelling gets the same answer instead of a 404.
+	for _, path := range []string{
+		"/api/v1/treatments.json", "/api/v1/treatments",
+		"/api/v1/devicestatus.json", "/api/v1/devicestatus",
+		"/api/v1/profile", "/api/v1/profiles.json",
+	} {
+		h.mux.HandleFunc("GET "+path, h.handleEmptyList)
+	}
 }
 
 // ServeHTTP sets Vary: Accept-Encoding on every response this handler

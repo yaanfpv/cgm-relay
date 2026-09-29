@@ -145,8 +145,11 @@ func TestEmptyCollectionEndpoints(t *testing.T) {
 	t.Parallel()
 	for _, path := range []string{
 		"/api/v1/treatments.json",
+		"/api/v1/treatments",
 		"/api/v1/devicestatus.json",
+		"/api/v1/devicestatus",
 		"/api/v1/profile",
+		"/api/v1/profiles.json",
 	} {
 		t.Run(path, func(t *testing.T) {
 			h, err := nightscout.New(&fakeStore{}, testToken, nil)

@@ -46,4 +46,25 @@ struct AppSettingsTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
         #expect(decoded == original)
     }
+
+    @Test("Tailscale HTTPS on binds this Mac only whatever reach was chosen; off leaves the chosen reach")
+    func effectiveReachFollowsTailscaleHTTPS() {
+        var settings = AppSettings.default
+        settings.reach = .myLocalNetwork
+        #expect(settings.effectiveReach == .myLocalNetwork)
+        settings.tailscaleHTTPSEnabled = true
+        #expect(settings.effectiveReach == .thisMacOnly)
+        #expect(settings.reach == .myLocalNetwork, "the earlier choice comes back when HTTPS is turned off")
+    }
+
+    @Test("setup and Tailscale HTTPS default off and survive a round trip")
+    func setupFieldsRoundTrip() throws {
+        #expect(AppSettings.default.setupFinished == false)
+        #expect(AppSettings.default.tailscaleHTTPSEnabled == false)
+        var settings = AppSettings.default
+        settings.setupFinished = true
+        settings.tailscaleHTTPSEnabled = true
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded == settings)
+    }
 }

@@ -12,6 +12,7 @@ import SwiftUI
 struct MenuContentView: View {
     @ObservedObject var model: AppModel
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
     @State private var isConfirmingStartFresh = false
 
@@ -19,19 +20,23 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             heroReading
 
-            HStack(alignment: .top, spacing: 6) {
-                StatusDotView(dot: model.menuState.dot)
-                    .padding(.top, 4)
-                    .accessibilityHidden(true)
-                statusAndAgeLine
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            if model.needsSetup {
+                AccessibleButton("Finish setup…", style: .primary, action: openSetupWindow)
+            } else {
+                HStack(alignment: .top, spacing: 6) {
+                    StatusDotView(dot: model.menuState.dot)
+                        .padding(.top, 4)
+                        .accessibilityHidden(true)
+                    statusAndAgeLine
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-            if let statusDetail = model.menuState.statusDetail {
-                Text(statusDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let statusDetail = model.menuState.statusDetail {
+                    Text(statusDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if !model.menuState.lastPolledLine.isEmpty {
@@ -151,12 +156,16 @@ struct MenuContentView: View {
 
     /// openSettingsWindow is the Settings… button's action.
     private func openSettingsWindow() {
-        // macOS will not bring forward a window of an app with no Dock
-        // icon, so the app becomes a regular one while Settings is open;
-        // the Settings window turns it back on close.
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
+        WindowActivation.bringAppForward()
         openSettings()
+        dismiss()
+    }
+
+    /// openSetupWindow is "Finish setup…", through the same activation
+    /// path as Settings….
+    private func openSetupWindow() {
+        WindowActivation.bringAppForward()
+        openWindow(id: SetupWindow.id)
         dismiss()
     }
 }

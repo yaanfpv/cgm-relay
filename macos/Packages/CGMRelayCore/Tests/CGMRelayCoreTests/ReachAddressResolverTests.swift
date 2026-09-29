@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import CGMRelayCore
 
@@ -128,15 +129,10 @@ struct ConnectPaneAddressStateTests {
         ("This Mac only, no address available for the chosen reach at all", .thisMacOnly, nil, "127.0.0.1", .unavailable(reason: "n/a"), .thisMacOnly),
 
         ("My tailnet, bound to the tailnet address", .myTailnet, "100.101.102.5", "100.101.102.5", .available("100.101.102.5"), .ready(address: "http://100.101.102.5:1337")),
-        // Corrected: this row used to assert .ready for a bound tailnet
-        // address whatever displayHostAvailability said. That is
-        // actually the shape of the bug: Tailscale disconnects after the
-        // engine started, so the currently implied host falls back to
-        // loopback while boundHost is still the stale tailnet address --
-        // exactly what disagreeing availability here reports. The engine
-        // is not listening on the address it would show, so the pane
-        // must say the network setting is being applied, never offer it
-        // as ready.
+        // Tailscale disconnects after the engine started: the implied host
+        // falls back to loopback while boundHost is still the tailnet
+        // address, so the pane says the setting is being applied rather
+        // than offering an address nothing listens on.
         ("My tailnet, Tailscale disconnected after start: bound to the now-stale tailnet address", .myTailnet, "100.101.102.5", "127.0.0.1", .unavailable(reason: "Waiting for Tailscale to connect."), .unavailable(reason: "The network setting is being applied.")),
         ("consequence: My tailnet bound to the loopback fallback is never offered as ready", .myTailnet, "127.0.0.1", "127.0.0.1", .available("100.101.102.5"), .unavailable(reason: "Waiting for Tailscale to connect.")),
         ("My tailnet, nothing running", .myTailnet, nil, "100.101.102.5", .available("100.101.102.5"), .unavailable(reason: "The engine isn't running right now.")),
@@ -170,5 +166,68 @@ struct BoundAddressDecisionTests {
     @Test("a freshly implied host that differs from the one currently bound needs a restart")
     func differentHostNeedsRestart() {
         #expect(BoundAddressDecision.decide(currentBoundHost: "127.0.0.1", impliedBindHost: "100.101.102.5") == .restartNeeded)
+    }
+}
+
+@Suite("Addresses shown to follower apps")
+struct FollowerAddressTests {
+    static let name = "relay-mac.example-tailnet.ts.net"
+    static let tailscaleCases: [(name: String, boundHost: String?, tailscale: TailscaleStatus, https: TailscaleHTTPSState, want: ConnectPaneAddressState)] = [
+        ("Tailscale serves ours on 443: the https name with no port", "127.0.0.1", .running(name: name), .on(port: 443), .ready(address: "https://relay-mac.example-tailnet.ts.net")),
+        ("Tailscale serves ours on 8443: the port is in the address", "127.0.0.1", .running(name: name), .on(port: 8443), .ready(address: "https://relay-mac.example-tailnet.ts.net:8443")),
+        ("serving, engine stopped", nil, .running(name: name), .on(port: 443), .unavailable(reason: "The engine isn't running right now.")),
+        ("chosen but Tailscale no longer serves it: never a ready address", "127.0.0.1", .running(name: name), .off(port: 443), .unavailable(reason: "Tailscale HTTPS is off right now.")),
+        ("chosen but every port is taken", "127.0.0.1", .running(name: name), .noFreePort, .unavailable(reason: "Tailscale HTTPS is off right now.")),
+        ("serve settings unreadable", "127.0.0.1", .running(name: name), .unreadable, .unavailable(reason: "Couldn't read Tailscale's settings right now.")),
+        ("Tailscale stopped: never an http address in its place", "127.0.0.1", .stopped, .unavailable, .unavailable(reason: "Waiting for Tailscale to connect.")),
+        ("Tailscale absent", "127.0.0.1", .absent, .unavailable, .unavailable(reason: "Waiting for Tailscale to connect.")),
+        ("not checked yet", "127.0.0.1", .unknown, .unknown, .unavailable(reason: "Checking Tailscale…")),
+    ]
+
+    @Test("with Tailscale HTTPS chosen, the address is the https name only while Tailscale itself serves it", arguments: tailscaleCases)
+    func tailscaleHTTPSAddress(_ testCase: (name: String, boundHost: String?, tailscale: TailscaleStatus, https: TailscaleHTTPSState, want: ConnectPaneAddressState)) {
+        #expect(ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: testCase.boundHost, tailscale: testCase.tailscale, https: testCase.https) == testCase.want)
+    }
+
+    static let counterexamples: [(name: String, json: String)] = [
+        ("plain HTTP on the port", TailscaleServeTests.httpOnlyTCP),
+        ("another host's entry on the port", TailscaleServeTests.otherHost443),
+        ("a foreground session's handler", TailscaleServeTests.foregroundOurs443),
+    ]
+
+    @Test("a Tailscale entry that is not this Mac's own HTTPS handler never becomes a ready address", arguments: counterexamples)
+    func notOursNeverReady(_ testCase: (name: String, json: String)) {
+        let config = TailscaleServeConfigParser.parse(Data(testCase.json.utf8))
+        let state = TailscaleHTTPSState.evaluate(status: .running(name: Self.name), config: config, relayPort: 1337)
+        #expect(!state.isOn)
+        let got = ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: "127.0.0.1", tailscale: .running(name: Self.name), https: state)
+        guard case .unavailable = got else {
+            Issue.record("\(testCase.name): got \(got)")
+            return
+        }
+    }
+
+    @Test("this Mac's own HTTPS handler read from Tailscale's output is on, with the ready address")
+    func ownHandlerIsReady() {
+        let config = TailscaleServeConfigParser.parse(Data(TailscaleServeTests.ours443.utf8))
+        let state = TailscaleHTTPSState.evaluate(status: .running(name: Self.name), config: config, relayPort: 1337)
+        #expect(state == .on(port: 443))
+        #expect(ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: "127.0.0.1", tailscale: .running(name: Self.name), https: state) == .ready(address: "https://relay-mac.example-tailnet.ts.net"))
+    }
+
+    @Test("an address splits into the URL and Port a follower app's own two fields take")
+    func hostAndPortSplit() {
+        let http = FollowerAppEntry.hostAndPort(of: "http://192.168.1.42:1337")
+        #expect(http.host == "http://192.168.1.42")
+        #expect(http.port == "1337")
+        let https = FollowerAppEntry.hostAndPort(of: "https://relay-mac.example-tailnet.ts.net")
+        #expect(https.host == "https://relay-mac.example-tailnet.ts.net")
+        #expect(https.port == nil)
+    }
+
+    @Test("the token goes in front of the host, keeping scheme and port")
+    func urlWithToken() {
+        #expect(FollowerAppEntry.urlWithToken(address: "http://192.168.1.42:1337", token: "abc-_9") == "http://abc-_9@192.168.1.42:1337")
+        #expect(FollowerAppEntry.urlWithToken(address: "https://relay-mac.example-tailnet.ts.net", token: "abc") == "https://abc@relay-mac.example-tailnet.ts.net")
     }
 }

@@ -83,4 +83,19 @@ struct RealBoundedProcessRunnerTests {
         )
         #expect(result == .failedToLaunch)
     }
+
+    @Test("runCapturingOutput returns stdout and stderr, including more than one pipe buffer")
+    func capturesOutput() async throws {
+        let runner = RealBoundedProcessRunner()
+        let run = await runner.runCapturingOutput(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "echo out; echo err >&2; head -c 200000 /dev/zero | tr '\\0' A; exit 4"],
+            standardInputData: Data(),
+            timeout: .seconds(10)
+        )
+        #expect(run.result == .exited(4))
+        let text = String(decoding: run.output, as: UTF8.self)
+        #expect(text.hasPrefix("out\nerr\n"))
+        #expect(run.output.count == 8 + 200_000)
+    }
 }

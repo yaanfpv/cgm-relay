@@ -33,8 +33,11 @@ var nightscoutEndpoints = []string{
 	"/api/v1/status.json",
 	"/api/v1/experiments/test",
 	"/api/v1/treatments.json",
+	"/api/v1/treatments",
 	"/api/v1/devicestatus.json",
+	"/api/v1/devicestatus",
 	"/api/v1/profile",
+	"/api/v1/profiles.json",
 }
 
 // TestEveryEndpointRequiresAuth checks, across every registered endpoint,

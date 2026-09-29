@@ -56,6 +56,23 @@ public struct AppSettings: Equatable, Sendable {
     public var noReadingAlertEnabled: Bool
     public var noReadingAlertMinutes: Int
     public var signInFailingAlertEnabled: Bool
+    /// tailscaleHTTPSEnabled is the person's choice to reach the relay over
+    /// Tailscale HTTPS, and consent for the relay to stay bound to this Mac
+    /// only. It is a choice, never evidence: whether HTTPS is actually on
+    /// is whatever Tailscale itself reports serving.
+    public var tailscaleHTTPSEnabled: Bool
+    /// setupFinished is whether the person reached Done in first-launch
+    /// setup. Setup is complete only together with a signed-in account.
+    public var setupFinished: Bool
+
+    /// effectiveReach is the reach the relay is actually bound to: this
+    /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
+    /// was chosen before it, and the chosen reach otherwise. Following the
+    /// choice rather than Tailscale's live state is the safe direction: the
+    /// relay never widens while Tailscale is down or being re-read.
+    public var effectiveReach: NetworkReach {
+        tailscaleHTTPSEnabled ? .thisMacOnly : reach
+    }
 
     public static let defaultPort = 1337
     public static let portRange = 1024...65535
@@ -71,7 +88,9 @@ public struct AppSettings: Equatable, Sendable {
         units: .mgDl,
         noReadingAlertEnabled: false,
         noReadingAlertMinutes: defaultNoReadingAlertMinutes,
-        signInFailingAlertEnabled: false
+        signInFailingAlertEnabled: false,
+        tailscaleHTTPSEnabled: false,
+        setupFinished: false
     )
 
     public init(
@@ -81,7 +100,9 @@ public struct AppSettings: Equatable, Sendable {
         units: GlucoseUnit,
         noReadingAlertEnabled: Bool,
         noReadingAlertMinutes: Int,
-        signInFailingAlertEnabled: Bool
+        signInFailingAlertEnabled: Bool,
+        tailscaleHTTPSEnabled: Bool = false,
+        setupFinished: Bool = false
     ) {
         self.port = port
         self.reach = reach
@@ -90,6 +111,8 @@ public struct AppSettings: Equatable, Sendable {
         self.noReadingAlertEnabled = noReadingAlertEnabled
         self.noReadingAlertMinutes = noReadingAlertMinutes
         self.signInFailingAlertEnabled = signInFailingAlertEnabled
+        self.tailscaleHTTPSEnabled = tailscaleHTTPSEnabled
+        self.setupFinished = setupFinished
     }
 }
 
@@ -103,6 +126,7 @@ public struct AppSettings: Equatable, Sendable {
 extension AppSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
+        case tailscaleHTTPSEnabled, setupFinished
     }
 
     public init(from decoder: Decoder) throws {
@@ -115,6 +139,8 @@ extension AppSettings: Codable {
         noReadingAlertEnabled = try container.decodeIfPresent(Bool.self, forKey: .noReadingAlertEnabled) ?? fallback.noReadingAlertEnabled
         noReadingAlertMinutes = try container.decodeIfPresent(Int.self, forKey: .noReadingAlertMinutes) ?? fallback.noReadingAlertMinutes
         signInFailingAlertEnabled = try container.decodeIfPresent(Bool.self, forKey: .signInFailingAlertEnabled) ?? fallback.signInFailingAlertEnabled
+        tailscaleHTTPSEnabled = try container.decodeIfPresent(Bool.self, forKey: .tailscaleHTTPSEnabled) ?? fallback.tailscaleHTTPSEnabled
+        setupFinished = try container.decodeIfPresent(Bool.self, forKey: .setupFinished) ?? fallback.setupFinished
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -126,6 +152,8 @@ extension AppSettings: Codable {
         try container.encode(noReadingAlertEnabled, forKey: .noReadingAlertEnabled)
         try container.encode(noReadingAlertMinutes, forKey: .noReadingAlertMinutes)
         try container.encode(signInFailingAlertEnabled, forKey: .signInFailingAlertEnabled)
+        try container.encode(tailscaleHTTPSEnabled, forKey: .tailscaleHTTPSEnabled)
+        try container.encode(setupFinished, forKey: .setupFinished)
     }
 }
 

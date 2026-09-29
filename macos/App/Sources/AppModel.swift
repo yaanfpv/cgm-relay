@@ -44,6 +44,27 @@ final class AppModel: ObservableObject {
     /// on rather than a freshly recomputed guess that could differ from
     /// it until the next restart.
     @Published private(set) var boundHost: String?
+    /// tailscaleStatus and tailscaleServe are what Tailscale itself says
+    /// right now (its state, and what it is serving), read together by
+    /// refreshTailscale() wherever the person can act on them. Whether
+    /// HTTPS is on is decided from these alone (httpsState), never from the
+    /// saved choice.
+    @Published private(set) var tailscaleStatus: TailscaleStatus = .unknown
+    @Published private(set) var tailscaleServe: TailscaleServeConfig?
+    @Published private(set) var isChangingTailscale = false
+    @Published private(set) var tailscaleFailure: TailscaleFailure?
+    /// setupPresentationRequest counts the times the app itself asks for
+    /// first-launch setup to open: once, after launch finds setup
+    /// incomplete. The scene that owns the window watches it.
+    @Published private(set) var setupPresentationRequest = 0
+    private var launchChecked = false
+
+    /// TailscaleFailure is the plain sentence for a Tailscale change that
+    /// did not work, with Tailscale's own page where one helps.
+    struct TailscaleFailure: Equatable {
+        let message: String
+        let helpURL: URL?
+    }
 
     private let credentialStore: any CredentialStore
     private let settingsStore: any SettingsStoring
@@ -56,6 +77,7 @@ final class AppModel: ObservableObject {
     private let statusAddr: String
     private let databasePath: String
     private let librelinkupBaseURL: String?
+    private let tailscale: any TailscaleControlling
 
     private var latestStatus: EngineStatus?
 
@@ -65,6 +87,34 @@ final class AppModel: ObservableObject {
     /// "Start Fresh…" is a real recovery path for every person running
     /// this app, not a development tool.
     private let recoveryLogger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "recovery")
+
+    /// needsSetup is true until the person has both a signed-in account and
+    /// has finished the last setup step. It is false before launch has read
+    /// the Keychain, so nothing flashes before the real answer is known.
+    var needsSetup: Bool {
+        launchChecked && !(settings.setupFinished && credentialsConfigured)
+    }
+
+    /// httpsState is where Tailscale HTTPS stands for the relay's current
+    /// port, from Tailscale's own report.
+    var httpsState: TailscaleHTTPSState {
+        TailscaleHTTPSState.evaluate(status: tailscaleStatus, config: tailscaleServe, relayPort: settings.port)
+    }
+
+    /// httpsLocked is whether the port and the reach choices must not change:
+    /// while this app's handler is serving, and while the saved choice says
+    /// HTTPS is on but Tailscale cannot be asked, since changing the port
+    /// then would strand the handler already set up.
+    var httpsLocked: Bool {
+        switch httpsState {
+        case .on:
+            return true
+        case .off, .noFreePort:
+            return false
+        case .unknown, .unavailable, .unreadable:
+            return settings.tailscaleHTTPSEnabled
+        }
+    }
 
     var canStart: Bool { credentialsConfigured && engineState == .stopped }
 
@@ -121,8 +171,10 @@ final class AppModel: ObservableObject {
         settingsStore: any SettingsStoring = UserDefaultsSettingsStore(),
         statusAddr: String = "127.0.0.1:1338",
         databasePath: String,
-        librelinkupBaseURL: String? = nil
+        librelinkupBaseURL: String? = nil,
+        tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil)
     ) {
+        self.tailscale = tailscale
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
         // notificationDelivering and loginItemManager have no throwaway
@@ -164,19 +216,25 @@ final class AppModel: ObservableObject {
     }
 
     /// onLaunch runs the app's ordinary startup: generate a token and
-    /// store key on a first launch, start the engine if a LibreLinkUp
-    /// account is already on file, and begin polling its status. Starting
-    /// the engine and starting the status poller run concurrently rather
-    /// than one after the other, so a slow first Keychain read never
-    /// delays the status display coming up.
+    /// store key on a first launch, ask for setup to open when it is
+    /// incomplete, start the engine if a LibreLinkUp account is already on
+    /// file, and begin polling its status. Starting the engine and starting
+    /// the status poller run concurrently rather than one after the other,
+    /// so a slow first Keychain read never delays the status display
+    /// coming up.
     func onLaunch() async {
         try? CredentialsBootstrapper(store: credentialStore).ensureBootstrapped()
         refreshCredentialsConfigured()
+        launchChecked = true
+        if needsSetup {
+            setupPresentationRequest += 1
+        }
         await alertEngine.setNoReadingAlert(enabled: settings.noReadingAlertEnabled, minutes: settings.noReadingAlertMinutes)
         await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
         async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
-        _ = await (engineStarted, pollerStarted)
+        async let tailscaleRead: Void = settings.tailscaleHTTPSEnabled ? refreshTailscale() : ()
+        _ = await (engineStarted, pollerStarted, tailscaleRead)
     }
 
     /// onMenuOpened refreshes the status immediately, so opening the menu
@@ -189,6 +247,9 @@ final class AppModel: ObservableObject {
     func onMenuOpened() {
         refreshCredentialsConfigured()
         refreshNetworkAddresses()
+        if settings.tailscaleHTTPSEnabled {
+            Task { await refreshTailscale() }
+        }
         if canTryAgain {
             tryAgain()
         }
@@ -338,8 +399,8 @@ final class AppModel: ObservableObject {
 
         tailnetAvailable = ReachAddressResolver.tailscaleIPv4(among: interfaces) != nil
         localNetworkAvailable = ReachAddressResolver.primaryLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) != nil
-        connectAddressAvailability = ReachAddressResolver.displayHostAvailability(for: settings.reach, interfaces: interfaces, primaryInterfaceName: primaryInterfaceName)
-        impliedBindHost = ReachAddressResolver.bindHost(for: settings.reach, interfaces: interfaces)
+        connectAddressAvailability = ReachAddressResolver.displayHostAvailability(for: settings.effectiveReach, interfaces: interfaces, primaryInterfaceName: primaryInterfaceName)
+        impliedBindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
 
         if BoundAddressDecision.decide(currentBoundHost: boundHost, impliedBindHost: impliedBindHost) == .restartNeeded {
             Task { await restartEngineIfRunning() }
@@ -348,12 +409,17 @@ final class AppModel: ObservableObject {
 
     /// connectPaneAddressState is what the Connect pane shows and encodes
     /// into its QR code, decided by ConnectPaneAddressState.decide from
-    /// the chosen reach, the address the running engine is actually bound
+    /// the chosen reach (or, for a person who chose Tailscale HTTPS, the
+    /// https address Tailscale itself reports serving), the address the
+    /// running engine is actually bound
     /// to (boundHost), the address the current reach implies right now
     /// (impliedBindHost), the settings port, and the current display-host
     /// availability. No address logic lives here.
     var connectPaneAddressState: ConnectPaneAddressState {
-        ConnectPaneAddressState.decide(
+        if settings.tailscaleHTTPSEnabled || httpsState.isOn {
+            return ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: boundHost, tailscale: tailscaleStatus, https: httpsState)
+        }
+        return ConnectPaneAddressState.decide(
             reach: settings.reach,
             boundHost: boundHost,
             impliedBindHost: impliedBindHost,
@@ -365,12 +431,18 @@ final class AppModel: ObservableObject {
     // MARK: - Settings
 
     func updatePort(_ port: Int) {
+        // Tailscale serves to the port it was set up with, so the port is
+        // fixed while HTTPS is on.
+        guard !httpsLocked else { return }
         settings.port = port.clamped(to: AppSettings.portRange)
         persistSettings()
         Task { await restartEngineIfRunning() }
     }
 
     func updateReach(_ reach: NetworkReach) {
+        guard !httpsLocked else { return }
+        // Choosing a reach is choosing not to use Tailscale HTTPS.
+        settings.tailscaleHTTPSEnabled = false
         settings.reach = reach
         persistSettings()
         // refreshNetworkAddresses() is the one and only restart trigger
@@ -391,6 +463,113 @@ final class AppModel: ObservableObject {
         settings.units = units
         persistSettings()
         recomputeMenuState()
+    }
+
+    // MARK: - Tailscale HTTPS and setup
+
+    /// refreshTailscale reads this Mac's Tailscale state and, while it
+    /// runs, what it is serving. Both reads are read-only and are the only
+    /// Tailscale calls that run without a click. When Tailscale shows the
+    /// app's handler serving, the saved choice follows it, so the relay is
+    /// bound to this Mac only.
+    func refreshTailscale() async {
+        let status = await tailscale.status()
+        var serve: TailscaleServeConfig?
+        if case .running = status {
+            serve = await tailscale.serveConfig()
+        }
+        tailscaleStatus = status
+        tailscaleServe = serve
+        if httpsState.isOn, !settings.tailscaleHTTPSEnabled {
+            settings.tailscaleHTTPSEnabled = true
+            persistSettings()
+            refreshNetworkAddresses()
+        }
+    }
+
+    /// enableTailscaleHTTPS runs the one serve command the button shows, on
+    /// the port it showed, only if Tailscale's settings read immediately
+    /// before still show that port free. The check afterwards asks only
+    /// whether this Mac's own entry is now serving. A transient failure is
+    /// retried quietly (TailscaleChange), each attempt starting from a fresh
+    /// read, and the spinner stays up until the last attempt has ended.
+    func enableTailscaleHTTPS(shownPort: Int) async {
+        guard !isChangingTailscale else { return }
+        isChangingTailscale = true
+        tailscaleFailure = nil
+        defer { isChangingTailscale = false }
+
+        let result = await TailscaleChange.turnOn(
+            shownPort: shownPort,
+            relayPort: settings.port,
+            controller: tailscale,
+            read: { [self] in await readHTTPSState() },
+            wait: { try? await Task.sleep(for: $0) }
+        )
+        switch result {
+        case .done:
+            settings.tailscaleHTTPSEnabled = true
+            persistSettings()
+            refreshNetworkAddresses()
+        case .unchanged:
+            break
+        case .refused:
+            reportFailure(.settingsChanged, turningOn: true)
+        case .failed(let outcome):
+            reportFailure(outcome, turningOn: true)
+        }
+    }
+
+    /// disableTailscaleHTTPS runs the one matching off command only if
+    /// Tailscale's settings read immediately before show this Mac's own
+    /// entry on the port shown. The check afterwards asks only whether that
+    /// entry is gone, with the same quiet retries as turning on.
+    func disableTailscaleHTTPS(shownPort: Int) async {
+        guard !isChangingTailscale else { return }
+        isChangingTailscale = true
+        tailscaleFailure = nil
+        defer { isChangingTailscale = false }
+
+        let result = await TailscaleChange.turnOff(
+            shownPort: shownPort,
+            controller: tailscale,
+            read: { [self] in await readHTTPSState() },
+            wait: { try? await Task.sleep(for: $0) }
+        )
+        switch result {
+        case .done:
+            settings.tailscaleHTTPSEnabled = false
+            persistSettings()
+            refreshNetworkAddresses()
+        case .unchanged:
+            break
+        case .refused:
+            reportFailure(.settingsChanged, turningOn: false)
+        case .failed(let outcome):
+            reportFailure(outcome, turningOn: false)
+        }
+    }
+
+    private func readHTTPSState() async -> TailscaleHTTPSState {
+        await refreshTailscale()
+        return httpsState
+    }
+
+    /// clearTailscaleFailure drops a failure sentence once the control that
+    /// showed it is looked at again.
+    func clearTailscaleFailure() {
+        tailscaleFailure = nil
+    }
+
+    private func reportFailure(_ outcome: TailscaleServeOutcome, turningOn: Bool) {
+        guard let message = outcome.message(turningOn: turningOn) else { return }
+        tailscaleFailure = TailscaleFailure(message: message, helpURL: outcome.helpURL)
+    }
+
+    /// completeSetup is setup's Done.
+    func completeSetup() {
+        settings.setupFinished = true
+        persistSettings()
     }
 
     /// setNoReadingAlert asks for notification permission the first time
@@ -476,7 +655,7 @@ final class AppModel: ObservableObject {
             macOSVersion: macOSVersion,
             engineState: engineState,
             lastError: latestStatus?.lastError,
-            reach: settings.reach,
+            reach: settings.effectiveReach,
             port: settings.port,
             retentionDays: settings.retentionDays,
             units: settings.units,
@@ -545,7 +724,7 @@ final class AppModel: ObservableObject {
             await supervisor.fail(.configurationUnreadable)
             return
         }
-        boundHost = ReachAddressResolver.bindHost(for: settings.reach, interfaces: interfaces)
+        boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         await alertEngine.resumeAfterEngineStart()
         await supervisor.start(configuration: config)
     }
@@ -614,14 +793,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// recomputeMenuState assigns only a state that differs from the one
+    /// already shown, so a poll that changes nothing the menu displays
+    /// causes no SwiftUI update.
     private func recomputeMenuState() {
-        menuState = .make(
+        let next = MenuDisplayState.make(
             credentialsConfigured: credentialsConfigured,
             engineState: engineState,
             status: latestStatus,
             now: Date(),
             units: settings.units
         )
+        if next != menuState {
+            menuState = next
+        }
     }
 
     private static func statusURL(for statusAddr: String) -> URL {
