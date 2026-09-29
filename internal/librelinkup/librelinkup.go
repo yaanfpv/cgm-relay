@@ -76,6 +76,20 @@ const (
 // returns to its own caller.
 var errTokenRejected = errors.New("librelinkup: token rejected")
 
+// Sentinels a caller can match with errors.Is, including through a
+// *cgm.AuthError's Unwrap: authenticate wraps ErrInvalidCredentials and
+// ErrTermsNotAccepted inside one so Fetch's own errors.Is(err, cgm.ErrAuth)
+// classification (poller.handleFetchError) keeps working unchanged, while
+// a caller that needs the finer distinction -- CheckAccount's own caller,
+// cmd/cgm-relay's check-account command -- can still match the exact
+// cause. ErrNoConnections is never wrapped in a cgm.AuthError: signing in
+// succeeded, so it is not an authentication failure.
+var (
+	ErrInvalidCredentials = errors.New("librelinkup: email or password was rejected")
+	ErrTermsNotAccepted   = errors.New("librelinkup: LibreLinkUp needs you to accept its updated terms; open the LibreLinkUp app, sign in, and accept the prompt, then try again")
+	ErrNoConnections      = errors.New("librelinkup: account has no LibreLinkUp connections shared with it")
+)
+
 // Source fetches glucose readings from a LibreLinkUp follower account. The
 // zero value is not usable; construct one with New.
 //
@@ -219,9 +233,9 @@ func (s *Source) authenticate(ctx context.Context) (token, accountID string, err
 
 		switch resp.Status {
 		case loginStatusInvalidCredentials:
-			return "", "", &cgm.AuthError{Err: errors.New("librelinkup: email or password was rejected")}
+			return "", "", &cgm.AuthError{Err: ErrInvalidCredentials}
 		case loginStatusTermsNotAccepted:
-			return "", "", &cgm.AuthError{Err: errors.New("librelinkup: LibreLinkUp needs you to accept its updated terms; open the LibreLinkUp app, sign in, and accept the prompt, then try again")}
+			return "", "", &cgm.AuthError{Err: ErrTermsNotAccepted}
 		}
 
 		if resp.Data.Redirect && resp.Data.Region != "" {
@@ -294,9 +308,28 @@ func (s *Source) firstConnection(ctx context.Context, token, accountID string) (
 		return "", fmt.Errorf("librelinkup: decode connections response: %w", err)
 	}
 	if len(out.Data) == 0 {
-		return "", fmt.Errorf("librelinkup: account has no LibreLinkUp connections shared with it")
+		return "", ErrNoConnections
 	}
 	return out.Data[0].PatientID, nil
+}
+
+// CheckAccount signs in with the credentials this Source was constructed
+// with and confirms the account follows at least one connection, without
+// fetching a reading. It exists for a caller that wants to validate an
+// account before saving its credentials -- cmd/cgm-relay's check-account
+// command -- distinct from Fetch's own sign-in-on-demand path: unlike
+// Fetch, this never caches the session it establishes, since a caller
+// checking an account has no further use for it.
+func (s *Source) CheckAccount(ctx context.Context) error {
+	token, accountID, err := s.authenticate(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.firstConnection(ctx, token, accountID)
+	if errors.Is(err, errTokenRejected) {
+		return &cgm.AuthError{Err: errors.New("librelinkup: LibreLinkUp rejected a newly issued session immediately")}
+	}
+	return err
 }
 
 // fetchGraph fetches the current measurement and history for patientID.

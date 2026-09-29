@@ -46,4 +46,26 @@ struct CredentialsBootstrapperTests {
 
         #expect(firstToken == secondToken)
     }
+
+    @Test("rotateToken always overwrites an existing token, and returns the value it saved")
+    func rotateTokenAlwaysOverwrites() throws {
+        let store = FakeCredentialStore(values: [.token: "old-token"])
+        let bootstrapper = CredentialsBootstrapper(store: store, randomBytes: FakeRandomBytesGenerator())
+
+        let rotated = try bootstrapper.rotateToken()
+
+        #expect(rotated != "old-token")
+        #expect(store.snapshot()[.token] == rotated)
+    }
+
+    @Test("rotateToken uses the same encoding ensureBootstrapped's own first-run token uses")
+    func rotateTokenUsesTheSameEncoding() throws {
+        let store = FakeCredentialStore()
+        let bootstrapper = CredentialsBootstrapper(store: store, randomBytes: FakeRandomBytesGenerator())
+
+        let rotated = try bootstrapper.rotateToken()
+
+        let expectedBytes = Data((0..<32).map { UInt8($0 % 256) })
+        #expect(rotated == expectedBytes.base64URLEncodedStringWithoutPadding())
+    }
 }

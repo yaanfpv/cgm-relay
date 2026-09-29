@@ -54,6 +54,32 @@ public final class KeychainCredentialStore: CredentialStore, @unchecked Sendable
         }
     }
 
+    public func setStrings(_ values: [CredentialKey: String]) throws {
+        try lock.withLock {
+            try loadIfNeeded()
+            var updated = cache ?? [:]
+            for (key, value) in values {
+                updated[key.rawValue] = value
+            }
+            try write(updated)
+            cache = updated
+        }
+    }
+
+    public func removeAll(_ keys: [CredentialKey]) throws {
+        try lock.withLock {
+            try loadIfNeeded()
+            guard var updated = cache else { return }
+            var changed = false
+            for key in keys where updated.removeValue(forKey: key.rawValue) != nil {
+                changed = true
+            }
+            guard changed else { return }
+            try write(updated)
+            cache = updated
+        }
+    }
+
     private func loadIfNeeded() throws {
         guard cache == nil else { return }
 

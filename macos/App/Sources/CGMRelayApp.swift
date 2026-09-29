@@ -32,6 +32,7 @@ struct CGMRelayApp: App {
             wrappedValue: AppModel(
                 engineURL: CGMRelayApp.engineURL(),
                 credentialStore: store,
+                settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride),
                 databasePath: CGMRelayApp.databasePath(keychainServiceOverride: keychainServiceOverride),
                 librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL()
             )
@@ -42,15 +43,29 @@ struct CGMRelayApp: App {
         MenuBarExtra {
             MenuContentView(model: model)
         } label: {
-            MenuBarLabel(dot: model.menuState.dot)
+            MenuBarLabel(dot: model.menuState.dot, statusDescription: model.menuState.shortStatus)
         }
         .menuBarExtraStyle(.window)
 
-        Window("CGM Relay Settings", id: "settings") {
-            SettingsPlaceholderView()
+        // A Settings scene, not a plain Window: the system titles and
+        // manages the window itself (a Cmd-, shortcut and a Settings…/
+        // Preferences… app-menu item come for free), and .contentSize
+        // resizability lets the window follow each pane's own natural
+        // height as the tab selection changes, rather than every pane
+        // sharing one fixed size. Opening it still goes through the menu's
+        // own openSettings() call, which keeps the same before-and-after
+        // activation-policy toggle the onDisappear below relies on, since
+        // that toggle is plain AppKit and never depended on which scene
+        // type hosted the window.
+        Settings {
+            SettingsView(model: model)
                 .onDisappear { NSApp.setActivationPolicy(.accessory) }
         }
-        .defaultSize(width: 360, height: 220)
+        .windowResizability(.contentSize)
+        // A starting guess only: matches SettingsView's own fixed pane
+        // width, before .contentSize resizability settles the height onto
+        // the front pane's own measured size.
+        .defaultSize(width: 600, height: 460)
     }
 
     /// engineURL locates the universal engine binary the build embeds at

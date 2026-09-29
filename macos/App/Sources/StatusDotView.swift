@@ -30,15 +30,21 @@ struct StatusDotView: View {
 /// (non-template) image rather than a system Image(systemName:): the menu
 /// bar renders a template image in its own adaptive monochrome regardless
 /// of any tint applied to it, which would erase the one thing this view
-/// exists to show.
+/// exists to show. Nothing sits beside it to say what the colour means, so
+/// the image itself carries the current status in words: a status item's
+/// button reads its accessible name from the image's own
+/// accessibilityDescription directly, unlike a SwiftUI Image inside an
+/// ordinary window (see AccessibleImageName.swift's own comment for that
+/// case), so no native-view substitution is needed here.
 struct MenuBarLabel: View {
     let dot: StatusDot
+    let statusDescription: String
 
     var body: some View {
-        Image(nsImage: Self.image(tintedFor: dot))
+        Image(nsImage: Self.image(tintedFor: dot, statusDescription: statusDescription))
     }
 
-    private static func image(tintedFor dot: StatusDot) -> NSImage {
+    private static func image(tintedFor dot: StatusDot, statusDescription: String) -> NSImage {
         let tint: NSColor
         switch dot {
         case .green: tint = .systemGreen
@@ -47,7 +53,7 @@ struct MenuBarLabel: View {
         case .grey: tint = .secondaryLabelColor
         }
 
-        let base = NSImage(systemSymbolName: "drop.fill", accessibilityDescription: "CGM Relay status")
+        let base = NSImage(systemSymbolName: "drop.fill", accessibilityDescription: "CGM Relay: \(statusDescription)")
             ?? NSImage()
         let configured = base.withSymbolConfiguration(.init(paletteColors: [tint])) ?? base
         configured.isTemplate = false

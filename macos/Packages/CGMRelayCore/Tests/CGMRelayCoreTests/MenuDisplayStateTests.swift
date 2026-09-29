@@ -80,7 +80,7 @@ struct MenuDisplayStateTests {
     func recoveryMoveFailedFailure() {
         let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .failed(.recoveryMoveFailed), status: nil, now: Self.now)
         #expect(state.dot == .red)
-        #expect(state.statusLine == "Couldn't move the saved readings aside")
+        #expect(state.statusLine == "Couldn't start fresh")
         #expect(state.readingLine == "Check that CGM Relay can write to its own folder, then try Start Fresh again.")
         for forbidden in ["engine", "store", "keychain item", "configuration", "exit"] {
             #expect(!state.statusLine.lowercased().contains(forbidden))
@@ -197,5 +197,143 @@ struct MenuDisplayStateTests {
         let status = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-60), lastReadingMgDl: nil)
         let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: status, now: Self.now)
         #expect(state.readingLine == "Reading unavailable")
+    }
+
+    @Test("mg/dL is the default unit when none is given")
+    func defaultsToMgDl() {
+        let status = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-60), lastReadingMgDl: 142)
+        let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: status, now: Self.now)
+        #expect(state.readingLine == "142 mg/dL (1 min ago)")
+    }
+
+    @Test("mmol/L renders the same reading converted, to one decimal place")
+    func mmolLConvertsTheReading() {
+        let status = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-60), lastReadingMgDl: 142)
+        let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: status, now: Self.now, units: .mmolL)
+        #expect(state.readingLine == "7.9 mmol/L (1 min ago)")
+    }
+
+    /// readingValue, readingUnit and readingAge are built by the same
+    /// mapping as readingLine, so this table repeats every distinct
+    /// readingLine shape the standalone tests above already exercise and
+    /// checks the split fields agree with it: populated together exactly
+    /// when readingLine carries a reading, and nil together exactly when
+    /// it falls back to a plain sentence.
+    @Test("readingValue, readingUnit and readingAge match readingLine for every state readingLine covers")
+    func readingFieldsMatchReadingLine() {
+        struct Case {
+            let name: String
+            let engineState: EngineSupervisor.RunState
+            let status: EngineStatus?
+            let units: GlucoseUnit
+            let expectedLine: String
+            let expectedValue: String?
+            let expectedUnit: String?
+            let expectedAge: String?
+        }
+
+        let freshStatus = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-30), lastReadingMgDl: 110)
+        let staleStatus = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-600), lastReadingMgDl: 95)
+        let mmolStatus = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-60), lastReadingMgDl: 142)
+        let missingMgDlStatus = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-60), lastReadingMgDl: nil)
+
+        let cases: [Case] = [
+            Case(name: "stopped with a reading on file", engineState: .stopped, status: freshStatus, units: .mgDl,
+                 expectedLine: "110 mg/dL (just now)", expectedValue: "110", expectedUnit: "mg/dL", expectedAge: "just now"),
+            Case(name: "starting with a reading on file", engineState: .starting, status: freshStatus, units: .mgDl,
+                 expectedLine: "110 mg/dL (just now)", expectedValue: "110", expectedUnit: "mg/dL", expectedAge: "just now"),
+            Case(name: "waiting to restart with a reading on file", engineState: .waitingToRestart(attempt: 1, delay: .seconds(2)), status: freshStatus, units: .mgDl,
+                 expectedLine: "110 mg/dL (just now)", expectedValue: "110", expectedUnit: "mg/dL", expectedAge: "just now"),
+            Case(name: "running, sign-in failing, with a reading on file", engineState: .running, status: EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-30), lastReadingMgDl: 110, signInFailing: true), units: .mgDl,
+                 expectedLine: "110 mg/dL (just now)", expectedValue: "110", expectedUnit: "mg/dL", expectedAge: "just now"),
+            Case(name: "running, fresh", engineState: .running, status: freshStatus, units: .mgDl,
+                 expectedLine: "110 mg/dL (just now)", expectedValue: "110", expectedUnit: "mg/dL", expectedAge: "just now"),
+            Case(name: "running, stale", engineState: .running, status: staleStatus, units: .mgDl,
+                 expectedLine: "95 mg/dL (10 min ago)", expectedValue: "95", expectedUnit: "mg/dL", expectedAge: "10 min ago"),
+            Case(name: "running, mmol/L conversion", engineState: .running, status: mmolStatus, units: .mmolL,
+                 expectedLine: "7.9 mmol/L (1 min ago)", expectedValue: "7.9", expectedUnit: "mmol/L", expectedAge: "1 min ago"),
+            Case(name: "a reading present without an mg/dL value", engineState: .running, status: missingMgDlStatus, units: .mgDl,
+                 expectedLine: "Reading unavailable", expectedValue: nil, expectedUnit: nil, expectedAge: nil),
+            Case(name: "stopped with no status ever fetched", engineState: .stopped, status: nil, units: .mgDl,
+                 expectedLine: "No reading yet", expectedValue: nil, expectedUnit: nil, expectedAge: nil),
+            Case(name: "running, connecting, no status yet", engineState: .running, status: nil, units: .mgDl,
+                 expectedLine: "No reading yet", expectedValue: nil, expectedUnit: nil, expectedAge: nil),
+            Case(name: "running, waiting for a reading", engineState: .running, status: EngineStatus(running: true), units: .mgDl,
+                 expectedLine: "No reading yet", expectedValue: nil, expectedUnit: nil, expectedAge: nil),
+            Case(name: "a permanently failed store key mismatch", engineState: .failed(.storeKeyMismatch), status: nil, units: .mgDl,
+                 expectedLine: "They were saved with a key this Mac no longer has.", expectedValue: nil, expectedUnit: nil, expectedAge: nil),
+            Case(name: "a permanently failed recovery move", engineState: .failed(.recoveryMoveFailed), status: nil, units: .mgDl,
+                 expectedLine: "Check that CGM Relay can write to its own folder, then try Start Fresh again.", expectedValue: nil, expectedUnit: nil, expectedAge: nil),
+        ]
+
+        for testCase in cases {
+            let state = MenuDisplayState.make(credentialsConfigured: true, engineState: testCase.engineState, status: testCase.status, now: Self.now, units: testCase.units)
+            #expect(state.readingLine == testCase.expectedLine, "\(testCase.name): readingLine")
+            #expect(state.readingValue == testCase.expectedValue, "\(testCase.name): readingValue")
+            #expect(state.readingUnit == testCase.expectedUnit, "\(testCase.name): readingUnit")
+            #expect(state.readingAge == testCase.expectedAge, "\(testCase.name): readingAge")
+        }
+    }
+
+    /// shortStatus, statusAge and statusDetail are the pieces
+    /// MenuContentView's one secondary line renders with no string
+    /// matching of its own: this table drives every distinct state the
+    /// standalone tests above already cover and checks all three
+    /// directly, plus the 30-character bar every shortStatus (and the
+    /// permanent-failure statusLine headlines, which double as their own
+    /// shortStatus) is held to.
+    @Test("shortStatus, statusAge and statusDetail are correct and short for every state")
+    func secondaryLineFieldsAreCorrectAndShort() {
+        struct Case {
+            let name: String
+            let engineState: EngineSupervisor.RunState
+            let status: EngineStatus?
+            let expectedShortStatus: String
+            let expectedStatusAge: String?
+            let expectedStatusDetail: String?
+        }
+
+        let freshStatus = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-30), lastReadingMgDl: 110)
+        let staleStatus = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-600), lastReadingMgDl: 95)
+        let signInFailingWithReading = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-30), lastReadingMgDl: 110, signInFailing: true)
+        let noReadingYet = EngineStatus(running: true)
+
+        let cases: [Case] = [
+            Case(name: "stopped, no reading ever fetched", engineState: .stopped, status: nil,
+                 expectedShortStatus: "Stopped", expectedStatusAge: nil, expectedStatusDetail: nil),
+            Case(name: "stopped, with a reading on file", engineState: .stopped, status: freshStatus,
+                 expectedShortStatus: "Stopped", expectedStatusAge: "last reading just now", expectedStatusDetail: nil),
+            Case(name: "starting, with a reading on file", engineState: .starting, status: freshStatus,
+                 expectedShortStatus: "Starting…", expectedStatusAge: "last reading just now", expectedStatusDetail: nil),
+            Case(name: "waiting to restart, with a reading on file", engineState: .waitingToRestart(attempt: 1, delay: .seconds(2)), status: freshStatus,
+                 expectedShortStatus: "Restarting…", expectedStatusAge: "last reading just now", expectedStatusDetail: nil),
+            Case(name: "running, connecting, no status yet", engineState: .running, status: nil,
+                 expectedShortStatus: "Connecting…", expectedStatusAge: nil, expectedStatusDetail: nil),
+            Case(name: "running, waiting for a reading", engineState: .running, status: noReadingYet,
+                 expectedShortStatus: "Waiting for a reading", expectedStatusAge: nil, expectedStatusDetail: nil),
+            Case(name: "running, sign-in failing, with a reading on file", engineState: .running, status: signInFailingWithReading,
+                 expectedShortStatus: "Sign-in failing", expectedStatusAge: "last reading just now",
+                 expectedStatusDetail: "Check your LibreLinkUp email and password in Settings."),
+            Case(name: "running, fresh", engineState: .running, status: freshStatus,
+                 expectedShortStatus: "Current", expectedStatusAge: "just now", expectedStatusDetail: nil),
+            Case(name: "running, stale", engineState: .running, status: staleStatus,
+                 expectedShortStatus: "Stale", expectedStatusAge: "10 min ago", expectedStatusDetail: nil),
+            Case(name: "a permanently failed store key mismatch", engineState: .failed(.storeKeyMismatch), status: nil,
+                 expectedShortStatus: "Saved readings can't be opened", expectedStatusAge: nil, expectedStatusDetail: nil),
+            Case(name: "a permanently failed recovery move", engineState: .failed(.recoveryMoveFailed), status: nil,
+                 expectedShortStatus: "Couldn't start fresh", expectedStatusAge: nil, expectedStatusDetail: nil),
+        ]
+
+        for testCase in cases {
+            let state = MenuDisplayState.make(credentialsConfigured: true, engineState: testCase.engineState, status: testCase.status, now: Self.now)
+            #expect(state.shortStatus == testCase.expectedShortStatus, "\(testCase.name): shortStatus")
+            #expect(state.statusAge == testCase.expectedStatusAge, "\(testCase.name): statusAge")
+            #expect(state.statusDetail == testCase.expectedStatusDetail, "\(testCase.name): statusDetail")
+            #expect(state.shortStatus.count <= 30, "\(testCase.name): shortStatus is \(state.shortStatus.count) characters")
+        }
+
+        let setupNeededState = MenuDisplayState.make(credentialsConfigured: false, engineState: .running, status: nil, now: Self.now)
+        #expect(setupNeededState.shortStatus == "Setup needed")
+        #expect(setupNeededState.statusAge == nil)
     }
 }

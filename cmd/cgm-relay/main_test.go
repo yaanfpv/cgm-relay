@@ -300,6 +300,127 @@ func TestExitCodeForServeErrorDistinguishesStoreDamaged(t *testing.T) {
 	}
 }
 
+// TestExitCodeForCheckAccountError is a table test of check-account's own
+// exit code for every fake account state its own oracle names: a happy
+// sign-in, each of LibreLinkUp's rejections, a rate limit, an unreachable
+// server, and a plain, unclassified error. Each case runs the real
+// librelinkup.Source.CheckAccount against a fake configured for that
+// state, then classifies the exact error it returns -- proving the
+// classification against the errors CheckAccount can actually produce,
+// never a fabricated stand-in for them.
+func TestExitCodeForCheckAccountError(t *testing.T) {
+	cases := []struct {
+		name         string
+		configure    func(fake *llufake.Server) string // returns the base URL to use
+		wantCode     int
+		wantContains string
+	}{
+		{
+			name: "signed in and follows someone",
+			configure: func(fake *llufake.Server) string {
+				return fake.URL
+			},
+			wantCode: 0,
+		},
+		{
+			name: "email or password rejected",
+			configure: func(fake *llufake.Server) string {
+				fake.RejectCredentials()
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountRejected,
+			wantContains: "rejected the email or password",
+		},
+		{
+			name: "updated terms not accepted",
+			configure: func(fake *llufake.Server) string {
+				fake.RequireTermsAcceptance()
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountTermsNotAccepted,
+			wantContains: "updated terms accepted",
+		},
+		{
+			name: "account follows nobody",
+			configure: func(fake *llufake.Server) string {
+				fake.SetConnections()
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountNoConnections,
+			wantContains: "follows nobody",
+		},
+		{
+			name: "rate limited",
+			configure: func(fake *llufake.Server) string {
+				fake.RateLimitLogin("3")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountRateLimited,
+			wantContains: "rate limiting",
+		},
+		{
+			name: "unreachable",
+			configure: func(fake *llufake.Server) string {
+				baseURL := fake.URL
+				fake.Close()
+				return baseURL
+			},
+			wantCode:     exitCodeAccountUnreachable,
+			wantContains: "could not reach",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fake := llufake.New(t)
+			baseURL := c.configure(fake)
+			source := librelinkup.New("person@example.test", "leak-check-password-should-never-log", librelinkup.WithBaseURL(baseURL))
+
+			var out bytes.Buffer
+			code := exitCodeForCheckAccountError(&out, source.CheckAccount(context.Background()))
+
+			if code != c.wantCode {
+				t.Errorf("exit code = %d, want %d (stderr: %q)", code, c.wantCode, out.String())
+			}
+			if c.wantContains != "" && !strings.Contains(out.String(), c.wantContains) {
+				t.Errorf("stderr = %q, want it to contain %q", out.String(), c.wantContains)
+			}
+			if strings.Contains(out.String(), "leak-check-password-should-never-log") {
+				t.Errorf("stderr = %q, must never contain the password", out.String())
+			}
+		})
+	}
+}
+
+// TestExitCodeForCheckAccountErrorKeepsGenericFailuresAtOne proves an
+// error check-account does not otherwise recognise keeps the plain
+// fallback: exit code 1, and the error's own text on stderr, exactly like
+// exitCodeForServeError's own equivalent case.
+func TestExitCodeForCheckAccountErrorKeepsGenericFailuresAtOne(t *testing.T) {
+	var out bytes.Buffer
+	original := errors.New("librelinkup: sign-in response carried no user id or token")
+
+	code := exitCodeForCheckAccountError(&out, original)
+
+	if code != exitCodeGenericFailure {
+		t.Errorf("exit code = %d, want %d for an unclassified failure", code, exitCodeGenericFailure)
+	}
+	if !strings.Contains(out.String(), original.Error()) {
+		t.Errorf("stderr = %q, want it to contain %q", out.String(), original.Error())
+	}
+}
+
+// TestUsageMentionsCheckAccount checks that the usage summary mentions
+// check-account, so a caller wiring cgm-relay in from a menu bar app can
+// discover the command without reading source.
+func TestUsageMentionsCheckAccount(t *testing.T) {
+	var buf bytes.Buffer
+	printUsageTo(&buf)
+	if !strings.Contains(buf.String(), "check-account") {
+		t.Errorf("usage = %q, want it to mention check-account", buf.String())
+	}
+}
+
 // TestExitCodeForServeErrorKeepsGenericFailuresAtOne proves every serve
 // failure exitCodeForServeError does not specifically recognise keeps
 // today's plain behaviour: exit code 1, and the error's own text on

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,8 +12,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/config"
+	"github.com/yaanfpv/cgm-relay/internal/librelinkup"
 	"github.com/yaanfpv/cgm-relay/internal/relay"
 	"github.com/yaanfpv/cgm-relay/internal/store"
 )
@@ -45,6 +49,40 @@ const exitCodeStoreInUse = 4
 // value.
 const exitCodeStoreDamaged = 5
 
+// The check-account exit codes below are returned only by the
+// check-account command; every one is a permanent verdict about the
+// account itself, never a reason to retry with the same credentials. The
+// macOS menu bar app's Swift mirror of each constant (AccountCheckExitCode
+// in CGMRelayCore) must always agree with these values.
+
+// exitCodeAccountRejected is returned when LibreLinkUp rejects the email
+// or password.
+const exitCodeAccountRejected = 10
+
+// exitCodeAccountTermsNotAccepted is returned when LibreLinkUp requires
+// its updated terms to be accepted in its own app before this account can
+// sign in again.
+const exitCodeAccountTermsNotAccepted = 11
+
+// exitCodeAccountNoConnections is returned when sign-in succeeds but the
+// account follows nobody on LibreLinkUp.
+const exitCodeAccountNoConnections = 12
+
+// exitCodeAccountRateLimited is returned when LibreLinkUp is rate
+// limiting sign-in attempts.
+const exitCodeAccountRateLimited = 13
+
+// exitCodeAccountUnreachable is returned when LibreLinkUp cannot be
+// reached at all, or does not answer within checkAccountTimeout.
+const exitCodeAccountUnreachable = 14
+
+// checkAccountTimeout bounds check-account's whole sign-in-and-list
+// attempt: generous next to LibreLinkUp's own ordinary response time, but
+// short enough that a caller waiting on this command (the macOS menu bar
+// app's Account pane) is never left hanging on a request that will never
+// answer.
+const checkAccountTimeout = 30 * time.Second
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -56,6 +94,8 @@ func main() {
 		runSetup(os.Args[2:])
 	case "serve":
 		runServe(os.Args[2:])
+	case "check-account":
+		runCheckAccount(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "cgm-relay: unknown command %q\n", os.Args[1])
 		printUsage()
@@ -73,12 +113,16 @@ func printUsage() {
 func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "usage: cgm-relay <command>")
 	fmt.Fprintln(w, "commands:")
-	fmt.Fprintln(w, "  setup   write a fresh configuration file and encryption key")
-	fmt.Fprintln(w, "  serve   sign in, poll for readings, and serve the Nightscout API")
-	fmt.Fprintln(w, "          --config-stdin  read the configuration as one JSON object")
-	fmt.Fprintln(w, "                          from stdin, in place of the config file and")
-	fmt.Fprintln(w, "                          environment, and keep running only until")
-	fmt.Fprintln(w, "                          stdin closes")
+	fmt.Fprintln(w, "  setup          write a fresh configuration file and encryption key")
+	fmt.Fprintln(w, "  serve          sign in, poll for readings, and serve the Nightscout API")
+	fmt.Fprintln(w, "                 --config-stdin  read the configuration as one JSON object")
+	fmt.Fprintln(w, "                                 from stdin, in place of the config file and")
+	fmt.Fprintln(w, "                                 environment, and keep running only until")
+	fmt.Fprintln(w, "                                 stdin closes")
+	fmt.Fprintln(w, "  check-account  read one JSON object on stdin (librelinkup_email,")
+	fmt.Fprintln(w, "                 librelinkup_password, and optionally librelinkup_base_url)")
+	fmt.Fprintln(w, "                 and confirm the account signs in and follows someone,")
+	fmt.Fprintln(w, "                 without saving or serving anything")
 }
 
 // runSetup implements the setup command.
@@ -147,6 +191,86 @@ func exitCodeForServeError(w io.Writer, err error) int {
 		return exitCodeStoreDamaged
 	default:
 		fmt.Fprintf(w, "cgm-relay: serve: %v\n", err)
+		return exitCodeGenericFailure
+	}
+}
+
+// checkAccountRequest is the one JSON object check-account reads from
+// stdin: exactly the three fields it needs, never the account's saved
+// token or store key, since it never signs anything in and never talks to
+// the store.
+type checkAccountRequest struct {
+	LibreLinkUpEmail    string `json:"librelinkup_email"`
+	LibreLinkUpPassword string `json:"librelinkup_password"`
+	LibreLinkUpBaseURL  string `json:"librelinkup_base_url"`
+}
+
+// runCheckAccount implements the check-account command: sign in with the
+// stdin-supplied credentials and confirm the account follows someone,
+// printing no secret and reporting the outcome only through its exit
+// code (exitCodeForCheckAccountError's own doc comment names every one).
+func runCheckAccount(args []string) {
+	fs := flag.NewFlagSet("check-account", flag.ExitOnError)
+	fs.Parse(args)
+
+	var req checkAccountRequest
+	dec := json.NewDecoder(os.Stdin)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		fmt.Fprintf(os.Stderr, "cgm-relay: check-account: parse stdin: %v\n", err)
+		os.Exit(exitCodeGenericFailure)
+	}
+	if req.LibreLinkUpEmail == "" || req.LibreLinkUpPassword == "" {
+		fmt.Fprintln(os.Stderr, "cgm-relay: check-account: librelinkup_email and librelinkup_password are required")
+		os.Exit(exitCodeGenericFailure)
+	}
+	if !config.IsAllowedLibreLinkUpBaseURL(req.LibreLinkUpBaseURL) {
+		fmt.Fprintf(os.Stderr, "cgm-relay: check-account: librelinkup_base_url must be https, or plain http to a loopback address, got %q\n", req.LibreLinkUpBaseURL)
+		os.Exit(exitCodeGenericFailure)
+	}
+
+	var opts []librelinkup.Option
+	if req.LibreLinkUpBaseURL != "" {
+		opts = append(opts, librelinkup.WithBaseURL(req.LibreLinkUpBaseURL))
+	}
+	source := librelinkup.New(req.LibreLinkUpEmail, req.LibreLinkUpPassword, opts...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), checkAccountTimeout)
+	defer cancel()
+	os.Exit(exitCodeForCheckAccountError(os.Stderr, source.CheckAccount(ctx)))
+}
+
+// exitCodeForCheckAccountError writes the line a person should see for
+// err to w, and returns check-account's own process exit code for it: 0
+// for a nil err (signed in, and the account follows someone),
+// exitCodeAccountRejected for a wrong email or password,
+// exitCodeAccountTermsNotAccepted for LibreLinkUp's updated-terms prompt,
+// exitCodeAccountNoConnections for a signed-in account nobody shares data
+// with, exitCodeAccountRateLimited for a 429, exitCodeAccountUnreachable
+// for a network failure or a timeout, and exitCodeGenericFailure for
+// everything else. Split out from runCheckAccount, which only calls
+// os.Exit, so the classification itself is exercised directly by a test.
+func exitCodeForCheckAccountError(w io.Writer, err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, librelinkup.ErrInvalidCredentials):
+		fmt.Fprintln(w, "cgm-relay: check-account: LibreLinkUp rejected the email or password")
+		return exitCodeAccountRejected
+	case errors.Is(err, librelinkup.ErrTermsNotAccepted):
+		fmt.Fprintln(w, "cgm-relay: check-account: LibreLinkUp needs its updated terms accepted in its own app before this account can sign in")
+		return exitCodeAccountTermsNotAccepted
+	case errors.Is(err, librelinkup.ErrNoConnections):
+		fmt.Fprintln(w, "cgm-relay: check-account: signed in, but this account follows nobody on LibreLinkUp")
+		return exitCodeAccountNoConnections
+	case errors.As(err, new(*cgm.RateLimitError)):
+		fmt.Fprintln(w, "cgm-relay: check-account: LibreLinkUp is rate limiting sign-in attempts; try again later")
+		return exitCodeAccountRateLimited
+	case errors.As(err, new(*cgm.TransientError)), errors.Is(err, context.DeadlineExceeded):
+		fmt.Fprintln(w, "cgm-relay: check-account: could not reach LibreLinkUp")
+		return exitCodeAccountUnreachable
+	default:
+		fmt.Fprintf(w, "cgm-relay: check-account: %v\n", err)
 		return exitCodeGenericFailure
 	}
 }

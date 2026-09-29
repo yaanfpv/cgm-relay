@@ -5,24 +5,56 @@ import os
 
 /// AppModel is CGM Relay's own coordinator: it bootstraps the app's
 /// generated credentials, supervises the engine process, polls its
-/// status, and exposes exactly what the menu needs to render as
-/// @Published state. Everything it depends on is a CGMRelayCore
-/// protocol; the mapping, supervision, and polling logic it wires
-/// together are each tested directly in CGMRelayCoreTests, so this type
-/// carries no logic of its own worth testing beyond that wiring.
+/// status, keeps the Settings window's own state, and exposes exactly
+/// what the menu and Settings panes need to render as @Published state.
+/// Everything it depends on is a CGMRelayCore protocol; the mapping,
+/// supervision, polling, alert-episode, and settings-to-configuration
+/// logic it wires together are each tested directly in
+/// CGMRelayCoreTests, so this type carries no logic of its own worth
+/// testing beyond that wiring.
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var menuState: MenuDisplayState
     @Published private(set) var credentialsConfigured = false
+    @Published private(set) var accountEmail: String?
     @Published private(set) var engineState: EngineSupervisor.RunState = .stopped
+    @Published private(set) var settings: AppSettings
+    @Published private(set) var loginItemStatus: LoginItemStatus = .disabled
+    @Published private(set) var loginItemErrorMessage: String?
+    @Published private(set) var notificationPermissionDenied = false
+    /// tailnetAvailable, localNetworkAvailable, connectAddressAvailability
+    /// and impliedBindHost are refreshed by refreshNetworkAddresses(),
+    /// called whenever the menu opens or the Connect/Advanced pane
+    /// appears: this Mac's network state can change at any time (Tailscale
+    /// connects or disconnects, Wi-Fi changes), never only when a setting
+    /// does.
+    @Published private(set) var tailnetAvailable = false
+    @Published private(set) var localNetworkAvailable = false
+    @Published private(set) var connectAddressAvailability: ReachAddressAvailability = .available("127.0.0.1")
+    /// impliedBindHost is the host the current reach implies for this
+    /// Mac's current network interfaces (ReachAddressResolver.bindHost's
+    /// own answer). Published beside connectAddressAvailability, rather
+    /// than recomputed by connectPaneAddressState, so the Connect pane
+    /// compares boundHost against the exact same answer that decides
+    /// whether the engine needs restarting at all.
+    @Published private(set) var impliedBindHost = "127.0.0.1"
+    /// boundHost is the host the running engine was actually started
+    /// against -- nil whenever nothing is currently running -- so the
+    /// Connect pane can show the address the engine is really listening
+    /// on rather than a freshly recomputed guess that could differ from
+    /// it until the next restart.
+    @Published private(set) var boundHost: String?
 
     private let credentialStore: any CredentialStore
+    private let settingsStore: any SettingsStoring
     private let supervisor: EngineSupervisor
     private let statusPoller: StatusPoller
-    private let listenAddr: String
+    private let accountSignIn: AccountSignIn
+    private let alertEngine: AlertEngine
+    private let notificationDelivering: any NotificationDelivering
+    private let loginItemManager: any LoginItemManaging
     private let statusAddr: String
     private let databasePath: String
-    private let retentionDays: Int
     private let librelinkupBaseURL: String?
 
     private var latestStatus: EngineStatus?
@@ -86,18 +118,27 @@ final class AppModel: ObservableObject {
     init(
         engineURL: URL,
         credentialStore: any CredentialStore = KeychainCredentialStore(),
-        listenAddr: String = "127.0.0.1:1337",
+        settingsStore: any SettingsStoring = UserDefaultsSettingsStore(),
         statusAddr: String = "127.0.0.1:1338",
         databasePath: String,
-        retentionDays: Int = 15,
         librelinkupBaseURL: String? = nil
     ) {
         self.credentialStore = credentialStore
-        self.listenAddr = listenAddr
+        self.settingsStore = settingsStore
+        // notificationDelivering and loginItemManager have no throwaway
+        // Debug counterpart the way credentialStore and settingsStore do
+        // (System Settings' own Login Items list and notification
+        // permission are never scoped per Keychain service), so, exactly
+        // like supervisor's own RealProcessLauncher below, they are never
+        // exposed as an init parameter at all.
+        notificationDelivering = UserNotificationCenterDelivering()
+        loginItemManager = SMAppServiceLoginItemManager()
         self.statusAddr = statusAddr
         self.databasePath = databasePath
-        self.retentionDays = retentionDays
         self.librelinkupBaseURL = librelinkupBaseURL
+        settings = settingsStore.load()
+        accountSignIn = AccountSignIn(checker: RealAccountChecker(engineURL: engineURL), store: credentialStore)
+        alertEngine = AlertEngine()
         menuState = .make(credentialsConfigured: false, engineState: .stopped, status: nil, now: Date())
 
         // A weak box, rather than capturing self, because Swift forbids
@@ -131,6 +172,8 @@ final class AppModel: ObservableObject {
     func onLaunch() async {
         try? CredentialsBootstrapper(store: credentialStore).ensureBootstrapped()
         refreshCredentialsConfigured()
+        await alertEngine.setNoReadingAlert(enabled: settings.noReadingAlertEnabled, minutes: settings.noReadingAlertMinutes)
+        await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
         async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
         _ = await (engineStarted, pollerStarted)
@@ -145,6 +188,7 @@ final class AppModel: ObservableObject {
     /// click needed.
     func onMenuOpened() {
         refreshCredentialsConfigured()
+        refreshNetworkAddresses()
         if canTryAgain {
             tryAgain()
         }
@@ -157,7 +201,11 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
-        Task { await supervisor.stop() }
+        Task {
+            await supervisor.stop()
+            boundHost = nil
+            await alertEngine.pauseForEngineStop()
+        }
     }
 
     /// startFresh recovers from a permanently failed engine: it moves the
@@ -208,8 +256,255 @@ final class AppModel: ObservableObject {
     func quit() {
         Task {
             await supervisor.stop()
+            boundHost = nil
             await statusPoller.stop()
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    // MARK: - Account
+
+    /// signIn checks email and password against LibreLinkUp before saving
+    /// anything (AccountSignIn's own contract). On AccountCheckOutcome.signedIn
+    /// it also starts the engine, since credentialsConfigured has just
+    /// become true for the first time (or after a sign-out); on every
+    /// other outcome nothing about the engine changes at all.
+    func signIn(email: String, password: String) async -> AccountCheckOutcome {
+        let outcome = await accountSignIn.signIn(email: email, password: password, librelinkupBaseURL: librelinkupBaseURL)
+        if outcome == .signedIn {
+            refreshCredentialsConfigured()
+            if canStart {
+                await startEngine()
+            }
+        }
+        return outcome
+    }
+
+    /// signOut stops the engine and removes exactly the LibreLinkUp email
+    /// and password (AccountSignIn's own contract keeps the token and
+    /// store key). Returns whether the removal actually succeeded, so the
+    /// Account pane can tell the person when it did not, rather than
+    /// quietly leaving the old account in place while acting as if it
+    /// were gone.
+    @discardableResult
+    func signOut() async -> Bool {
+        await supervisor.stop()
+        boundHost = nil
+        await alertEngine.pauseForEngineStop()
+        let succeeded: Bool
+        do {
+            try accountSignIn.signOut()
+            succeeded = true
+        } catch {
+            succeeded = false
+        }
+        refreshCredentialsConfigured()
+        return succeeded
+    }
+
+    // MARK: - Connect
+
+    /// rotateToken generates and saves a fresh bearer token and restarts
+    /// the engine with it, so every follower app presenting the old one
+    /// is refused from the moment the engine comes back up. Returns the
+    /// new token so the Connect pane can show it immediately, with no
+    /// extra Keychain read.
+    func rotateToken() async -> String? {
+        guard let newToken = try? CredentialsBootstrapper(store: credentialStore).rotateToken() else {
+            return nil
+        }
+        await restartEngineIfRunning()
+        return newToken
+    }
+
+    /// currentToken reads the follower-facing bearer token for the
+    /// Connect pane to display; nil only if bootstrapping has somehow not
+    /// run yet.
+    func currentToken() -> String? {
+        try? credentialStore.string(for: .token)
+    }
+
+    /// refreshNetworkAddresses re-reads this Mac's own network
+    /// interfaces: called when the menu opens and from the Connect and
+    /// Advanced panes' onAppear, since Tailscale connecting or a network
+    /// change can happen at any time, never only when a setting does.
+    /// When the address the chosen reach implies has since changed from
+    /// whatever the engine is actually bound to, it restarts the engine
+    /// once onto the new one, rather than leaving the Connect pane
+    /// showing an address nothing is listening on.
+    func refreshNetworkAddresses() {
+        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+        let primaryInterfaceName = SystemNetworkInterfaces.primaryInterfaceName()
+
+        tailnetAvailable = ReachAddressResolver.tailscaleIPv4(among: interfaces) != nil
+        localNetworkAvailable = ReachAddressResolver.primaryLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) != nil
+        connectAddressAvailability = ReachAddressResolver.displayHostAvailability(for: settings.reach, interfaces: interfaces, primaryInterfaceName: primaryInterfaceName)
+        impliedBindHost = ReachAddressResolver.bindHost(for: settings.reach, interfaces: interfaces)
+
+        if BoundAddressDecision.decide(currentBoundHost: boundHost, impliedBindHost: impliedBindHost) == .restartNeeded {
+            Task { await restartEngineIfRunning() }
+        }
+    }
+
+    /// connectPaneAddressState is what the Connect pane shows and encodes
+    /// into its QR code, decided by ConnectPaneAddressState.decide from
+    /// the chosen reach, the address the running engine is actually bound
+    /// to (boundHost), the address the current reach implies right now
+    /// (impliedBindHost), the settings port, and the current display-host
+    /// availability. No address logic lives here.
+    var connectPaneAddressState: ConnectPaneAddressState {
+        ConnectPaneAddressState.decide(
+            reach: settings.reach,
+            boundHost: boundHost,
+            impliedBindHost: impliedBindHost,
+            port: settings.port,
+            displayHostAvailability: connectAddressAvailability
+        )
+    }
+
+    // MARK: - Settings
+
+    func updatePort(_ port: Int) {
+        settings.port = port.clamped(to: AppSettings.portRange)
+        persistSettings()
+        Task { await restartEngineIfRunning() }
+    }
+
+    func updateReach(_ reach: NetworkReach) {
+        settings.reach = reach
+        persistSettings()
+        // refreshNetworkAddresses() is the one and only restart trigger
+        // here: with the new reach already in settings, it detects the
+        // implied bind host has changed from whatever is currently
+        // running and restarts once onto it -- a second explicit restart
+        // call here would double up and restart twice for one commit.
+        refreshNetworkAddresses()
+    }
+
+    func updateRetentionDays(_ days: Int) {
+        settings.retentionDays = days.clamped(to: AppSettings.retentionDaysRange)
+        persistSettings()
+        Task { await restartEngineIfRunning() }
+    }
+
+    func updateUnits(_ units: GlucoseUnit) {
+        settings.units = units
+        persistSettings()
+        recomputeMenuState()
+    }
+
+    /// setNoReadingAlert asks for notification permission the first time
+    /// the person turns this alert on, never proactively. A refusal is
+    /// recorded (notificationPermissionDenied) rather than silently
+    /// leaving the alert enabled with no way to ever notify anyone.
+    func setNoReadingAlert(enabled: Bool, minutes: Int) async {
+        let clampedMinutes = minutes.clamped(to: AppSettings.noReadingAlertMinutesRange)
+        if enabled, !settings.noReadingAlertEnabled {
+            let granted = await notificationDelivering.requestAuthorization()
+            notificationPermissionDenied = !granted
+            guard granted else {
+                settings.noReadingAlertMinutes = clampedMinutes
+                persistSettings()
+                return
+            }
+        }
+        settings.noReadingAlertEnabled = enabled
+        settings.noReadingAlertMinutes = clampedMinutes
+        persistSettings()
+        await alertEngine.setNoReadingAlert(enabled: enabled, minutes: clampedMinutes)
+    }
+
+    func setSignInFailingAlert(enabled: Bool) async {
+        if enabled, !settings.signInFailingAlertEnabled {
+            let granted = await notificationDelivering.requestAuthorization()
+            notificationPermissionDenied = !granted
+            guard granted else { return }
+        }
+        settings.signInFailingAlertEnabled = enabled
+        persistSettings()
+        await alertEngine.setSignInFailingAlert(enabled: enabled)
+    }
+
+    /// refreshLoginItemStatus re-reads SMAppService's own status, with no
+    /// side effect: called from the General pane's onAppear, since
+    /// SMAppService has no change notification of its own and the person
+    /// may have approved or removed the login item in System Settings
+    /// since the pane was last shown.
+    func refreshLoginItemStatus() {
+        loginItemStatus = loginItemManager.status
+    }
+
+    /// setOpenAtLogin registers or unregisters CGM Relay as a login item,
+    /// then re-reads the real status rather than assuming the call
+    /// succeeded outright: register() can succeed while the result is
+    /// .requiresApproval, which the General pane shows as its own state.
+    /// A failure is recorded in loginItemErrorMessage, not just logged, so
+    /// the toggle flipping back on its own comes with a plain reason
+    /// rather than looking like it silently did nothing.
+    func setOpenAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try loginItemManager.register()
+            } else {
+                try loginItemManager.unregister()
+            }
+            loginItemErrorMessage = nil
+        } catch {
+            recoveryLogger.error("could not change the login item registration: \(error, privacy: .public)")
+            loginItemErrorMessage = enabled
+                ? "Couldn't turn on Open at Login. Try again."
+                : "Couldn't turn off Open at Login. Try again."
+        }
+        refreshLoginItemStatus()
+    }
+
+    // MARK: - Diagnostics
+
+    /// diagnosticsText is the About pane's Copy Diagnostics payload.
+    /// DiagnosticsReport.build's own signature guarantees it: no email,
+    /// token, store key, bind address, or glucose value can reach it,
+    /// whatever this app passes.
+    func diagnosticsText(appVersion: String, buildNumber: String, macOSVersion: String) -> String {
+        let now = Date()
+        let followerAges: [(client: String, age: String)] = (latestStatus?.clients ?? [:])
+            .map { (client: $0.key, age: MenuDisplayState.relativeAgeText(from: $0.value, to: now)) }
+            .sorted { $0.client < $1.client }
+
+        return DiagnosticsReport.build(
+            appVersion: appVersion,
+            buildNumber: buildNumber,
+            macOSVersion: macOSVersion,
+            engineState: engineState,
+            lastError: latestStatus?.lastError,
+            reach: settings.reach,
+            port: settings.port,
+            retentionDays: settings.retentionDays,
+            units: settings.units,
+            noReadingAlertEnabled: settings.noReadingAlertEnabled,
+            noReadingAlertMinutes: settings.noReadingAlertMinutes,
+            signInFailingAlertEnabled: settings.signInFailingAlertEnabled,
+            followerAges: followerAges
+        )
+    }
+
+    // MARK: - Private
+
+    private func persistSettings() {
+        settingsStore.save(settings)
+    }
+
+    /// restartEngineIfRunning stops and restarts the engine only while it
+    /// is actually starting, running, or waiting to restart: a settings
+    /// change never starts an engine a person explicitly stopped, and
+    /// never disturbs a permanent failure, which stays exactly as
+    /// reported until Try Again or Start Fresh.
+    private func restartEngineIfRunning() async {
+        switch engineState {
+        case .starting, .running, .waitingToRestart:
+            await supervisor.stop()
+            await startEngine()
+        case .stopped, .failed:
+            return
         }
     }
 
@@ -231,22 +526,27 @@ final class AppModel: ObservableObject {
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
         if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
+            boundHost = nil
             await supervisor.fail(.recoveryMoveFailed)
             return
         }
+        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
         guard
-            let config = try? EngineConfigurationBuilder.build(
+            let config = try? SettingsEngineConfigurationBuilder.build(
+                settings: settings,
                 from: credentialStore,
-                listenAddr: listenAddr,
+                interfaces: interfaces,
                 statusAddr: statusAddr,
                 databasePath: databasePath,
-                retentionDays: retentionDays,
                 librelinkupBaseURL: librelinkupBaseURL
             )
         else {
+            boundHost = nil
             await supervisor.fail(.configurationUnreadable)
             return
         }
+        boundHost = ReachAddressResolver.bindHost(for: settings.reach, interfaces: interfaces)
+        await alertEngine.resumeAfterEngineStart()
         await supervisor.start(configuration: config)
     }
 
@@ -254,10 +554,24 @@ final class AppModel: ObservableObject {
         let email = try? credentialStore.string(for: .librelinkupEmail)
         let password = try? credentialStore.string(for: .librelinkupPassword)
         credentialsConfigured = !(email ?? "").isEmpty && !(password ?? "").isEmpty
+        accountEmail = credentialsConfigured ? email : nil
         recomputeMenuState()
     }
 
+    /// handleEngineStateChange clears boundHost whenever the engine
+    /// reaches .stopped or .failed, so a permanent failure the supervisor
+    /// discovers on its own after starting (a store key mismatch, a
+    /// damaged file, another copy already holding the store) never leaves
+    /// the Connect pane showing an address nothing is listening on; a
+    /// crash-triggered restart (.waitingToRestart, then .starting) keeps
+    /// it, since it restarts with the same configuration.
     private func handleEngineStateChange(_ state: EngineSupervisor.RunState) {
+        switch state {
+        case .stopped, .failed:
+            boundHost = nil
+        case .starting, .running, .waitingToRestart:
+            break
+        }
         engineState = state
         recomputeMenuState()
     }
@@ -268,12 +582,36 @@ final class AppModel: ObservableObject {
     /// restarts, and none of those mean the reading it last reported is
     /// no longer real. Discarding it there would make the menu claim
     /// there has never been a reading right after it showed one. Only a
-    /// fresh, successful fetch ever replaces what is shown.
+    /// fresh, successful fetch ever replaces what is shown. Every update,
+    /// successful or not, is also handed to alertEngine, whose own fired
+    /// alerts are delivered as real notifications.
     private func handleStatusUpdate(_ status: EngineStatus?) {
         if let status {
             latestStatus = status
         }
         recomputeMenuState()
+
+        Task {
+            let fired = await alertEngine.handleStatusUpdate(status)
+            for kind in fired {
+                await deliverAlert(kind)
+            }
+        }
+    }
+
+    private func deliverAlert(_ kind: AlertKind) async {
+        switch kind {
+        case .noReading:
+            await notificationDelivering.deliver(
+                title: "No new reading",
+                body: "CGM Relay hasn't seen a new reading in a while."
+            )
+        case .signInFailing:
+            await notificationDelivering.deliver(
+                title: "Sign-in failing",
+                body: "CGM Relay can't sign in to LibreLinkUp. Check your email and password in Settings."
+            )
+        }
     }
 
     private func recomputeMenuState() {
@@ -281,7 +619,8 @@ final class AppModel: ObservableObject {
             credentialsConfigured: credentialsConfigured,
             engineState: engineState,
             status: latestStatus,
-            now: Date()
+            now: Date(),
+            units: settings.units
         )
     }
 
@@ -296,4 +635,15 @@ final class AppModel: ObservableObject {
 /// own account.
 private final class AppModelRef: @unchecked Sendable {
     weak var value: AppModel?
+}
+
+private extension Int {
+    /// clamped keeps a person's typed or scrolled value inside range,
+    /// rather than saving something the engine or the store would
+    /// refuse. Qualified as Swift.min/Swift.max: inside an extension on
+    /// Int, an unqualified min/max resolves to the static properties
+    /// Int.min/Int.max instead of the global functions of the same name.
+    func clamped(to range: ClosedRange<Int>) -> Int {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
+    }
 }

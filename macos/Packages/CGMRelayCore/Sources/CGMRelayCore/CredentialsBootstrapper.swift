@@ -56,6 +56,18 @@ public struct CredentialsBootstrapper: Sendable {
             try store.setString(key, for: .storeKey)
         }
     }
+
+    /// rotateToken generates and saves a fresh bearer token, in the same
+    /// encoding ensureBootstrapped's own first-run token uses, and returns
+    /// it. Unlike ensureBootstrapped, this always overwrites: it exists
+    /// for "Make a New Token…", where overwriting the old token is the
+    /// whole point -- every follower app presenting it is refused from
+    /// the moment the engine restarts with the new one.
+    public func rotateToken() throws -> String {
+        let token = try randomBytes.randomBytes(count: Self.keySizeBytes).base64URLEncodedStringWithoutPadding()
+        try store.setString(token, for: .token)
+        return token
+    }
 }
 
 extension Data {

@@ -17,14 +17,14 @@ struct RealProcessLauncherTests {
     /// system's own termination reporting -- an ordinary exit status
     /// against a death by signal -- can actually be observed; every other
     /// test in this package launches a fake that never runs anything.
-    private func exitCode(forShellCommand shellCommand: String) async throws -> Int32 {
+    private func exitCode(forShellCommand shellCommand: String, standardInputData: Data = Data()) async throws -> Int32 {
         let launcher = RealProcessLauncher()
         return try await withCheckedThrowingContinuation { continuation in
             do {
                 _ = try launcher.launch(
                     executableURL: URL(fileURLWithPath: "/bin/sh"),
                     arguments: ["-c", shellCommand],
-                    standardInputData: Data()
+                    standardInputData: standardInputData
                 ) { exitCode in
                     continuation.resume(returning: exitCode)
                 }
@@ -44,6 +44,17 @@ struct RealProcessLauncherTests {
     func onExitReportsTheRealTerminationReasonCorrectlySigned(_ testCase: Case) async throws {
         let got = try await exitCode(forShellCommand: testCase.shellCommand)
         #expect(got == testCase.wantExitCode)
+    }
+
+    @Test("a child that exits immediately without reading a stdin payload larger than a pipe buffer never raises SIGPIPE into this process")
+    func childExitingWithoutReadingLargePayloadNeverRaisesSIGPIPE() async throws {
+        // Well over one pipe buffer (64 KB): without the per-descriptor
+        // SIGPIPE guard, writing this on the background queue after
+        // `exit 9` has already closed the read end kills the whole test
+        // process outright rather than failing one test.
+        let largePayload = Data(repeating: 0x42, count: 200_000)
+        let got = try await exitCode(forShellCommand: "exit 9", standardInputData: largePayload)
+        #expect(got == 9)
     }
 
     /// EnvironmentCase names one shell command that exits 0 when the

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Add CGM Relay's own app icon, so the Dock and Finder show it instead of a generic blank tile.
+- Fix CI so it stops warning about deprecated Node runtimes: `checkout` and `setup-go` are now pinned to their current releases, both running on Node 24.
 - Compress a large Nightscout API response with gzip when the requesting app asks for it, so a follower catching up on hours of history downloads far fewer bytes over a slow connection; a small response, or a request that never asks for gzip, is written exactly as before.
 - Fix the local status endpoint's follower-client list so it can no longer grow without bound: it now keeps the 256 most recently seen clients and drops the longest-silent one to make room for a new one.
 - Add the reading model, source interface, and an encrypted SQLite store for glucose readings.
@@ -23,3 +25,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix two copies of the menu bar app opened at once so only one of them ever uses the saved readings: the other says so plainly and offers to try again the moment the first one quits, instead of restarting forever. Fix a saved reading database that cannot be read at all, not just one sealed with the wrong key, to get the same "Start Fresh…" recovery instead of restarting forever. Fix the menu so stopping the engine keeps showing the last reading it saw, instead of claiming there had never been one.
 - Fix the menu bar app so the engine it starts gets an explicit, minimal set of environment variables instead of this app's own whole environment: nothing the engine needs ever arrives that way, since its configuration is exactly what the app writes to its standard input.
 - Fix a development build of the menu bar app so a launch given no development Keychain service argument uses a fixed development service and its own database folder, instead of the real Keychain item and the real reading database.
+- Add the Settings window: sign in and out of a LibreLinkUp account, checked against LibreLinkUp before anything is saved (`cgm-relay check-account`); a Connect pane showing the follower address, token, and a QR code, with a way to rotate the token; General, Advanced, and About panes for login-at-startup, units, retention, port, and who can reach the relay (this Mac, a Tailscale tailnet, or the local network); and two optional notifications, for no new reading in a while and for sign-in failing.

@@ -106,8 +106,8 @@ type Server struct {
 	history []Measurement
 
 	// mode is the standalone fake's (cmd/llufake) own runtime control:
-	// "", "fresh", "stale", or "reject". The Go test suite never sets
-	// it and drives the fake through the setters above instead, so
+	// "", or one of the strings SetMode accepts. The Go test suite never
+	// sets it and drives the fake through the setters above instead, so
 	// every behaviour they exercise is unchanged by its presence.
 	mode string
 }
@@ -233,20 +233,26 @@ func (s *Server) Fail(status int) {
 // SetMode switches the fake's runtime behaviour to one of "fresh" (every
 // graph request answers with a new current reading timestamped now),
 // "stale" (every graph request answers with the same reading, fixed
-// staleReadingAge old, and no new one), or "reject" (every sign-in is
-// refused as for a wrong password). It takes effect on the very next
-// request, with no restart needed, and is the one control the standalone
-// fake (cmd/llufake) exposes over HTTP at /mode; the Go test suite drives
-// the fake directly through SetGraph, RejectCredentials and their
-// siblings instead and never calls this. Entering "reject" also
+// staleReadingAge old, and no new one), "reject" (every sign-in is
+// refused as for a wrong password), "terms" (every sign-in answers as
+// LibreLinkUp does when the account must accept updated terms), "ratelimited"
+// (every sign-in answers HTTP 429, with no Retry-After header), or
+// "noconnections" (sign-in succeeds, but the connections list is always
+// empty, as for an account nobody follows). It takes effect on the very
+// next request, with no restart needed, and is the one control the
+// standalone fake (cmd/llufake) exposes over HTTP at /mode; the Go test
+// suite drives the fake directly through SetGraph, RejectCredentials and
+// their siblings instead and never calls this. Entering "reject" also
 // invalidates any session already signed in, so a caller already polling
 // hits it on its very next authenticated request rather than only on its
-// next fresh sign-in.
+// next fresh sign-in; the other modes leave an existing session alone,
+// since none of them describe a session that was ever valid and then
+// stopped being so.
 func (s *Server) SetMode(mode string) error {
 	switch mode {
-	case "fresh", "stale", "reject":
+	case "fresh", "stale", "reject", "terms", "ratelimited", "noconnections":
 	default:
-		return fmt.Errorf("llufake: unknown mode %q, want one of fresh, stale, reject", mode)
+		return fmt.Errorf("llufake: unknown mode %q, want one of fresh, stale, reject, terms, ratelimited, noconnections", mode)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -297,7 +303,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 // over HTTP for the standalone fake (cmd/llufake): GET reports the
 // current mode as plain text, POST sets it from the "mode" query
 // parameter or, failing that, the request body, answering 400 naming the
-// problem if it names none of "fresh", "stale", or "reject". The Go test
+// problem if it names none of the modes SetMode accepts. The Go test
 // suite never reaches this path.
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -326,6 +332,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if s.mode == "reject" {
 		writeJSON(w, map[string]any{"status": 2, "data": map[string]any{}})
+		return
+	}
+	if s.mode == "terms" {
+		writeJSON(w, map[string]any{"status": 4, "data": map[string]any{}})
+		return
+	}
+	if s.mode == "ratelimited" {
+		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
 
@@ -376,8 +390,12 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	conns := make([]map[string]any, 0, len(s.patientIDs))
-	for _, id := range s.patientIDs {
+	patientIDs := s.patientIDs
+	if s.mode == "noconnections" {
+		patientIDs = nil
+	}
+	conns := make([]map[string]any, 0, len(patientIDs))
+	for _, id := range patientIDs {
 		conns = append(conns, map[string]any{"patientId": id})
 	}
 	writeJSON(w, map[string]any{"status": 0, "data": conns})

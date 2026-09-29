@@ -46,6 +46,7 @@ public struct RealProcessLauncher: ProcessLauncher {
 
         let inputPipe = Pipe()
         process.standardInput = inputPipe
+        disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
         process.terminationHandler = { finished in
             // terminationStatus is the SIGNAL number, not an exit code,
             // when terminationReason is .uncaughtSignal -- reporting it
@@ -69,7 +70,15 @@ public struct RealProcessLauncher: ProcessLauncher {
         // one write.
         let writeHandle = inputPipe.fileHandleForWriting
         DispatchQueue.global(qos: .utility).async {
-            writeHandle.write(standardInputData)
+            do {
+                try writeHandle.write(contentsOf: standardInputData)
+            } catch {
+                // The child exited or closed its stdin before the write
+                // landed. disableSIGPIPE above is what keeps this a
+                // plain thrown error rather than a fatal signal; the
+                // child's own exit still reaches onExit normally through
+                // terminationHandler, so nothing further is needed here.
+            }
         }
 
         return RealProcess(process: process, stdinHandle: writeHandle)

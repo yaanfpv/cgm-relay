@@ -1,0 +1,47 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.05490,0.28235,0.31765,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "arcs.png",
+          "name" : "arcs"
+        }
+      ],
+      "name" : "arcs",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.35
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "drop.png",
+          "name" : "drop"
+        }
+      ],
+      "name" : "drop",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.35
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "background.png",
+          "name" : "background"
+        }
+      ],
+      "name" : "background"
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

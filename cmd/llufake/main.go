@@ -16,10 +16,13 @@
 // While it is running, switch its mode at any time, with no restart, by
 // posting to its own /mode endpoint:
 //
-//	curl -X POST "<url>/mode?mode=fresh"   # a current reading, taken just now
-//	curl -X POST "<url>/mode?mode=stale"   # the last reading, fixed ten minutes old
-//	curl -X POST "<url>/mode?mode=reject"  # every sign-in refused, as for a wrong password
-//	curl "<url>/mode"                      # print the current mode
+//	curl -X POST "<url>/mode?mode=fresh"         # a current reading, taken just now
+//	curl -X POST "<url>/mode?mode=stale"         # the last reading, fixed ten minutes old
+//	curl -X POST "<url>/mode?mode=reject"        # every sign-in refused, as for a wrong password
+//	curl -X POST "<url>/mode?mode=terms"         # every sign-in needs LibreLinkUp's updated terms accepted
+//	curl -X POST "<url>/mode?mode=ratelimited"   # every sign-in answers 429, rate limited
+//	curl -X POST "<url>/mode?mode=noconnections" # sign-in succeeds, but the account follows nobody
+//	curl "<url>/mode"                            # print the current mode
 //
 // It runs until interrupted (Ctrl-C) or sent SIGTERM.
 package main
@@ -48,6 +51,9 @@ func main() {
 	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=fresh")
 	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=stale")
 	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=reject")
+	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=terms")
+	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=ratelimited")
+	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=noconnections")
 	fmt.Printf("  curl %q\n", srv.URL+"/mode")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

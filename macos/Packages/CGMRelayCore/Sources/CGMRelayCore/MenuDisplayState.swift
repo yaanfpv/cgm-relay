@@ -18,16 +18,77 @@ public struct MenuDisplayState: Sendable, Equatable {
     public var statusLine: String
     public var readingLine: String
     public var lastPolledLine: String
+    /// readingValue, readingUnit and readingAge are the same current
+    /// reading readingLine already renders as one string ("142 mg/dL (2
+    /// min ago)"), split into the pieces the menu panel lays out
+    /// separately: readingValue and readingUnit are the hero's own large
+    /// numeral and small unit, and readingAge is that reading's age,
+    /// which the view folds into the one secondary line beside
+    /// shortStatus (via statusAge below) rather than showing on a line of
+    /// its own. Built by ReadingText from the exact same GlucoseUnit
+    /// primitives readingLine itself is built from, so the two can never
+    /// disagree. All three are nil exactly when readingLine falls back to
+    /// a plain sentence with no reading in it ("No reading yet", "Reading
+    /// unavailable", or a permanent failure's own explanation).
+    public var readingValue: String?
+    public var readingUnit: String?
+    public var readingAge: String?
+    /// shortStatus is statusLine's own text for every state except the
+    /// two whose full wording already restates the age that now sits
+    /// beside it on the same secondary line ("Reading is current" /
+    /// "Reading is stale" shorten to "Current" / "Stale") and sign-in
+    /// failing, whose full statusLine carries an instruction that belongs
+    /// in statusDetail instead, not repeated here. The view reads this
+    /// field directly, never by matching against statusLine's text.
+    public var shortStatus: String
+    /// statusAge is the reading's own age, worded for the one secondary
+    /// line it shares with shortStatus, or nil when there is no reading
+    /// to date at all (no credentials, connecting, waiting for a first
+    /// reading, or a permanent failure). For the two states whose short
+    /// status already names the reading as its subject ("Current",
+    /// "Stale") this is the bare age ("just now"); for every other state
+    /// that still has a reading on file (stopped, starting, restarting,
+    /// sign-in failing) the short status names the ENGINE, not the
+    /// reading, so the age says whose age it is ("last reading 2 min
+    /// ago") rather than reading as how long the engine has been in that
+    /// state.
+    public var statusAge: String?
+    /// statusDetail is a longer explanation that belongs on its own line
+    /// in the panel, never appended to shortStatus: nil for every state
+    /// except sign-in failing, where it carries the instruction.
+    public var statusDetail: String?
 
     /// freshWindow is how recent a reading has to be to still count as
     /// flowing (green) rather than stale (amber): five minutes.
     public static let freshWindow: TimeInterval = 5 * 60
 
-    public init(dot: StatusDot, statusLine: String, readingLine: String, lastPolledLine: String) {
+    public init(
+        dot: StatusDot,
+        statusLine: String,
+        readingLine: String,
+        lastPolledLine: String,
+        readingValue: String? = nil,
+        readingUnit: String? = nil,
+        readingAge: String? = nil,
+        shortStatus: String? = nil,
+        statusAge: String? = nil,
+        statusDetail: String? = nil
+    ) {
         self.dot = dot
         self.statusLine = statusLine
         self.readingLine = readingLine
         self.lastPolledLine = lastPolledLine
+        self.readingValue = readingValue
+        self.readingUnit = readingUnit
+        self.readingAge = readingAge
+        // shortStatus defaults to statusLine itself so every existing
+        // caller that never mentions it (in particular this type's own
+        // tests, which predate the field) keeps the one status string it
+        // already passed, rather than silently ending up with an empty
+        // one.
+        self.shortStatus = shortStatus ?? statusLine
+        self.statusAge = statusAge
+        self.statusDetail = statusDetail
     }
 
     /// make computes the display state a person should see right now.
@@ -43,11 +104,14 @@ public struct MenuDisplayState: Sendable, Equatable {
     /// - status: the engine's last successfully fetched `/status`
     ///   response, or nil if none has been fetched yet.
     /// - now: the instant to measure every age against.
+    /// - units: which unit readingLine renders mgDl in. Defaults to
+    ///   mg/dL so every existing caller keeps its current behaviour.
     public static func make(
         credentialsConfigured: Bool,
         engineState: EngineSupervisor.RunState,
         status: EngineStatus?,
-        now: Date
+        now: Date,
+        units: GlucoseUnit = .mgDl
     ) -> MenuDisplayState {
         guard credentialsConfigured else {
             return MenuDisplayState(
@@ -60,27 +124,42 @@ public struct MenuDisplayState: Sendable, Equatable {
 
         switch engineState {
         case .stopped:
+            let reading = ReadingText.make(for: status, now: now, units: units)
             return MenuDisplayState(
                 dot: .red,
                 statusLine: "Stopped",
-                readingLine: readingLine(for: status, now: now),
-                lastPolledLine: lastPolledLine(for: status, now: now)
+                readingLine: reading.line,
+                lastPolledLine: lastPolledLine(for: status, now: now),
+                readingValue: reading.value,
+                readingUnit: reading.unit,
+                readingAge: reading.age,
+                statusAge: agedReadingLine(reading.age)
             )
 
         case .starting:
+            let reading = ReadingText.make(for: status, now: now, units: units)
             return MenuDisplayState(
                 dot: .amber,
                 statusLine: "Starting…",
-                readingLine: readingLine(for: status, now: now),
-                lastPolledLine: lastPolledLine(for: status, now: now)
+                readingLine: reading.line,
+                lastPolledLine: lastPolledLine(for: status, now: now),
+                readingValue: reading.value,
+                readingUnit: reading.unit,
+                readingAge: reading.age,
+                statusAge: agedReadingLine(reading.age)
             )
 
         case .waitingToRestart:
+            let reading = ReadingText.make(for: status, now: now, units: units)
             return MenuDisplayState(
                 dot: .red,
                 statusLine: "Restarting…",
-                readingLine: readingLine(for: status, now: now),
-                lastPolledLine: lastPolledLine(for: status, now: now)
+                readingLine: reading.line,
+                lastPolledLine: lastPolledLine(for: status, now: now),
+                readingValue: reading.value,
+                readingUnit: reading.unit,
+                readingAge: reading.age,
+                statusAge: agedReadingLine(reading.age)
             )
 
         case .failed(let reason):
@@ -102,11 +181,18 @@ public struct MenuDisplayState: Sendable, Equatable {
             }
 
             if status.signInFailing {
+                let reading = ReadingText.make(for: status, now: now, units: units)
                 return MenuDisplayState(
                     dot: .red,
                     statusLine: "Sign-in failing. Check your LibreLinkUp email and password in Settings.",
-                    readingLine: readingLine(for: status, now: now),
-                    lastPolledLine: lastPolledLine(for: status, now: now)
+                    readingLine: reading.line,
+                    lastPolledLine: lastPolledLine(for: status, now: now),
+                    readingValue: reading.value,
+                    readingUnit: reading.unit,
+                    readingAge: reading.age,
+                    shortStatus: "Sign-in failing",
+                    statusAge: agedReadingLine(reading.age),
+                    statusDetail: "Check your LibreLinkUp email and password in Settings."
                 )
             }
 
@@ -121,18 +207,42 @@ public struct MenuDisplayState: Sendable, Equatable {
 
             let age = now.timeIntervalSince(readingTime)
             let isFresh = age >= 0 && age <= freshWindow
+            let reading = ReadingText.make(for: status, now: now, units: units)
             return MenuDisplayState(
                 dot: isFresh ? .green : .amber,
                 statusLine: isFresh ? "Reading is current" : "Reading is stale",
-                readingLine: readingLine(for: status, now: now),
-                lastPolledLine: lastPolledLine(for: status, now: now)
+                readingLine: reading.line,
+                lastPolledLine: lastPolledLine(for: status, now: now),
+                readingValue: reading.value,
+                readingUnit: reading.unit,
+                readingAge: reading.age,
+                shortStatus: isFresh ? "Current" : "Stale",
+                // The bare age, not agedReadingLine's "last reading …"
+                // prefix: shortStatus already names the reading as its
+                // own subject here ("Current", "Stale"), so "just now" on
+                // its own reads unambiguously.
+                statusAge: reading.age
             )
         }
     }
 
+    /// agedReadingLine words a reading's own age for the one secondary
+    /// line it shares with a shortStatus that names the ENGINE rather
+    /// than the reading itself (Stopped, Starting…, Restarting…,
+    /// Sign-in failing): "last reading 2 min ago" rather than a bare "2
+    /// min ago", which beside one of those statuses reads as how long
+    /// the engine has been in that state instead of the reading's own
+    /// age. Returns nil unchanged when there is no age to word at all.
+    private static func agedReadingLine(_ age: String?) -> String? {
+        guard let age else { return nil }
+        return "last reading \(age)"
+    }
+
     /// statusLine renders a permanent failure's headline, in the person's
     /// own terms: never "engine", "store", "key mismatch", or an exit
-    /// status.
+    /// status, and no longer than every other state's shortStatus (this
+    /// becomes shortStatus too, unchanged, since a permanent failure's
+    /// headline already is the short form).
     private static func statusLine(for reason: EngineSupervisor.FailureReason) -> String {
         switch reason {
         case .storeKeyMismatch:
@@ -144,7 +254,12 @@ public struct MenuDisplayState: Sendable, Equatable {
         case .configurationUnreadable:
             return "Can't read your saved settings"
         case .recoveryMoveFailed:
-            return "Couldn't move the saved readings aside"
+            // Names the action the person took (Start Fresh, the button
+            // whose confirmation triggers this recovery path) rather than
+            // the internal step that failed partway through it, kept as
+            // short as every other status; detailLine below carries the
+            // fuller explanation and the retry instruction.
+            return "Couldn't start fresh"
         }
     }
 
@@ -165,12 +280,6 @@ public struct MenuDisplayState: Sendable, Equatable {
         }
     }
 
-    private static func readingLine(for status: EngineStatus?, now: Date) -> String {
-        guard let status, let readingTime = status.lastReadingTime else { return "No reading yet" }
-        guard let mgDl = status.lastReadingMgDl else { return "Reading unavailable" }
-        return "\(mgDl) mg/dL (\(relativeAgeText(from: readingTime, to: now)))"
-    }
-
     private static func lastPolledLine(for status: EngineStatus?, now: Date) -> String {
         guard let status, let latest = status.clients?.values.max() else {
             return "No follower app has polled yet"
@@ -183,7 +292,7 @@ public struct MenuDisplayState: Sendable, Equatable {
     /// of RelativeDateTimeFormatter, because that formatter's abbreviated
     /// output is locale- and OS-version-dependent and would make the exact
     /// wording this type promises drift out from under its own tests.
-    static func relativeAgeText(from date: Date, to now: Date) -> String {
+    public static func relativeAgeText(from date: Date, to now: Date) -> String {
         let seconds = now.timeIntervalSince(date)
         guard seconds >= 0 else { return "just now" }
         switch seconds {
@@ -196,5 +305,32 @@ public struct MenuDisplayState: Sendable, Equatable {
         default:
             return "\(Int(seconds / 86400)) d ago"
         }
+    }
+}
+
+/// ReadingText is the one mapping from an EngineStatus's raw reading to
+/// every display form MenuDisplayState hands out: the combined line
+/// readingLine has always rendered ("142 mg/dL (2 min ago)"), and the
+/// value/unit/age split a view wants to lay out as separate pieces.
+/// Building both from this one type, rather than building the line and
+/// then re-parsing it back apart, is what keeps them unable to disagree
+/// about when a reading exists.
+private struct ReadingText {
+    let line: String
+    let value: String?
+    let unit: String?
+    let age: String?
+
+    static func make(for status: EngineStatus?, now: Date, units: GlucoseUnit) -> ReadingText {
+        guard let status, let readingTime = status.lastReadingTime else {
+            return ReadingText(line: "No reading yet", value: nil, unit: nil, age: nil)
+        }
+        guard let mgDl = status.lastReadingMgDl else {
+            return ReadingText(line: "Reading unavailable", value: nil, unit: nil, age: nil)
+        }
+        let value = units.formatValue(mgDl: mgDl)
+        let unit = units.label
+        let age = MenuDisplayState.relativeAgeText(from: readingTime, to: now)
+        return ReadingText(line: "\(value) \(unit) (\(age))", value: value, unit: unit, age: age)
     }
 }
