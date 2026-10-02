@@ -611,3 +611,65 @@ func mustReadAndClose(t *testing.T, body io.ReadCloser) []byte {
 	}
 	return data
 }
+
+// TestRunPairingPageIsReachableButItsMintRouteIsNot drives the real
+// listeners: a code is minted over the loopback status endpoint (and only
+// there), the phone-facing listener serves the pairing page for it without
+// a credential, and that listener has no route that mints a code, so a
+// phone or tailnet peer cannot make one.
+func TestRunPairingPageIsReachableButItsMintRouteIsNot(t *testing.T) {
+	t.Parallel()
+	fake := llufake.New(t)
+	source := librelinkup.New("person@example.test", "some-password", librelinkup.WithBaseURL(fake.URL))
+	cfg := testConfig(t)
+	addrs, stop := runRelay(t, cfg, relay.WithSource(source))
+	defer stop()
+
+	mintBody := `{"apps":[{"name":"A","steps":["s"],"fields":[{"label":"Token","value":"{token}"}],"links":[]}]}`
+	post := func(url, host string) (int, []byte) {
+		req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(mintBody))
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if host != "" {
+			req.Host = host
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", url, err)
+		}
+		return resp.StatusCode, mustReadAndClose(t, resp.Body)
+	}
+
+	if status, _ := post(fmt.Sprintf("http://%s/pairing", addrs.Nightscout), ""); status == http.StatusOK {
+		t.Fatal("the phone-facing listener minted a code")
+	}
+	if status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "relay.example.test"); status != http.StatusForbidden {
+		t.Fatalf("mint with a spoofed Host: status = %d, want 403 (body %s)", status, body)
+	}
+
+	status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "")
+	if status != http.StatusOK {
+		t.Fatalf("mint over loopback: status = %d, body %s", status, body)
+	}
+	var minted struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &minted); err != nil || minted.Code == "" {
+		t.Fatalf("decode mint response %s: %v", body, err)
+	}
+
+	pageURL := fmt.Sprintf("http://%s/connect/%s", addrs.Nightscout, minted.Code)
+	resp, err := http.Get(pageURL)
+	if err != nil {
+		t.Fatalf("GET %s: %v", pageURL, err)
+	}
+	page := mustReadAndClose(t, resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(page), cfg.Token) {
+		t.Fatalf("pairing page: status = %d, token shown = %v", resp.StatusCode, strings.Contains(string(page), cfg.Token))
+	}
+	if strings.Contains(pageURL, cfg.Token) {
+		t.Error("the pairing URL carries the token")
+	}
+}

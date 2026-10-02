@@ -41,10 +41,12 @@ type Status struct {
 	// LastFetchTime is when Run last completed a fetch without error, or
 	// the zero Time if that has never happened.
 	LastFetchTime time.Time
-	// LastReadingTime and LastReadingMgDl describe the most recent reading
-	// Run has stored, or the zero Time and 0 if none has been stored yet.
-	LastReadingTime time.Time
-	LastReadingMgDl int
+	// LastReadingTime, LastReadingMgDl and LastReadingTrend describe the most
+	// recent reading Run has stored, or the zero Time, 0 and TrendUnknown if
+	// none has been stored yet.
+	LastReadingTime  time.Time
+	LastReadingMgDl  int
+	LastReadingTrend cgm.Trend
 	// SignInFailing is true while the source is rejecting the configured
 	// credentials.
 	SignInFailing bool

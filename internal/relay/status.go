@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/config"
+	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 )
 
@@ -122,8 +124,11 @@ type statusResponse struct {
 	LastFetchTime   *time.Time `json:"last_fetch_time,omitempty"`
 	LastReadingTime *time.Time `json:"last_reading_time,omitempty"`
 	LastReadingMgDl int        `json:"last_reading_mg_dl,omitempty"`
-	SignInFailing   bool       `json:"sign_in_failing"`
-	LastError       string     `json:"last_error,omitempty"`
+	// LastReadingTrend is the Nightscout direction name of the last reading
+	// ("Flat", "FortyFiveUp", ...), omitted when the device computed none.
+	LastReadingTrend string `json:"last_reading_trend,omitempty"`
+	SignInFailing    bool   `json:"sign_in_failing"`
+	LastError        string `json:"last_error,omitempty"`
 	// Clients maps each follower client's User-Agent to the last time it
 	// made an authenticated request.
 	Clients map[string]time.Time `json:"clients,omitempty"`
@@ -136,15 +141,16 @@ type pollerStatus interface {
 	Status() poller.Status
 }
 
-// newStatusHandler builds the local status endpoint: a single GET
-// /status reporting the poller's health and the clients tracker has
-// seen. Binding the listener to loopback is not enough on its own: a
-// page open in the user's browser can retarget its own domain to
-// 127.0.0.1 (DNS rebinding) and issue a same-origin fetch that still
-// reaches a loopback listener, carrying that domain as the request's
-// Host. requireLoopbackHost closes that gap by checking Host on every
-// request, in addition to the listener's own bind address.
-func newStatusHandler(p pollerStatus, tracker *clientTracker) http.Handler {
+// newStatusHandler builds the local status endpoint: GET /status
+// reporting the poller's health and the clients tracker has seen, and
+// POST /pairing minting a pairing code for the Mac app. Binding the
+// listener to loopback is not enough on its own: a page open in the
+// user's browser can retarget its own domain to 127.0.0.1 (DNS
+// rebinding) and issue a same-origin fetch that still reaches a loopback
+// listener, carrying that domain as the request's Host.
+// requireLoopbackHost closes that gap by checking Host on every request,
+// in addition to the listener's own bind address.
+func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		s := p.Status()
@@ -160,11 +166,26 @@ func newStatusHandler(p pollerStatus, tracker *clientTracker) http.Handler {
 		}
 		if !s.LastReadingTime.IsZero() {
 			resp.LastReadingTime = &s.LastReadingTime
+			if s.LastReadingTrend != cgm.TrendUnknown && s.LastReadingTrend != cgm.TrendNotComputable {
+				resp.LastReadingTrend = s.LastReadingTrend.String()
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	mux.Handle("POST /pairing", pairing.MintHandler(pairings))
 	return requireLoopbackHost(mux)
+}
+
+// withPairingPage serves the pairing page under /connect/ and everything
+// else through next. The page is reachable on the same listener a follower
+// app uses, since a phone that scans the QR code reaches the relay there;
+// the route that mints its codes is not (see newStatusHandler).
+func withPairingPage(next http.Handler, pairings *pairing.Store, token string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/connect/", pairing.PageHandler(pairings, token))
+	mux.Handle("/", next)
+	return mux
 }
 
 // requireLoopbackHost refuses, with 403 and no reading data in the body,

@@ -336,4 +336,147 @@ struct MenuDisplayStateTests {
         #expect(setupNeededState.shortStatus == "Setup needed")
         #expect(setupNeededState.statusAge == nil)
     }
+
+    @Test("the menu bar mark is plain while current, coloured for what needs attention (grey only while setup is unfinished and nothing is wrong), and every state is said in words")
+    func menuBarItemStates() {
+        let fresh = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 142, lastReadingTrend: "FortyFiveUp")
+        let stale = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-600), lastReadingMgDl: 142, lastReadingTrend: "Flat")
+        let failing = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 142, lastReadingTrend: "Flat", signInFailing: true)
+
+        struct Case {
+            let name: String
+            let credentialsConfigured: Bool
+            let needsSetup: Bool
+            let engineState: EngineSupervisor.RunState
+            let status: EngineStatus?
+            let tint: MenuBarItemState.Tint
+            let label: String
+        }
+        let cases = [
+            Case(name: "current", credentialsConfigured: true, needsSetup: false, engineState: .running, status: fresh, tint: .plain, label: "CGM Relay: Current"),
+            Case(name: "stale", credentialsConfigured: true, needsSetup: false, engineState: .running, status: stale, tint: .amber, label: "CGM Relay: Stale"),
+            Case(name: "sign-in failing", credentialsConfigured: true, needsSetup: false, engineState: .running, status: failing, tint: .red, label: "CGM Relay: Sign-in failing"),
+            Case(name: "stopped", credentialsConfigured: true, needsSetup: false, engineState: .stopped, status: fresh, tint: .red, label: "CGM Relay: Stopped"),
+            Case(name: "no account yet", credentialsConfigured: false, needsSetup: true, engineState: .stopped, status: nil, tint: .grey, label: "CGM Relay: Finish setup"),
+            Case(name: "signed in, setup not finished, readings current", credentialsConfigured: true, needsSetup: true, engineState: .running, status: fresh, tint: .grey, label: "CGM Relay: Finish setup"),
+            Case(name: "setup not finished, readings stale", credentialsConfigured: true, needsSetup: true, engineState: .running, status: stale, tint: .amber, label: "CGM Relay: Stale"),
+            Case(name: "setup not finished, sign-in failing", credentialsConfigured: true, needsSetup: true, engineState: .running, status: failing, tint: .red, label: "CGM Relay: Sign-in failing"),
+            Case(name: "setup not finished, stopped", credentialsConfigured: true, needsSetup: true, engineState: .stopped, status: fresh, tint: .red, label: "CGM Relay: Stopped"),
+            Case(name: "setup not finished, engine failed", credentialsConfigured: true, needsSetup: true, engineState: .failed(.storeDamaged), status: nil, tint: .red, label: "CGM Relay: Saved readings can't be read"),
+            Case(name: "setup not finished, no reading yet", credentialsConfigured: true, needsSetup: true, engineState: .running, status: EngineStatus(running: true), tint: .grey, label: "CGM Relay: Finish setup"),
+        ]
+        for testCase in cases {
+            let menu = MenuDisplayState.make(
+                credentialsConfigured: testCase.credentialsConfigured, engineState: testCase.engineState, status: testCase.status, now: Self.now
+            )
+            let item = MenuBarItemState.make(menu: menu, needsSetup: testCase.needsSetup, showReading: true)
+            #expect(item.tint == testCase.tint, "\(testCase.name): tint")
+            #expect(item.accessibilityLabel == testCase.label, "\(testCase.name): label")
+        }
+    }
+
+    @Test("the reading beside the mark shows only when asked for and only while current, with the trend arrow the device reported")
+    func menuBarItemReading() {
+        func item(_ status: EngineStatus?, engineState: EngineSupervisor.RunState = .running, showReading: Bool, units: GlucoseUnit = .mgDl) -> MenuBarItemState {
+            let menu = MenuDisplayState.make(credentialsConfigured: true, engineState: engineState, status: status, now: Self.now, units: units)
+            return MenuBarItemState.make(menu: menu, needsSetup: false, showReading: showReading)
+        }
+        let fresh = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 142, lastReadingTrend: "FortyFiveUp")
+        let noTrend = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 142)
+        let stale = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-600), lastReadingMgDl: 142, lastReadingTrend: "Flat")
+        let failing = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 142, lastReadingTrend: "Flat", signInFailing: true)
+
+        #expect(item(fresh, showReading: false).title == nil, "a value while the option is off")
+        #expect(item(fresh, showReading: true).title == "142 ↗")
+        #expect(item(fresh, showReading: true, units: .mmolL).title == "7.9 ↗")
+        #expect(item(noTrend, showReading: true).title == "142", "no arrow for a trend the device did not report")
+        #expect(item(stale, showReading: true).title == nil, "a stale value shown as current")
+        #expect(item(failing, showReading: true).title == nil, "a value while sign-in is failing")
+        #expect(item(fresh, engineState: .stopped, showReading: true).title == nil, "a value while stopped")
+        #expect(item(nil, showReading: true).title == nil)
+    }
+
+    @Test("a waiting update adds the dot and a sentence to the spoken label, and never changes the tint or the reading")
+    func menuBarItemUpdate() {
+        let fresh = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 142, lastReadingTrend: "Flat")
+        let stale = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-600), lastReadingMgDl: 142, lastReadingTrend: "Flat")
+        func item(_ status: EngineStatus, update: PendingUpdate) -> MenuBarItemState {
+            let menu = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: status, now: Self.now)
+            return MenuBarItemState.make(menu: menu, needsSetup: false, showReading: true, update: update)
+        }
+        let none = item(fresh, update: .none)
+        #expect(!none.showsUpdateMark)
+        #expect(none.accessibilityLabel == "CGM Relay: Current")
+
+        let available = item(fresh, update: .available(version: "0.2.0"))
+        #expect(available.showsUpdateMark)
+        #expect(available.tint == none.tint && available.title == none.title)
+        #expect(available.accessibilityLabel == "CGM Relay: Current. Update 0.2.0 available")
+
+        let ready = item(stale, update: .readyToRestart(version: "0.2.0"))
+        #expect(ready.showsUpdateMark)
+        #expect(ready.tint == .amber, "the tint still says the readings are late")
+        #expect(ready.accessibilityLabel == "CGM Relay: Stale. Update 0.2.0 ready, restart to install")
+    }
+
+    @Test("every direction the engine reports has its arrow, and anything else has none")
+    func trendArrows() {
+        let expected = [
+            "DoubleUp": "⇈", "SingleUp": "↑", "FortyFiveUp": "↗", "Flat": "→",
+            "FortyFiveDown": "↘", "SingleDown": "↓", "DoubleDown": "⇊",
+        ]
+        for (direction, arrow) in expected {
+            #expect(TrendArrow.symbol(forDirection: direction) == arrow, Comment(rawValue: direction))
+        }
+        #expect(TrendArrow.symbol(forDirection: "NotComputable") == nil)
+        #expect(TrendArrow.symbol(forDirection: nil) == nil)
+        #expect(TrendArrow.symbol(forDirection: "") == nil)
+    }
+}
+
+@Suite("QuitPolicy")
+struct QuitPolicyTests {
+    private static func code(_ text: String) -> UInt32 {
+        text.utf8.reduce(0) { ($0 << 8) | UInt32($1) }
+    }
+
+    static let cases: [(name: String, event: Bool, reason: UInt32?, ending: Bool, terminates: Bool)] = [
+        ("a quit from inside the app (app menu, Command-Q, panel, right-click menu) has no Apple event and quits", false, nil, false, true),
+        ("the Dock's or another app's quit event, with no reason, keeps the relay running", true, nil, false, false),
+        ("a quit event carrying an unrelated reason keeps the relay running", true, code("abcd"), false, false),
+        ("log out quits", true, code("logo"), false, true),
+        ("log out after its dialog quits", true, code("rlgo"), false, true),
+        ("restart quits", true, code("rest"), false, true),
+        ("restart after its dialog quits", true, code("rrst"), false, true),
+        ("shut down quits", true, code("shut"), false, true),
+        ("shut down after its dialog quits", true, code("rsdn"), false, true),
+        ("a quit event during the system's power-off notice quits", true, nil, true, true),
+    ]
+
+    @Test("only a quit event from outside the app, without a session-ending reason, is kept from quitting", arguments: cases)
+    func decides(_ testCase: (name: String, event: Bool, reason: UInt32?, ending: Bool, terminates: Bool)) {
+        #expect(QuitPolicy.shouldTerminate(quitEventPresent: testCase.event, eventReason: testCase.reason, sessionEnding: testCase.ending) == testCase.terminates)
+    }
+
+    @Test("the updater's quit event, which carries no reason, quits so the app can be replaced")
+    func updaterQuits() {
+        #expect(QuitPolicy.shouldTerminate(quitEventPresent: true, eventReason: nil, sessionEnding: false, fromUpdater: true))
+        #expect(!QuitPolicy.shouldTerminate(quitEventPresent: true, eventReason: nil, sessionEnding: false, fromUpdater: false))
+    }
+}
+
+@Suite("PendingUpdate")
+struct PendingUpdateTests {
+    @Test("each state words its entry and its sentence, and nothing waiting says nothing")
+    func wording() {
+        let cases: [(update: PendingUpdate, title: String, line: String?)] = [
+            (.none, "Check for Updates…", nil),
+            (.available(version: "0.2.0"), "Update Available (0.2.0)…", "Version 0.2.0 is available."),
+            (.readyToRestart(version: "0.2.0"), "Restart to Update", "Version 0.2.0 is ready. It installs when CGM Relay next quits."),
+        ]
+        for testCase in cases {
+            #expect(testCase.update.menuTitle == testCase.title)
+            #expect(testCase.update.statusLine == testCase.line)
+        }
+    }
 }

@@ -1,0 +1,75 @@
+name: Bug Report
+description: Something in CGM Relay is not working as it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. The more of the fields below you fill in, the faster it can be reproduced. Please search the existing issues first, open and closed.
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: Describe what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Describe what should have happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Settings
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: follower_app
+    attributes:
+      label: Follower app and its version
+      description: The app reading from CGM Relay, if the problem involves one.
+      placeholder: e.g. xDrip4iOS 5.3.0
+  - type: input
+    id: menu_state
+    attributes:
+      label: What the menu bar panel shows
+      description: The status line under the reading, for example "Current" or "Stale".
+      placeholder: e.g. Stale, last reading 12 min ago
+  - type: input
+    id: app_version
+    attributes:
+      label: CGM Relay version
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      placeholder: e.g. 1
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      placeholder: e.g. 15.4.1
+    validations:
+      required: true
+  - type: input
+    id: chip
+    attributes:
+      label: Mac chip
+      placeholder: Apple silicon or Intel
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: In CGM Relay, open Settings, then About, then Copy Diagnostics, and paste the result here. Read it first and remove anything you would rather not share.
+      render: text

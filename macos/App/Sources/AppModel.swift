@@ -21,7 +21,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var settings: AppSettings
     @Published private(set) var loginItemStatus: LoginItemStatus = .disabled
     @Published private(set) var loginItemErrorMessage: String?
+    /// loginItemUnavailableReason is the system's own reason a registration
+    /// failed, shown where Open at Login is unavailable. It lasts until the
+    /// status is next read afresh, so a later visit offers Turn On again.
+    @Published private(set) var loginItemUnavailableReason: String?
     @Published private(set) var notificationPermissionDenied = false
+    /// menuPanelRequest counts the times the app itself asks for the menu
+    /// panel to open (requestMenuPanel); the status item watches it.
+    @Published private(set) var menuPanelRequest = 0
     /// tailnetAvailable, localNetworkAvailable, connectAddressAvailability
     /// and impliedBindHost are refreshed by refreshNetworkAddresses(),
     /// called whenever the menu opens or the Connect/Advanced pane
@@ -75,6 +82,7 @@ final class AppModel: ObservableObject {
     private let notificationDelivering: any NotificationDelivering
     private let loginItemManager: any LoginItemManaging
     private let statusAddr: String
+    private let pairingMinter: any PairingCodeMinting
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -87,6 +95,10 @@ final class AppModel: ObservableObject {
     /// "Start Fresh…" is a real recovery path for every person running
     /// this app, not a development tool.
     private let recoveryLogger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "recovery")
+    /// notificationLogger and loginItemLogger carry the permission the
+    /// system reported and a refused login item change, never a secret.
+    private let notificationLogger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "notifications")
+    private let loginItemLogger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "login-item")
 
     /// needsSetup is true until the person has both a signed-in account and
     /// has finished the last setup step. It is false before launch has read
@@ -172,20 +184,23 @@ final class AppModel: ObservableObject {
         statusAddr: String = "127.0.0.1:1338",
         databasePath: String,
         librelinkupBaseURL: String? = nil,
-        tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil)
+        tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
+        loginItemManager: any LoginItemManaging = SystemLoginItemManager()
     ) {
         self.tailscale = tailscale
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
-        // notificationDelivering and loginItemManager have no throwaway
-        // Debug counterpart the way credentialStore and settingsStore do
-        // (System Settings' own Login Items list and notification
-        // permission are never scoped per Keychain service), so, exactly
-        // like supervisor's own RealProcessLauncher below, they are never
-        // exposed as an init parameter at all.
+        // notificationDelivering has no throwaway Debug counterpart the
+        // way credentialStore and settingsStore do (notification permission
+        // is never scoped per Keychain service), so, exactly like
+        // supervisor's own RealProcessLauncher below, it is never exposed
+        // as an init parameter at all. The login item is: a Debug build
+        // shares the real bundle identifier, so the app decides which
+        // manager a launch gets (LoginItemFakeLocator).
         notificationDelivering = UserNotificationCenterDelivering()
-        loginItemManager = SMAppServiceLoginItemManager()
+        self.loginItemManager = loginItemManager
         self.statusAddr = statusAddr
+        pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr))
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         settings = settingsStore.load()
@@ -314,13 +329,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// quit ends the app, like every quit asked for inside it; the delegate
+    /// runs shutDown before the process goes.
     func quit() {
-        Task {
-            await supervisor.stop()
-            boundHost = nil
-            await statusPoller.stop()
-            NSApplication.shared.terminate(nil)
-        }
+        NSApplication.shared.terminate(nil)
+    }
+
+    /// shutDown stops the status poller and the engine and waits, briefly,
+    /// for the engine process to be gone, so a relaunch never meets a store
+    /// the old engine still holds.
+    func shutDown() async {
+        await statusPoller.stop()
+        await supervisor.stopAndWait(timeout: .seconds(3))
+        boundHost = nil
     }
 
     // MARK: - Account
@@ -378,6 +399,21 @@ final class AppModel: ObservableObject {
         return newToken
     }
 
+    /// updateConnectFollowerApp remembers which follower app the Connect
+    /// pane last showed.
+    func updateConnectFollowerApp(_ app: FollowerApp) {
+        guard settings.connectFollowerApp != app else { return }
+        settings.connectFollowerApp = app
+        persistSettings()
+    }
+
+    /// mintPairingCode asks the running engine for a pairing code whose page
+    /// carries the instructions for the address a phone reaches this Mac at;
+    /// nil while the engine is not answering. A new code replaces the last.
+    func mintPairingCode(address: String) async -> PairingCode? {
+        try? await pairingMinter.mint(apps: FollowerAppEntry.pairingApps(address: address))
+    }
+
     /// currentToken reads the follower-facing bearer token for the
     /// Connect pane to display; nil only if bootstrapping has somehow not
     /// run yet.
@@ -425,6 +461,19 @@ final class AppModel: ObservableObject {
             impliedBindHost: impliedBindHost,
             port: settings.port,
             displayHostAvailability: connectAddressAvailability
+        )
+    }
+
+    /// phoneReachability is whether a phone can be given an address for this
+    /// Mac by the choices made now: setup's reach step continues only when
+    /// it is reachable, and the connect step is shown only then.
+    var phoneReachability: PhoneReachability {
+        PhoneReachability.decide(
+            reach: settings.reach,
+            httpsChosen: settings.tailscaleHTTPSEnabled,
+            httpsServing: httpsState.isOn,
+            tailnetAvailable: tailnetAvailable,
+            localNetworkAvailable: localNetworkAvailable
         )
     }
 
@@ -566,8 +615,10 @@ final class AppModel: ObservableObject {
         tailscaleFailure = TailscaleFailure(message: message, helpURL: outcome.helpURL)
     }
 
-    /// completeSetup is setup's Done.
+    /// completeSetup is setup's Done. It marks setup finished only while a
+    /// phone can reach this Mac; otherwise setup stays open for next time.
     func completeSetup() {
+        guard SetupCompletion.mayFinish(reachability: phoneReachability) else { return }
         settings.setupFinished = true
         persistSettings()
     }
@@ -579,9 +630,7 @@ final class AppModel: ObservableObject {
     func setNoReadingAlert(enabled: Bool, minutes: Int) async {
         let clampedMinutes = minutes.clamped(to: AppSettings.noReadingAlertMinutesRange)
         if enabled, !settings.noReadingAlertEnabled {
-            let granted = await notificationDelivering.requestAuthorization()
-            notificationPermissionDenied = !granted
-            guard granted else {
+            guard await ensureNotificationPermission() else {
                 settings.noReadingAlertMinutes = clampedMinutes
                 persistSettings()
                 return
@@ -595,21 +644,67 @@ final class AppModel: ObservableObject {
 
     func setSignInFailingAlert(enabled: Bool) async {
         if enabled, !settings.signInFailingAlertEnabled {
-            let granted = await notificationDelivering.requestAuthorization()
-            notificationPermissionDenied = !granted
-            guard granted else { return }
+            guard await ensureNotificationPermission() else { return }
         }
         settings.signInFailingAlertEnabled = enabled
         persistSettings()
         await alertEngine.setSignInFailingAlert(enabled: enabled)
     }
 
-    /// refreshLoginItemStatus re-reads SMAppService's own status, with no
-    /// side effect: called from the General pane's onAppear, since
-    /// SMAppService has no change notification of its own and the person
-    /// may have approved or removed the login item in System Settings
-    /// since the pane was last shown.
+    /// ensureNotificationPermission reads what the system says now, asks
+    /// only while nobody has been asked, and reads again. The denied notice
+    /// follows the system's answer alone, so it never shows for a permission
+    /// that was simply not asked for yet.
+    private func ensureNotificationPermission() async -> Bool {
+        var authorization = await notificationDelivering.authorization()
+        notificationLogger.info("notification permission before asking: \(String(describing: authorization), privacy: .public)")
+        if authorization == .notDetermined {
+            _ = await notificationDelivering.requestAuthorization()
+            authorization = await notificationDelivering.authorization()
+            notificationLogger.info("notification permission after asking: \(String(describing: authorization), privacy: .public)")
+        }
+        notificationPermissionDenied = authorization == .denied
+        return authorization == .allowed
+    }
+
+    /// refreshNotificationPermission drops the denied notice once the
+    /// person has allowed notifications in System Settings: called when the
+    /// Alerts pane appears and when the app becomes active again.
+    func refreshNotificationPermission() {
+        guard notificationPermissionDenied else { return }
+        Task {
+            if await notificationDelivering.authorization() != .denied {
+                notificationPermissionDenied = false
+            }
+        }
+    }
+
+    private static var notificationSettingsURL: URL {
+        let base = "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        let identifier = Bundle.main.bundleIdentifier ?? ""
+        return URL(string: identifier.isEmpty ? base : "\(base)?id=\(identifier)") ?? URL(fileURLWithPath: "/System/Applications/System Settings.app")
+    }
+
+    /// openNotificationSettings opens System Settings on CGM Relay's own
+    /// entry in Notifications.
+    func openNotificationSettings() {
+        NSWorkspace.shared.open(Self.notificationSettingsURL)
+    }
+
+    /// openLoginItemsSettings opens System Settings' Login Items list, where
+    /// a login item waiting for approval is approved.
+    func openLoginItemsSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// refreshLoginItemStatus re-reads the login item's status, with no side
+    /// effect: called when a pane or setup step that shows it appears, since
+    /// the system's login items have no change notification of their own and
+    /// the person may have approved or removed the item in System Settings
+    /// since it was last shown.
     func refreshLoginItemStatus() {
+        loginItemUnavailableReason = nil
         loginItemStatus = loginItemManager.status
     }
 
@@ -617,24 +712,46 @@ final class AppModel: ObservableObject {
     /// then re-reads the real status rather than assuming the call
     /// succeeded outright: register() can succeed while the result is
     /// .requiresApproval, which the General pane shows as its own state.
-    /// A failure is recorded in loginItemErrorMessage, not just logged, so
-    /// the toggle flipping back on its own comes with a plain reason
-    /// rather than looking like it silently did nothing.
+    /// A refused registration makes Open at Login unavailable, with the
+    /// system's reason; a refused removal keeps the control and says so.
     func setOpenAtLogin(_ enabled: Bool) {
+        loginItemErrorMessage = nil
         do {
             if enabled {
                 try loginItemManager.register()
             } else {
                 try loginItemManager.unregister()
             }
-            loginItemErrorMessage = nil
         } catch {
-            recoveryLogger.error("could not change the login item registration: \(error, privacy: .public)")
-            loginItemErrorMessage = enabled
-                ? "Couldn't turn on Open at Login. Try again."
-                : "Couldn't turn off Open at Login. Try again."
+            loginItemLogger.error("could not change the login item registration: \(error, privacy: .public)")
+            if enabled {
+                loginItemUnavailableReason = LoginItemFailure.reason(for: error)
+                loginItemStatus = .notFound
+                return
+            }
+            loginItemErrorMessage = "Couldn't turn off Open at Login. Try again."
         }
-        refreshLoginItemStatus()
+        loginItemUnavailableReason = nil
+        loginItemStatus = loginItemManager.status
+    }
+
+    // MARK: - Menu bar
+
+    /// requestMenuPanel asks the status item to open the menu panel, the
+    /// same panel a click on it opens.
+    func requestMenuPanel() {
+        menuPanelRequest += 1
+    }
+
+    /// menuBarItemState is what the menu bar item shows right now, with a
+    /// mark for an update that is waiting.
+    func menuBarItemState(update: PendingUpdate) -> MenuBarItemState {
+        MenuBarItemState.make(menu: menuState, needsSetup: needsSetup, showReading: settings.showReadingInMenuBar, update: update)
+    }
+
+    func updateShowReadingInMenuBar(_ show: Bool) {
+        settings.showReadingInMenuBar = show
+        persistSettings()
     }
 
     // MARK: - Diagnostics
@@ -807,6 +924,10 @@ final class AppModel: ObservableObject {
         if next != menuState {
             menuState = next
         }
+    }
+
+    private static func pairingURL(for statusAddr: String) -> URL {
+        URL(string: "http://\(statusAddr)/pairing") ?? URL(string: "http://127.0.0.1:1338/pairing")!
     }
 
     private static func statusURL(for statusAddr: String) -> URL {

@@ -24,4 +24,98 @@ public enum FollowerAppEntry {
         guard let separator = address.range(of: "://") else { return address }
         return address.replacingCharacters(in: separator.upperBound..<separator.upperBound, with: "\(token)@")
     }
+
+    /// nightguardURL is the single address Nightguard takes, which reads
+    /// the token from its `token` query item.
+    public static func nightguardURL(address: String, token: String) -> String {
+        "\(address)/?token=\(token)"
+    }
+
+    /// tokenPlaceholder stands for the access token in a field's value. The
+    /// Mac pane replaces it with the real token; the engine's pairing page
+    /// does, so the token never travels in a mint request.
+    public static let tokenPlaceholder = "{token}"
+
+    /// Field is one value a follower app asks for, named as that app names it.
+    public struct Field: Codable, Equatable, Sendable {
+        public let label: String
+        public let value: String
+    }
+
+    /// Link is a button on the pairing page (opening or getting the app).
+    public struct Link: Codable, Equatable, Sendable {
+        public let label: String
+        public let url: String
+    }
+
+    /// Instructions is everything said about one app for one address: the
+    /// steps and the values. It is the single source for the Mac pane and
+    /// for the pairing page the engine serves to a phone, which renders
+    /// exactly what the Mac sends.
+    public struct Instructions: Codable, Equatable, Sendable {
+        public let name: String
+        public let steps: [String]
+        public let fields: [Field]
+        public let links: [Link]
+    }
+
+    /// instructions is what to do in app for the relay at address. A port is
+    /// given only where the address names one.
+    public static func instructions(for app: FollowerApp, address: String) -> Instructions {
+        let entry = hostAndPort(of: address)
+        let token = tokenPlaceholder
+        switch app {
+        case .xDrip4iOS:
+            var fields = [Field(label: "URL", value: entry.host)]
+            let portStep: String
+            if let port = entry.port {
+                fields.append(Field(label: "Port", value: port))
+                portStep = "In URL, enter the address without its port, \(port) in Port, and the token in Token."
+            } else {
+                portStep = "In URL, enter the address, and the token in Token."
+            }
+            fields.append(Field(label: "Token", value: token))
+            return Instructions(
+                name: app.displayName,
+                steps: [
+                    "In Settings, set Master or Follower to Follower, and Data Source to Nightscout.",
+                    "In Settings, open Sharing and Services, then Nightscout, and turn it on.",
+                    portStep,
+                    "Leave API_SECRET blank.",
+                ],
+                fields: fields,
+                links: [Link(label: "Open xDrip4iOS", url: "xdripswift://open")]
+            )
+        case .xDripPlus:
+            return Instructions(
+                name: app.displayName,
+                steps: [
+                    "In Settings, set Hardware Data Source to Nightscout Follower.",
+                    "In Nightscout Follow URL, enter the address with the token in front of it.",
+                ],
+                fields: [Field(label: "Nightscout Follow URL", value: urlWithToken(address: address, token: token))],
+                links: []
+            )
+        case .loopFollow:
+            return Instructions(
+                name: app.displayName,
+                steps: ["In Settings, open Nightscout, then enter the address in URL and the token in Token."],
+                fields: [Field(label: "URL", value: address), Field(label: "Token", value: token)],
+                links: []
+            )
+        case .nightguard:
+            return Instructions(
+                name: app.displayName,
+                steps: ["In Preferences, enter the address with ?token= and the token after it in the Nightscout URL field."],
+                fields: [Field(label: "Nightscout URL", value: nightguardURL(address: address, token: token))],
+                links: [Link(label: "Get Nightguard on the App Store", url: "https://apps.apple.com/us/app/nightguard/id1116430352")]
+            )
+        }
+    }
+
+    /// pairingApps is every app's instructions, in the order the pane offers
+    /// them: what the Mac sends to the engine for the pairing page.
+    public static func pairingApps(address: String) -> [Instructions] {
+        FollowerApp.allCases.map { instructions(for: $0, address: address) }
+    }
 }

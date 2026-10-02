@@ -2,12 +2,18 @@ import AppKit
 import CGMRelayCore
 import SwiftUI
 
+/// qrPixelsPerModule is the scale every QR code is drawn at.
+private let qrPixelsPerModule: CGFloat = 10
+
 /// ConnectPaneView shows a follower app everything it needs to connect:
-/// the address, the bearer token, and a QR code encoding both together.
+/// the address, the bearer token, and a QR code for the follower app chosen
+/// above it. Where an app can import settings from a QR code, the code sets
+/// it up; otherwise it opens a page the relay serves for a few minutes, from
+/// which each value is copied (the token is never in that address).
 /// It never offers an address the engine is not actually listening on or a
 /// phone could never reach (model.connectPaneAddressState's own contract),
 /// and shows a plain reason instead of a guess whenever there is none
-/// right now. Setup's last step is this same view, laid out more compactly,
+/// right now. Setup's connect step is this same view, laid out more compactly,
 /// with its own way out of the blocked state and its own trailing sections.
 /// The token is read from the Keychain once when the view appears and again
 /// after a rotation, and held in state.
@@ -18,8 +24,8 @@ struct ConnectPaneView<Extra: View>: View {
     /// yet, or nil where the surrounding window already has a way out.
     let blockedAction: (label: String, run: () -> Void)?
     let showsTokenRotation: Bool
-    /// isCompact puts the QR code beside the address and token and drops
-    /// the section header, for a window that must not scroll.
+    /// isCompact puts a smaller QR code beside the address and token and
+    /// drops the section header, for a window that must not scroll.
     let isCompact: Bool
     let extra: (_ token: String) -> Extra
 
@@ -41,6 +47,7 @@ struct ConnectPaneView<Extra: View>: View {
 
     @State private var token = ""
     @State private var tokenRevealed = false
+    @State private var pairingCode: PairingCode?
     @State private var isConfirmingRotate = false
     @State private var isRotating = false
     @State private var rotateErrorMessage: String?
@@ -60,11 +67,15 @@ struct ConnectPaneView<Extra: View>: View {
                 blockedSection(symbol: "clock", message: reason, secondary: nil, actionLabel: nil, action: nil)
             case .ready(let address):
                 readySection(address: address)
+                if !isCompact { stepsSection(address: address) }
                 extra(token)
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+        .task(id: pairingKey) {
+            if let readyAddress { await keepPairingCodeFresh(address: readyAddress) }
+        }
         .onAppear {
             token = model.currentToken() ?? ""
             model.refreshNetworkAddresses()
@@ -113,18 +124,56 @@ struct ConnectPaneView<Extra: View>: View {
         }
     }
 
+    private var readyAddress: String? {
+        if case .ready(let address) = model.connectPaneAddressState { return address }
+        return nil
+    }
+
+    /// pairingKey changes whenever a code already minted could stop working:
+    /// a new address, or the engine (which holds the codes) starting again,
+    /// as it does after a new token.
+    private var pairingKey: String {
+        "\(readyAddress ?? "")|\(token)|\(String(describing: model.engineState))"
+    }
+
+    private var followerApp: FollowerApp { model.settings.connectFollowerApp }
+
+    /// keepPairingCodeFresh mints a pairing code when the pane appears and
+    /// again each time the current one expires while the pane is shown,
+    /// retrying quietly while the engine is not answering yet. It ends when
+    /// the pane goes away.
+    private func keepPairingCodeFresh(address: String) async {
+        while !Task.isCancelled {
+            if let code = await model.mintPairingCode(address: address) {
+                pairingCode = code
+                try? await Task.sleep(for: .seconds(max(1, code.expiresAt.timeIntervalSinceNow)))
+            } else {
+                pairingCode = nil
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    private var currentQR: FollowerQR? {
+        guard let address = readyAddress else { return nil }
+        return FollowerQRPlanner.qr(for: followerApp, address: address, token: token, pairingCode: pairingCode?.code)
+    }
+
     @ViewBuilder
     private func readySection(address: String) -> some View {
         if isCompact {
             Section {
+                appPicker
                 HStack(alignment: .center, spacing: 16) {
-                    qrTile(address: address)
+                    qrTile
                     VStack(alignment: .leading, spacing: 10) {
                         addressRow(address: address)
                         Divider()
                         tokenRow
+                        qrCaption
                     }
                 }
+                stepsBlock(address: address)
             }
         } else {
             standardReadySection(address: address)
@@ -133,29 +182,83 @@ struct ConnectPaneView<Extra: View>: View {
 
     private func standardReadySection(address: String) -> some View {
         Section {
-            qrTile(address: address)
+            appPicker
+            qrTile
+            qrCaption
             addressRow(address: address)
             tokenRow
+            if showsTokenRotation { newTokenRow }
         } header: {
-            Text("Point a follower app (xDrip4iOS, LoopFollow, Nightguard) at this address.")
-        } footer: {
-            if showsTokenRotation {
-                VStack(alignment: .leading, spacing: 8) {
-                    rotateButton
-                    if let rotateErrorMessage {
-                        Text(rotateErrorMessage)
-                            .foregroundStyle(.red)
-                    }
-                }
+            Text("Choose your follower app, then scan its code.")
+        }
+    }
+
+    private var appPicker: some View {
+        Picker("Follower app", selection: Binding(get: { followerApp }, set: { model.updateConnectFollowerApp($0) })) {
+            ForEach(FollowerApp.allCases) { app in
+                Text(app.displayName).tag(app)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Follower app")
+    }
+
+    /// stepsSection is where the chosen app keeps its fields, in its own
+    /// names, and the one-tap copy for an app that takes a single address.
+    private func stepsSection(address: String) -> some View {
+        Section {
+            stepsBlock(address: address)
+        } header: {
+            Text("In \(followerApp.displayName)")
+        }
+    }
+
+    private func stepsBlock(address: String) -> some View {
+        let instructions = FollowerAppEntry.instructions(for: followerApp, address: address)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(instructions.steps.enumerated()), id: \.offset) { _, step in
+                Text(step)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let single = singleValueField(instructions) {
+                singleValueRow(single)
+                    .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// singleValueField is the one address an app takes its address and
+    /// token in together (xDrip+ and Nightguard), which gets its own Copy.
+    private func singleValueField(_ instructions: FollowerAppEntry.Instructions) -> FollowerAppEntry.Field? {
+        switch followerApp {
+        case .xDripPlus, .nightguard: instructions.fields.first
+        case .xDrip4iOS, .loopFollow: nil
+        }
+    }
+
+    /// singleValueRow is a label with its Copy in the trailing slot, like
+    /// the address and token rows.
+    private func singleValueRow(_ field: FollowerAppEntry.Field) -> some View {
+        HStack {
+            Text(field.label)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            AccessibleButton("Copy", accessibleName: "Copy \(field.label)") {
+                copy(field.value.replacingOccurrences(of: FollowerAppEntry.tokenPlaceholder, with: token))
             }
         }
     }
 
-    /// addressRow gives the address its own line rather than squeezing it
-    /// into a labelled row's value column beside a Copy button: a
-    /// Tailscale or local-network address is long enough that column
-    /// truncates it, and it is exactly the string a person has to read
-    /// and retype on their phone.
+    /// addressRow keeps the address on one line, shrinking a long name a
+    /// little before ever truncating it: it is exactly the string a person
+    /// has to read and retype on their phone, so it never breaks inside a
+    /// hostname.
     private func addressRow(address: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Address")
@@ -165,6 +268,9 @@ struct ConnectPaneView<Extra: View>: View {
                 Text(address)
                     .textSelection(.enabled)
                     .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .truncationMode(.middle)
                 Spacer(minLength: 12)
                 AccessibleButton("Copy", accessibleName: "Copy Address") { copy(address) }
             }
@@ -173,25 +279,29 @@ struct ConnectPaneView<Extra: View>: View {
 
     /// tokenRow mirrors addressRow's own layout (a label above a value row
     /// with its buttons trailing) so the two rows' Copy buttons share one
-    /// trailing edge, and gives the hidden token's dots a fixed size so
-    /// they render whole rather than truncating under the trailing
-    /// buttons.
+    /// trailing edge. The buttons always keep their own size; the token
+    /// wraps inside the space they leave.
     private var tokenRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Token")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            HStack {
+            HStack(spacing: 8) {
                 Text(tokenRevealed ? token : String(repeating: "•", count: 12))
                     .textSelection(.enabled)
                     .font(.system(.body, design: .monospaced))
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 12)
-                AccessibleButton(tokenRevealed ? "Hide" : "Show") { tokenRevealed.toggle() }
-                AccessibleButton("Copy", accessibleName: "Copy Token") { copy(token) }
-                if isRotating {
-                    ProgressView().controlSize(.small)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    AccessibleButton(tokenRevealed ? "Hide" : "Show") { tokenRevealed.toggle() }
+                    AccessibleButton("Copy", accessibleName: "Copy Token") { copy(token) }
+                    if isRotating {
+                        ProgressView().controlSize(.small)
+                    }
                 }
+                .fixedSize()
+                .layoutPriority(1)
             }
         }
     }
@@ -200,42 +310,112 @@ struct ConnectPaneView<Extra: View>: View {
     /// stays scannable in dark mode, where a transparent or dark surround
     /// would fight its own black-on-white contrast. The tile is the one
     /// deliberate exception to the system doing the chrome -- a QR code's
-    /// own contrast is a functional requirement, not a decoration.
-    private func qrTile(address: String) -> some View {
-        HStack {
+    /// own contrast is a functional requirement, not a decoration. A code
+    /// that holds the token stays hidden until the token is shown.
+    private var qrTile: some View {
+        let image = qrImage
+        let side = qrSide(for: image)
+        return HStack {
             if !isCompact { Spacer() }
-            if !token.isEmpty, let qrImage = try? QRCodeGenerator.nsImage(for: "\(address)/?token=\(token)") {
-                Image(nsImage: qrImage)
-                    .interpolation(.none)
-                    .resizable()
-                    .frame(width: 140, height: 140)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color.white)
-                    )
-                    .accessibleImageName("QR code: scan with a follower app to connect using this address and token")
-            }
+            qrContent(image: image)
+                .frame(width: side, height: side)
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(qrIsHidden || image == nil ? Color(nsColor: .quaternarySystemFill) : Color.white)
+                )
             if !isCompact { Spacer() }
         }
         .padding(.vertical, 4)
     }
 
-    private var rotateButton: some View {
-        AccessibleButton("Make a New Token…") {
-            isConfirmingRotate = true
-        }
-        .confirmationDialog(
-            "Make a New Token?",
-            isPresented: $isConfirmingRotate,
-            titleVisibility: .visible
-        ) {
-            Button("Make a New Token", role: .destructive) {
-                confirmRotate()
+    /// qrImage is drawn at one scale for every payload, so a denser code
+    /// (a settings import holds more than a link does) gets a larger tile
+    /// rather than smaller modules; a scanner needs the modules, not the
+    /// tile, to be big enough.
+    private var qrImage: NSImage? {
+        guard let qr = currentQR else { return nil }
+        return try? QRCodeGenerator.nsImage(for: qr.payload, scale: qrPixelsPerModule, correctionLevel: "L")
+    }
+
+    private func qrSide(for image: NSImage?) -> CGFloat {
+        let base: CGFloat = isCompact ? 116 : 140
+        guard let image else { return base }
+        let modules = image.size.width / qrPixelsPerModule
+        return max(base, modules * (isCompact ? 2.8 : 3.6))
+    }
+
+    private var qrIsHidden: Bool {
+        (currentQR?.carriesToken ?? false) && !tokenRevealed
+    }
+
+    @ViewBuilder
+    private func qrContent(image: NSImage?) -> some View {
+        if qrIsHidden {
+            VStack(spacing: 8) {
+                Image(systemName: "lock")
+                    .font(.system(size: 24))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                AccessibleButton("Show Code", accessibleName: "Show \(followerApp.displayName) Code") { tokenRevealed = true }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Every follower app using the current token will stop reading until you give it the new one.")
+            .accessibilityElement(children: .contain)
+        } else if let image {
+            Image(nsImage: image)
+                .interpolation(.none)
+                .resizable()
+                .accessibleImageName("QR code for \(followerApp.displayName): \(currentQR?.carriesToken == true ? "scan it inside the app to set it up" : "scan it with the iPhone camera to open a page of values to copy")")
+        } else {
+            VStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Making a code…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var qrCaption: some View {
+        Text(currentQR?.caption ?? "")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(isCompact ? .leading : .center)
+            .frame(maxWidth: .infinity, alignment: isCompact ? .leading : .center)
+            .fixedSize(horizontal: false, vertical: true)
+            .opacity(currentQR == nil ? 0 : 1)
+    }
+
+    /// newTokenRow is the token's own row: what making a new one does, with
+    /// its button in the trailing slot.
+    private var newTokenRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Every follower app stops reading until you give it the new token.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                AccessibleButton("Make a New Token…") {
+                    isConfirmingRotate = true
+                }
+                .fixedSize()
+                .confirmationDialog(
+                    "Make a New Token?",
+                    isPresented: $isConfirmingRotate,
+                    titleVisibility: .visible
+                ) {
+                    Button("Make a New Token", role: .destructive) {
+                        confirmRotate()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Every follower app using the current token will stop reading until you give it the new one.")
+                }
+            }
+            if let rotateErrorMessage {
+                Text(rotateErrorMessage)
+                    .foregroundStyle(.red)
+            }
         }
     }
 

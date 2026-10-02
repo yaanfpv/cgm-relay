@@ -1,0 +1,48 @@
+name: Feature Request
+description: Suggest something CGM Relay should do.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search the existing issues first, open and closed, in case it has already been suggested.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that CGM Relay makes hard or impossible?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The change you would like
+      description: How should CGM Relay behave instead?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other ways you have tried to solve it, or other apps that do this well.
+  - type: input
+    id: app_version
+    attributes:
+      label: CGM Relay version
+      placeholder: e.g. 0.1.0
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      placeholder: e.g. 1
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      placeholder: e.g. 15.4.1
+  - type: input
+    id: chip
+    attributes:
+      label: Mac chip
+      placeholder: Apple silicon or Intel

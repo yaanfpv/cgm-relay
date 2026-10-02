@@ -301,4 +301,92 @@ struct TailscaleServeTests {
         )
         #expect(got?.path == testCase.want)
     }
+
+    static let loginItemLocatorCases: [(name: String, debug: Bool, fake: String?, service: String?, want: String?)] = [
+        ("debug with a fake and a throwaway service", true, "/fake/login-item", "com.example.walk", "/fake/login-item"),
+        ("debug with a fake and no throwaway service", true, "/fake/login-item", nil, nil),
+        ("debug naming the real service", true, "/fake/login-item", KeychainCredentialStore.defaultService, nil),
+        ("debug with an empty path", true, "", "com.example.walk", nil),
+        ("debug with no fake path", true, nil, "com.example.walk", nil),
+        ("release ignores a fake path", false, "/fake/login-item", "com.example.walk", nil),
+    ]
+
+    @Test("the login item fake is honoured only in a debug build that also names a throwaway service", arguments: loginItemLocatorCases)
+    func loginItemLocator(_ testCase: (name: String, debug: Bool, fake: String?, service: String?, want: String?)) {
+        let got = LoginItemFakeLocator.resolve(
+            isDebugBuild: testCase.debug,
+            fakePath: testCase.fake,
+            explicitKeychainServiceOverride: testCase.service
+        )
+        #expect(got?.path == testCase.want)
+    }
+
+    static let loginItemCases: [(name: String, start: String?, register: LoginItemStatus?, unregister: LoginItemStatus?)] = [
+        ("no file reads disabled, and register turns it on", nil, .enabled, .disabled),
+        ("unreadable content reads disabled", "gibberish", .enabled, .disabled),
+        ("enabled stays enabled and turns off", "enabled", .enabled, .disabled),
+        ("waiting for approval stays waiting, and turns off", "requiresApproval", .requiresApproval, .disabled),
+        ("no helper in this build fails both ways", "notFound", nil, nil),
+    ]
+
+    @Test("the file-backed login item follows its state file and never touches the system's", arguments: loginItemCases)
+    func fileBackedLoginItem(_ testCase: (name: String, start: String?, register: LoginItemStatus?, unregister: LoginItemStatus?)) throws {
+        func manager() throws -> (FileBackedLoginItemManager, URL) {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fake-login-item-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("login-item")
+            if let start = testCase.start {
+                try start.write(to: file, atomically: true, encoding: .utf8)
+            }
+            return (FileBackedLoginItemManager(stateFile: file), directory)
+        }
+
+        let (registering, registerDirectory) = try manager()
+        defer { try? FileManager.default.removeItem(at: registerDirectory) }
+        if let want = testCase.register {
+            try registering.register()
+            #expect(registering.status == want)
+        } else {
+            #expect(throws: LoginItemUnavailableError.notFound) { try registering.register() }
+            #expect(registering.status == .notFound)
+        }
+
+        let (unregistering, unregisterDirectory) = try manager()
+        defer { try? FileManager.default.removeItem(at: unregisterDirectory) }
+        if let want = testCase.unregister {
+            try unregistering.unregister()
+            #expect(unregistering.status == want)
+        } else {
+            #expect(throws: LoginItemUnavailableError.notFound) { try unregistering.unregister() }
+        }
+    }
+
+    private struct FakeSystemLoginItem: SystemLoginItem {
+        let status: SystemLoginItemStatus
+        let registerFailure: (any Error)?
+        func register() throws { if let registerFailure { throw registerFailure } }
+        func unregister() throws {}
+    }
+
+    static let systemLoginItemCases: [(name: String, system: SystemLoginItemStatus, want: LoginItemStatus)] = [
+        ("enabled reads on", .enabled, .enabled),
+        ("waiting for approval reads as approval", .requiresApproval, .requiresApproval),
+        ("never registered reads off, so a fresh install can turn it on", .notFound, .disabled),
+        ("registered and removed reads off", .notRegistered, .disabled),
+    ]
+
+    @Test("the system login item maps every system status, and a fresh install's notFound is off, never unavailable", arguments: systemLoginItemCases)
+    func systemLoginItem(_ testCase: (name: String, system: SystemLoginItemStatus, want: LoginItemStatus)) {
+        let manager = SystemLoginItemManager(item: FakeSystemLoginItem(status: testCase.system, registerFailure: nil))
+        #expect(manager.status == testCase.want)
+    }
+
+    @Test("a refused registration reaches the caller with the system's own reason")
+    func systemLoginItemRefusal() {
+        struct Refused: Error, LocalizedError { var errorDescription: String? { "Operation not permitted" } }
+        let manager = SystemLoginItemManager(item: FakeSystemLoginItem(status: .notFound, registerFailure: Refused()))
+        #expect(throws: Refused.self) { try manager.register() }
+        #expect(LoginItemFailure.reason(for: Refused()) == "Operation not permitted.")
+        #expect(LoginItemFailure.reason(for: LoginItemUnavailableError.notFound) == "This build can't open at login.")
+    }
 }

@@ -75,6 +75,36 @@ func TestEveryEndpointRequiresAuth(t *testing.T) {
 					q.Set("token", "")
 					r.URL.RawQuery = q.Encode()
 				}, http.StatusUnauthorized},
+				{"token query param with a trailing space", func(r *http.Request) {
+					r.URL.RawQuery = "token=" + testToken + "%20"
+				}, http.StatusOK},
+				{"token query param with a trailing newline", func(r *http.Request) {
+					r.URL.RawQuery = "token=" + testToken + "%0A"
+				}, http.StatusOK},
+				{"token query param with a leading newline and a trailing CRLF", func(r *http.Request) {
+					r.URL.RawQuery = "token=%0A" + testToken + "%0D%0A"
+				}, http.StatusOK},
+				{"token query param with a tab and a plus-encoded space", func(r *http.Request) {
+					r.URL.RawQuery = "token=%09" + testToken + "+"
+				}, http.StatusOK},
+				{"wrong token with trailing whitespace", func(r *http.Request) {
+					r.URL.RawQuery = "token=wrong-token%20"
+				}, http.StatusUnauthorized},
+				{"token with whitespace inside", func(r *http.Request) {
+					r.URL.RawQuery = "token=correct%20-token"
+				}, http.StatusUnauthorized},
+				{"whitespace only token", func(r *http.Request) {
+					r.URL.RawQuery = "token=%20%0A"
+				}, http.StatusUnauthorized},
+				{"right api-secret header with surrounding whitespace, SHA-1 hex", func(r *http.Request) {
+					r.Header.Set("api-secret", " "+sha1Hex(testToken)+"\t")
+				}, http.StatusOK},
+				{"right api-secret header with a trailing newline, raw token", func(r *http.Request) {
+					r.Header.Set("api-secret", testToken+"\n")
+				}, http.StatusOK},
+				{"wrong api-secret header with trailing whitespace", func(r *http.Request) {
+					r.Header.Set("api-secret", "wrong-token ")
+				}, http.StatusUnauthorized},
 				{"right token query param", func(r *http.Request) {
 					q := r.URL.Query()
 					q.Set("token", testToken)

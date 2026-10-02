@@ -175,6 +175,7 @@ func (p *Poller) recordStored(r cgm.Reading) {
 	defer p.mu.Unlock()
 	p.status.LastReadingTime = r.Time
 	p.status.LastReadingMgDl = r.MgDl
+	p.status.LastReadingTrend = r.Trend
 }
 
 func (p *Poller) recordStoreError() {

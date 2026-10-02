@@ -20,6 +20,19 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
         try? stdinHandle.close()
         process.terminate()
     }
+
+    func waitUntilExit(timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while process.isRunning {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return true
+    }
+
+    func kill() {
+        Foundation.kill(process.processIdentifier, SIGKILL)
+    }
 }
 
 /// RealProcessLauncher starts the engine binary as an ordinary child

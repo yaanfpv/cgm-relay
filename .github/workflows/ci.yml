@@ -64,7 +64,8 @@ jobs:
         run: bash .github/annotate-go-output.sh build "$RUNNER_TEMP/build.log"
 
   macos-app:
-    runs-on: macos-26
+    # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
+    runs-on: xcode-27
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,6 +76,11 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version
 
       - name: install xcodegen
         run: brew install xcodegen

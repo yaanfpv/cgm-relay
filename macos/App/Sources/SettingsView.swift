@@ -1,15 +1,20 @@
 import CGMRelayCore
 import SwiftUI
 
+/// SettingsNavigation holds which Settings pane is in front, so the app
+/// menu's "About CGM Relay" and the Connect pane's "Open Advanced…" can
+/// switch panes without knowing anything about the tab view.
+@MainActor
+final class SettingsNavigation: ObservableObject {
+    @Published var tab: SettingsView.SettingsTab = .account
+}
+
 /// SettingsView is the Settings window's whole content: a toolbar of
-/// tabs, in the standard macOS Settings look, over the six panes CGM
-/// Relay's own account, connection, and configuration live in.
+/// tabs, in the standard macOS Settings look, over the seven panes CGM
+/// Relay's own account, connection, updates and configuration live in.
 struct SettingsView: View {
-    /// SettingsTab names every pane so the Connect pane's "Open
-    /// Advanced…" button can switch tabs by setting selection, rather
-    /// than each pane needing to know anything about TabView itself.
     enum SettingsTab: Hashable {
-        case account, connect, general, advanced, alerts, about
+        case account, connect, general, advanced, alerts, updates, about
     }
 
     /// paneWidth is the one width every pane shares, chosen once, so the
@@ -19,16 +24,17 @@ struct SettingsView: View {
     static let paneWidth: CGFloat = 600
 
     @ObservedObject var model: AppModel
-    @State private var selection: SettingsTab = .account
+    @ObservedObject var updates: UpdatesModel
+    @ObservedObject var navigation: SettingsNavigation
     @State private var paneHeights: [SettingsTab: CGFloat] = [:]
 
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: $navigation.tab) {
             AccountPaneView(model: model)
                 .measuringHeight(for: .account, into: $paneHeights)
                 .tabItem { Label("Account", systemImage: "person.crop.circle") }
                 .tag(SettingsTab.account)
-            ConnectPaneView(model: model, openAdvancedPane: { selection = .advanced })
+            ConnectPaneView(model: model, openAdvancedPane: { navigation.tab = .advanced })
                 .measuringHeight(for: .connect, into: $paneHeights)
                 .tabItem { Label("Connect", systemImage: "qrcode") }
                 .tag(SettingsTab.connect)
@@ -44,7 +50,11 @@ struct SettingsView: View {
                 .measuringHeight(for: .alerts, into: $paneHeights)
                 .tabItem { Label("Alerts", systemImage: "bell") }
                 .tag(SettingsTab.alerts)
-            AboutPaneView(model: model)
+            UpdatesPaneView(updates: updates)
+                .measuringHeight(for: .updates, into: $paneHeights)
+                .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+                .tag(SettingsTab.updates)
+            AboutPaneView(model: model, updates: updates)
                 .measuringHeight(for: .about, into: $paneHeights)
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(SettingsTab.about)
@@ -58,7 +68,7 @@ struct SettingsView: View {
         // the bottom. No outer padding: each pane's own grouped Form
         // already reserves the standard distance from the tab bar and
         // from the window's own edge.
-        .frame(width: Self.paneWidth, height: paneHeights[selection])
+        .frame(width: Self.paneWidth, height: paneHeights[navigation.tab])
     }
 }
 

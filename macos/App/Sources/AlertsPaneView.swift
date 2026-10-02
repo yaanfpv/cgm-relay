@@ -34,16 +34,24 @@ struct AlertsPaneView: View {
 
             if model.notificationPermissionDenied {
                 Section {
-                    HStack {
+                    VStack(alignment: .leading, spacing: 10) {
                         Text("Notifications are turned off for CGM Relay in System Settings.")
                             .foregroundStyle(.secondary)
-                        AccessibleButton("Open System Settings…", action: openNotificationSettings)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Spacer()
+                            AccessibleButton("Open System Settings…", action: model.openNotificationSettings)
+                        }
                     }
                 }
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+        .onAppear { model.refreshNotificationPermission() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshNotificationPermission()
+        }
     }
 
     private var noReadingEnabledBinding: Binding<Bool> {
@@ -71,10 +79,5 @@ struct AlertsPaneView: View {
                 Task { await model.setSignInFailingAlert(enabled: newValue) }
             }
         )
-    }
-
-    private func openNotificationSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") else { return }
-        NSWorkspace.shared.open(url)
     }
 }

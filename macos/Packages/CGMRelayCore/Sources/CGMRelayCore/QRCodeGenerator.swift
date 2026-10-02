@@ -22,7 +22,11 @@ public enum QRCodeGenerator {
     /// since CIContext is not Sendable and a QR code is rendered rarely
     /// enough that the cost of building one is never worth the
     /// concurrency risk of sharing it.
-    public static func cgImage(for string: String, scale: CGFloat = 10) throws -> CGImage {
+    ///
+    /// correctionLevel is CIQRCodeGenerator's own L, M, Q or H: a code shown
+    /// on a screen and scanned close up needs little error correction, and
+    /// each level down leaves the modules larger for the same payload.
+    public static func cgImage(for string: String, scale: CGFloat = 10, correctionLevel: String = "M") throws -> CGImage {
         guard let data = string.data(using: .utf8) else {
             throw QRCodeError.encodingFailed
         }
@@ -30,7 +34,7 @@ public enum QRCodeGenerator {
             throw QRCodeError.encodingFailed
         }
         filter.setValue(data, forKey: "inputMessage")
-        filter.setValue("M", forKey: "inputCorrectionLevel")
+        filter.setValue(correctionLevel, forKey: "inputCorrectionLevel")
         guard let outputImage = filter.outputImage else {
             throw QRCodeError.encodingFailed
         }
@@ -46,8 +50,8 @@ public enum QRCodeGenerator {
     #if canImport(AppKit)
     /// nsImage is the Connect pane's own display convenience: the same
     /// image as cgImage(for:), wrapped for SwiftUI's Image(nsImage:).
-    public static func nsImage(for string: String, scale: CGFloat = 10) throws -> NSImage {
-        let cgImage = try cgImage(for: string, scale: scale)
+    public static func nsImage(for string: String, scale: CGFloat = 10, correctionLevel: String = "M") throws -> NSImage {
+        let cgImage = try cgImage(for: string, scale: scale, correctionLevel: correctionLevel)
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
     #endif

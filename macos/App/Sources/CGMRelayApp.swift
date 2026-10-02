@@ -21,42 +21,59 @@ private let devLogger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "deb
 /// incomplete.
 @main
 struct CGMRelayApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
+    @StateObject private var updates: UpdatesModel
+    private let sceneActions = SceneActions()
+    private let statusItemController: StatusItemController
 
     init() {
         let explicitKeychainServiceOverride = CGMRelayApp.explicitKeychainServiceOverride()
         let keychainServiceOverride = CGMRelayApp.validatedThrowawayKeychainService(explicitOverride: explicitKeychainServiceOverride)
         let store = CGMRelayApp.credentialStore(keychainServiceOverride: keychainServiceOverride)
         CGMRelayApp.seedSyntheticAccountIfRequested(into: store, explicitKeychainServiceOverride: explicitKeychainServiceOverride)
-        _model = StateObject(
-            wrappedValue: AppModel(
-                engineURL: CGMRelayApp.engineURL(),
-                credentialStore: store,
-                settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride),
-                databasePath: CGMRelayApp.databasePath(keychainServiceOverride: keychainServiceOverride),
-                librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL(),
-                tailscale: RealTailscaleController(
-                    executableURL: CGMRelayApp.tailscaleExecutable(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
-                )
-            )
+        let model = AppModel(
+            engineURL: CGMRelayApp.engineURL(),
+            credentialStore: store,
+            settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride),
+            statusAddr: CGMRelayApp.statusAddr(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
+            databasePath: CGMRelayApp.databasePath(keychainServiceOverride: keychainServiceOverride),
+            librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL(),
+            tailscale: RealTailscaleController(
+                executableURL: CGMRelayApp.tailscaleExecutable(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
+            ),
+            loginItemManager: CGMRelayApp.loginItemManager(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
+        )
+        let updates = UpdatesModel(feedURLOverride: CGMRelayApp.updateFeedURL(explicitKeychainServiceOverride: explicitKeychainServiceOverride))
+        _model = StateObject(wrappedValue: model)
+        _updates = StateObject(wrappedValue: updates)
+        AppShutdown.run = { await model.shutDown() }
+        statusItemController = StatusItemController(
+            model: model,
+            updates: updates,
+            sceneActions: sceneActions,
+            pressOpensContextMenu: CGMRelayApp.pressOpensContextMenu(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
         )
     }
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuContentView(model: model)
-        } label: {
-            MenuBarLabel(dot: model.menuState.dot, statusDescription: model.menuState.shortStatus)
-                .modifier(SetupPresenter(model: model))
+        // The status item is AppKit's (StatusItemController). This
+        // invisible window is the app's presence in the scene hierarchy
+        // from launch: it opens setup and lets the status item open the
+        // other scenes.
+        Window("CGM Relay", id: SceneBridgeView.windowID) {
+            SceneBridgeView(model: model, actions: sceneActions)
         }
-        .menuBarExtraStyle(.window)
+        .windowStyle(.plain)
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.presented)
+        .restorationBehavior(.disabled)
 
         // First-launch setup: opened by SetupPresenter after a launch that
         // finds setup incomplete, and by the menu's "Finish setup…", never
         // by the system on its own.
         Window("Set Up CGM Relay", id: SetupWindow.id) {
             SetupView(model: model)
-                .onDisappear { WindowActivation.returnToMenuBarOnlyIfNoWindowsRemain() }
         }
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
@@ -68,19 +85,19 @@ struct CGMRelayApp: App {
         // resizability lets the window follow each pane's own natural
         // height as the tab selection changes, rather than every pane
         // sharing one fixed size. Opening it still goes through the menu's
-        // own openSettings() call, which keeps the same before-and-after
-        // activation-policy toggle the onDisappear below relies on, since
-        // that toggle is plain AppKit and never depended on which scene
-        // type hosted the window.
+        // own openSettings() call, which makes the app a regular one while
+        // the window is open (AppDelegate returns it to the menu bar).
         Settings {
-            SettingsView(model: model)
-                .onDisappear { WindowActivation.returnToMenuBarOnlyIfNoWindowsRemain() }
+            SettingsView(model: model, updates: updates, navigation: sceneActions.settingsNavigation)
         }
         .windowResizability(.contentSize)
         // A starting guess only: matches SettingsView's own fixed pane
         // width, before .contentSize resizability settles the height onto
         // the front pane's own measured size.
         .defaultSize(width: 600, height: 460)
+        .commands {
+            AppMenuCommands(updates: updates, sceneActions: sceneActions)
+        }
     }
 
     /// engineURL locates the universal engine binary the build embeds at
@@ -172,6 +189,53 @@ struct CGMRelayApp: App {
         #endif
     }
 
+    /// statusAddr is where the engine serves its local status and where the
+    /// app reads it. A release build always uses the standard address. A
+    /// debug build may name another with `-CGMRelayStatusAddr <host:port>`,
+    /// only together with an explicit throwaway `-CGMRelayKeychainService`,
+    /// so a development run beside a running copy never reads that copy's
+    /// status.
+    private static func statusAddr(explicitKeychainServiceOverride: String?) -> String {
+        #if DEBUG
+        if let address = UserDefaults.standard.string(forKey: "CGMRelayStatusAddr"),
+           !address.isEmpty,
+           SyntheticAccountSeeder.isThrowawayService(explicitKeychainServiceOverride) {
+            return address
+        }
+        #endif
+        return "127.0.0.1:1338"
+    }
+
+    /// updateFeedURL is where a development run looks for updates instead of
+    /// the release feed: `-CGMRelayUpdateFeedURL <url>`, read only in a
+    /// DEBUG build and only together with an explicit throwaway
+    /// `-CGMRelayKeychainService`, like the other debug arguments, so a
+    /// test feed is never reached by a launch that could touch the real
+    /// account. A release build never reads it.
+    private static func updateFeedURL(explicitKeychainServiceOverride: String?) -> String? {
+        #if DEBUG
+        if let url = UserDefaults.standard.string(forKey: "CGMRelayUpdateFeedURL"),
+           !url.isEmpty,
+           SyntheticAccountSeeder.isThrowawayService(explicitKeychainServiceOverride) {
+            return url
+        }
+        #endif
+        return nil
+    }
+
+    /// pressOpensContextMenu is a development walk's way to reach the
+    /// right-click menu with no pointer: `-CGMRelayPressOpensMenu YES`, read
+    /// only in a DEBUG build and only together with an explicit throwaway
+    /// `-CGMRelayKeychainService`.
+    private static func pressOpensContextMenu(explicitKeychainServiceOverride: String?) -> Bool {
+        #if DEBUG
+        return UserDefaults.standard.bool(forKey: "CGMRelayPressOpensMenu")
+            && SyntheticAccountSeeder.isThrowawayService(explicitKeychainServiceOverride)
+        #else
+        return false
+        #endif
+    }
+
     /// tailscaleExecutable is the Tailscale command line tool this launch
     /// uses. A release build looks in Tailscale's standard locations; a
     /// debug build never touches the real Tailscale and only runs a fake
@@ -187,6 +251,29 @@ struct CGMRelayApp: App {
         )
         #else
         return TailscaleLocator.resolve(isDebugBuild: false, fakePath: nil, explicitKeychainServiceOverride: nil)
+        #endif
+    }
+
+    /// loginItemManager is what Open at Login registers with. A release
+    /// build always uses the system's login items. A debug build shares the
+    /// real bundle identifier, so it never registers for real: it keeps a
+    /// file's worth of state instead, only when `-CGMRelayLoginItemFake
+    /// <path>` names that file together with an explicit throwaway
+    /// `-CGMRelayKeychainService` (LoginItemFakeLocator holds the
+    /// decision), and otherwise leaves the login item alone by reading it
+    /// as not available.
+    private static func loginItemManager(explicitKeychainServiceOverride: String?) -> any LoginItemManaging {
+        #if DEBUG
+        guard let stateFile = LoginItemFakeLocator.resolve(
+            isDebugBuild: true,
+            fakePath: UserDefaults.standard.string(forKey: "CGMRelayLoginItemFake"),
+            explicitKeychainServiceOverride: explicitKeychainServiceOverride
+        ) else {
+            return UnavailableLoginItemManager()
+        }
+        return FileBackedLoginItemManager(stateFile: stateFile)
+        #else
+        return SystemLoginItemManager()
         #endif
     }
 
@@ -267,5 +354,21 @@ struct CGMRelayApp: App {
             fatalError("cgm-relay: could not create \(parent.path): \(error)")
         }
         return resolved.path
+    }
+}
+
+/// AppMenuCommands is what the app menu carries beyond the standard items:
+/// About opens the app's own page in Settings instead of the stock panel,
+/// and the update entry sits under it.
+struct AppMenuCommands: Commands {
+    @ObservedObject var updates: UpdatesModel
+    let sceneActions: SceneActions
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About CGM Relay") { sceneActions.showSettings(tab: .about) }
+            Button(updates.menuTitle) { updates.perform() }
+                .disabled(!updates.canPerformAction)
+        }
     }
 }

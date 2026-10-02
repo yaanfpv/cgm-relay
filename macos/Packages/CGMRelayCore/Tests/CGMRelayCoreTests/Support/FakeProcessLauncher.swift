@@ -7,13 +7,24 @@ import Foundation
 final class FakeRunningProcess: RunningProcess, @unchecked Sendable {
     let processIdentifier: Int32
     private let onTerminate: @Sendable () -> Void
+    private let exitsWhenAsked: Bool
+    private let onKill: @Sendable () -> Void
 
-    init(processIdentifier: Int32, onTerminate: @escaping @Sendable () -> Void) {
+    init(
+        processIdentifier: Int32,
+        exitsWhenAsked: Bool = true,
+        onKill: @escaping @Sendable () -> Void = {},
+        onTerminate: @escaping @Sendable () -> Void
+    ) {
         self.processIdentifier = processIdentifier
+        self.exitsWhenAsked = exitsWhenAsked
+        self.onKill = onKill
         self.onTerminate = onTerminate
     }
 
     func terminate() { onTerminate() }
+    func waitUntilExit(timeout: Duration) async -> Bool { exitsWhenAsked }
+    func kill() { onKill() }
 }
 
 /// FakeProcessLauncher records every launch and hands the test full
@@ -30,6 +41,11 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
     private var terminatedFlags: [Bool] = []
     private var onExitHandlers: [(Int32) -> Void] = []
     private var nextPID: Int32 = 1000
+    private var killedFlags: [Bool] = []
+
+    /// processesIgnoreTerminate makes every process launched afterwards
+    /// still be running when asked to exit, so a test can see it killed.
+    var processesIgnoreTerminate = false
 
     var launchCount: Int {
         lock.withLock { launches.count }
@@ -48,6 +64,7 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
         lock.withLock {
             launches.append(Launch(arguments: arguments, standardInputData: standardInputData))
             terminatedFlags.append(false)
+            killedFlags.append(false)
             onExitHandlers.append(onExit)
         }
         let index = lock.withLock { launches.count - 1 }
@@ -56,7 +73,12 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
             nextPID += 1
             return p
         }
-        return FakeRunningProcess(processIdentifier: pid) { [weak self] in
+        let ignores = processesIgnoreTerminate
+        return FakeRunningProcess(
+            processIdentifier: pid,
+            exitsWhenAsked: !ignores,
+            onKill: { [weak self] in self?.lock.withLock { self?.killedFlags[index] = true } }
+        ) { [weak self] in
             self?.markTerminated(index: index)
         }
     }
@@ -66,6 +88,10 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
             guard launches.indices.contains(index) else { return }
             terminatedFlags[index] = true
         }
+    }
+
+    func wasKilled(at index: Int) -> Bool {
+        lock.withLock { killedFlags.indices.contains(index) && killedFlags[index] }
     }
 
     func wasTerminated(at index: Int) -> Bool {

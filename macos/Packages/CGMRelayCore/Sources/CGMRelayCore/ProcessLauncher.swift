@@ -10,6 +10,12 @@ public protocol RunningProcess: Sendable {
     /// lifeline: either is enough on its own to stop the engine, and
     /// doing both costs nothing.
     func terminate()
+    /// waitUntilExit returns true once the process has exited, or false if
+    /// it is still running after timeout.
+    func waitUntilExit(timeout: Duration) async -> Bool
+    /// kill ends the process at once (SIGKILL), for one that ignored
+    /// terminate() past its timeout.
+    func kill()
 }
 
 /// ProcessLauncher starts the engine as a child process. Production code

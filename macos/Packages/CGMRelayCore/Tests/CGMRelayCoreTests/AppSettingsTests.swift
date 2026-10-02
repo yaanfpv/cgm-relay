@@ -67,4 +67,30 @@ struct AppSettingsTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
         #expect(decoded == settings)
     }
+
+    @Test("the reading in the menu bar is off by default, absent from an older settings file, and survives a round trip")
+    func showReadingInMenuBar() throws {
+        #expect(AppSettings.default.showReadingInMenuBar == false)
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "setupFinished": true}"#.utf8))
+        #expect(older.showReadingInMenuBar == false)
+        #expect(older.port == 4000, "an older file keeps every other field")
+        var settings = AppSettings.default
+        settings.showReadingInMenuBar = true
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded.showReadingInMenuBar == true)
+    }
+
+    @Test("the chosen follower app defaults to xDrip4iOS, is absent from an older settings file, and survives a round trip")
+    func connectFollowerApp() throws {
+        #expect(AppSettings.default.connectFollowerApp == .xDrip4iOS)
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000}"#.utf8))
+        #expect(older.connectFollowerApp == .xDrip4iOS)
+        let unknown = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "connectFollowerApp": "someNewerApp"}"#.utf8))
+        #expect(unknown.connectFollowerApp == .xDrip4iOS)
+        #expect(unknown.port == 4000, "an unknown follower app keeps every other field")
+        var settings = AppSettings.default
+        settings.connectFollowerApp = .loopFollow
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded.connectFollowerApp == .loopFollow)
+    }
 }

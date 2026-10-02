@@ -17,12 +17,13 @@ import (
 // cgm-remote-monitor accepts an access token there). Every comparison is
 // constant-time, so neither leaks how much of the credential a caller got
 // right; the SHA-1 form is compared case-insensitively since hex digests
-// arrive in both cases across these apps.
+// arrive in both cases across these apps. Surrounding whitespace on the
+// query value or the header is ignored.
 func (h *handler) checkAuth(r *http.Request) bool {
-	if token := r.URL.Query().Get("token"); token != "" && constantTimeEqual(token, h.token) {
+	if token := trimCredential(r.URL.Query().Get("token")); token != "" && constantTimeEqual(token, h.token) {
 		return true
 	}
-	if secret := r.Header.Get("api-secret"); secret != "" {
+	if secret := trimCredential(r.Header.Get("api-secret")); secret != "" {
 		if constantTimeEqual(strings.ToLower(secret), h.tokenSHA1Hex) {
 			return true
 		}
@@ -31,6 +32,14 @@ func (h *handler) checkAuth(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// trimCredential drops the ASCII whitespace (space, tab, CR, LF) a copied
+// credential picks up on its way through a text editor, a chat message or
+// a phone's paste box. The token alphabet is base64url, so none of it is
+// ever part of a real credential.
+func trimCredential(s string) string {
+	return strings.Trim(s, " \t\r\n")
 }
 
 // constantTimeEqual reports whether a and b hold the same bytes, taking

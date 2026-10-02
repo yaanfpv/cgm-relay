@@ -48,16 +48,16 @@ struct AdvancedPaneView: View {
 
             if model.settings.tailscaleHTTPSEnabled || isTailscaleRunning {
                 Section {
-                    TailscaleHTTPSControl(model: model)
-                } header: {
-                    Text("Tailscale")
+                    TailscaleHTTPSControl(model: model, part: .statusRow)
+                } footer: {
+                    TailscaleHTTPSControl(model: model, part: .notes)
                 }
             }
 
             Section {
                 ReachChoicesView(model: model)
             } header: {
-                Text("Access")
+                Text("Who can reach it")
             }
         }
         .formStyle(.grouped)

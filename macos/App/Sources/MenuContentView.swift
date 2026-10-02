@@ -3,26 +3,20 @@ import CGMRelayCore
 import Foundation
 import SwiftUI
 
-/// MenuContentView is the panel that opens under the menu bar icon. It
-/// mounts fresh every time the panel opens (the `.window` menu bar style
-/// SwiftUI uses for this app mounts and unmounts its content on each
-/// open/close, unlike `.menu` style, which SwiftUI never calls onAppear
-/// for at all), which is what onAppear below relies on to satisfy "poll
-/// once when the menu opens".
+/// MenuContentView is the panel that opens under the menu bar icon. The
+/// status item controller refreshes the model each time it opens the
+/// panel, so what it shows is never older than the last poll.
 struct MenuContentView: View {
     @ObservedObject var model: AppModel
-    @Environment(\.openSettings) private var openSettings
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var updates: UpdatesModel
+    let actions: MenuPanelActions
     @State private var isConfirmingStartFresh = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             heroReading
 
-            if model.needsSetup {
-                AccessibleButton("Finish setup…", style: .primary, action: openSetupWindow)
-            } else {
+            if model.menuState.showsStatusLine {
                 HStack(alignment: .top, spacing: 6) {
                     StatusDotView(dot: model.menuState.dot)
                         .padding(.top, 4)
@@ -45,13 +39,20 @@ struct MenuContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if model.needsSetup {
+                AccessibleButton("Finish setup…", style: actionsRowHasPrimary ? .secondary : .primary, action: actions.openSetup)
+            }
+
+            if updates.pending != .none {
+                AccessibleButton(updates.pending.menuTitle, style: panelHasOtherPrimary ? .secondary : .primary, action: actions.performUpdate)
+            }
+
             Divider()
 
             actionsRow
         }
         .padding(12)
         .frame(width: 280, alignment: .leading)
-        .onAppear { model.onMenuOpened() }
     }
 
     /// heroReading is the panel's one hero: the current reading, large,
@@ -93,6 +94,19 @@ struct MenuContentView: View {
         let status = Text(model.menuState.shortStatus).font(.subheadline).fontWeight(.medium)
         guard let statusAge = model.menuState.statusAge else { return status }
         return status + Text(" · \(statusAge)").font(.subheadline).foregroundStyle(.secondary)
+    }
+
+    /// panelHasOtherPrimary is whether another button already is the panel's
+    /// one primary action, so the update steps back.
+    private var panelHasOtherPrimary: Bool {
+        model.needsSetup || actionsRowHasPrimary
+    }
+
+    /// actionsRowHasPrimary is whether the actions row shows a primary
+    /// button (Start or Try Again), in which case "Finish setup…" steps
+    /// back so the panel keeps one primary action.
+    private var actionsRowHasPrimary: Bool {
+        model.canStart || model.canTryAgain
     }
 
     /// actionsRow is every action in one balanced row: the engine action
@@ -151,21 +165,6 @@ struct MenuContentView: View {
                     Text("The saved readings will be moved aside, kept on this Mac, and a new empty history will start.")
                 }
         }
-        AccessibleButton("Settings…", action: openSettingsWindow)
-    }
-
-    /// openSettingsWindow is the Settings… button's action.
-    private func openSettingsWindow() {
-        WindowActivation.bringAppForward()
-        openSettings()
-        dismiss()
-    }
-
-    /// openSetupWindow is "Finish setup…", through the same activation
-    /// path as Settings….
-    private func openSetupWindow() {
-        WindowActivation.bringAppForward()
-        openWindow(id: SetupWindow.id)
-        dismiss()
+        AccessibleButton("Settings…", action: actions.openSettings)
     }
 }
