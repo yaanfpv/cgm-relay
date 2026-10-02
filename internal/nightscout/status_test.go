@@ -3,10 +3,13 @@ package nightscout_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 )
 
@@ -117,6 +120,56 @@ func TestStatusJSONDecodesAsAnObjectForLoopFollow(t *testing.T) {
 	var asObject map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &asObject); err != nil {
 		t.Fatalf("decode as a JSON object (LoopFollow's verifyURLAndToken requires this shape): %v", err)
+	}
+}
+
+// TestStatusJSONNeedsNoCredentialAndRevealsNothingMore checks that
+// status.json answers a request with no credential, which is how xDrip4iOS
+// checks a service's status, with exactly the fields it reports to an
+// authenticated caller and nothing else: the body is byte-identical with
+// and without a valid credential, and its only keys are the fixed ones.
+func TestStatusJSONNeedsNoCredentialAndRevealsNothingMore(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	h, err := nightscout.New(&fakeStore{readings: []cgm.Reading{reading(now, 123)}}, testToken, fixedClock(now))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bare := httptest.NewRecorder()
+	h.ServeHTTP(bare, httptest.NewRequest(http.MethodGet, "/api/v1/status.json", nil))
+	if bare.Code != http.StatusOK {
+		t.Fatalf("no credential: status = %d, want 200 (body: %s)", bare.Code, bare.Body.String())
+	}
+	authed := doRequest(t, h, "/api/v1/status.json", nil)
+	if bare.Body.String() != authed.Body.String() {
+		t.Errorf("body differs by credential:\n  none: %s\n  token: %s", bare.Body.String(), authed.Body.String())
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(bare.Body.Bytes(), &top); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(top["settings"], &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	keys := func(m map[string]json.RawMessage) string {
+		var ks []string
+		for k := range m {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		return strings.Join(ks, ",")
+	}
+	if got, want := keys(top), "apiEnabled,serverTime,serverTimeEpoch,settings,status"; got != want {
+		t.Errorf("top-level fields = %s, want %s", got, want)
+	}
+	if got, want := keys(settings), "units"; got != want {
+		t.Errorf("settings fields = %s, want %s", got, want)
+	}
+	if strings.Contains(bare.Body.String(), "123") || strings.Contains(bare.Body.String(), testToken) {
+		t.Errorf("body carries a reading or the token: %s", bare.Body.String())
 	}
 }
 

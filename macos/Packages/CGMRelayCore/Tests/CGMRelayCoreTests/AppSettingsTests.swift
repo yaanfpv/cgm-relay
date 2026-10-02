@@ -30,6 +30,29 @@ struct AppSettingsTests {
         #expect(decoded.noReadingAlertEnabled == AppSettings.default.noReadingAlertEnabled, "the missing field must fall back to its own default rather than resetting the whole struct")
     }
 
+    @Test("the default follower port and status address are the build configuration's own pair")
+    func defaultsFollowTheBuildConfiguration() {
+        #if DEBUG
+        #expect(AppSettings.default.port == 1347)
+        #expect(AppSettings.defaultPort == 1347)
+        #expect(RelayDefaults.statusAddr == "127.0.0.1:1348")
+        #else
+        #expect(AppSettings.default.port == 1337)
+        #expect(AppSettings.defaultPort == 1337)
+        #expect(RelayDefaults.statusAddr == "127.0.0.1:1338")
+        #endif
+    }
+
+    @Test("a saved port is honoured exactly, whatever the default is")
+    func savedPortWinsOverDefault() throws {
+        for saved in [1337, 1347, 5001] {
+            var settings = AppSettings.default
+            settings.port = saved
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.port == saved)
+        }
+    }
+
     @Test("an empty JSON object decodes to every field's own default")
     func emptyObjectDecodesToDefaults() throws {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))

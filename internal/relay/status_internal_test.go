@@ -31,13 +31,15 @@ func (f fakePollerStatus) Status() poller.Status { return f.status }
 
 // TestClientTrackerRecordsOnlyAuthenticatedRequests checks the exclusion
 // rule directly against trackClients: a request the wrapped handler
-// answers with 401 (rejected credential) or 404 (an unimplemented path,
-// never even reaching a credential check) is never recorded, and every
-// other status code is, keyed by the request's User-Agent.
+// answers with 401 (rejected credential), 404 (an unimplemented path,
+// never even reaching a credential check), or from an endpoint that needs
+// no credential at all is never recorded, and every other status code is,
+// keyed by the request's User-Agent.
 func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name        string
+		path        string
 		status      int
 		userAgent   string
 		wantTracked bool
@@ -47,6 +49,8 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 		{name: "an unimplemented path", status: http.StatusNotFound, userAgent: "Nightguard/1.0", wantTracked: false},
 		{name: "authenticated ok", status: http.StatusOK, userAgent: "LoopFollow/1.0", wantTracked: true, wantKey: "LoopFollow/1.0"},
 		{name: "authenticated but a bad request", status: http.StatusBadRequest, userAgent: "Nightguard/1.0", wantTracked: true, wantKey: "Nightguard/1.0"},
+		{name: "the credential-free status check", path: "/api/v1/status.json", status: http.StatusOK, userAgent: "xDrip4iOS/1.0", wantTracked: false},
+		{name: "the credential-free page", path: "/", status: http.StatusOK, userAgent: "Mozilla/5.0", wantTracked: false},
 		{name: "authenticated with no user agent", status: http.StatusOK, userAgent: "", wantTracked: true, wantKey: unknownUserAgent},
 	}
 	for _, c := range cases {
@@ -59,7 +63,11 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 			})
 			wrapped := trackClients(inner, tracker, fixedNow(now))
 
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/entries.json", nil)
+			path := c.path
+			if path == "" {
+				path = "/api/v1/entries.json"
+			}
+			req := httptest.NewRequest(http.MethodGet, path, nil)
 			if c.userAgent != "" {
 				req.Header.Set("User-Agent", c.userAgent)
 			}

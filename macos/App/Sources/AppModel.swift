@@ -181,7 +181,7 @@ final class AppModel: ObservableObject {
         engineURL: URL,
         credentialStore: any CredentialStore = KeychainCredentialStore(),
         settingsStore: any SettingsStoring = UserDefaultsSettingsStore(),
-        statusAddr: String = "127.0.0.1:1338",
+        statusAddr: String = RelayDefaults.statusAddr,
         databasePath: String,
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
@@ -195,7 +195,7 @@ final class AppModel: ObservableObject {
         // is never scoped per Keychain service), so, exactly like
         // supervisor's own RealProcessLauncher below, it is never exposed
         // as an init parameter at all. The login item is: a Debug build
-        // shares the real bundle identifier, so the app decides which
+        // must not register one for real, so the app decides which
         // manager a launch gets (LoginItemFakeLocator).
         notificationDelivering = UserNotificationCenterDelivering()
         self.loginItemManager = loginItemManager
@@ -927,11 +927,11 @@ final class AppModel: ObservableObject {
     }
 
     private static func pairingURL(for statusAddr: String) -> URL {
-        URL(string: "http://\(statusAddr)/pairing") ?? URL(string: "http://127.0.0.1:1338/pairing")!
+        URL(string: "http://\(statusAddr)/pairing") ?? URL(string: "http://\(RelayDefaults.statusAddr)/pairing")!
     }
 
     private static func statusURL(for statusAddr: String) -> URL {
-        URL(string: "http://\(statusAddr)/status") ?? URL(string: "http://127.0.0.1:1338/status")!
+        URL(string: "http://\(statusAddr)/status") ?? URL(string: "http://\(RelayDefaults.statusAddr)/status")!
     }
 }
 

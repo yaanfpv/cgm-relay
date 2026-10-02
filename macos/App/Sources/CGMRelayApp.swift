@@ -190,10 +190,10 @@ struct CGMRelayApp: App {
     }
 
     /// statusAddr is where the engine serves its local status and where the
-    /// app reads it. A release build always uses the standard address. A
-    /// debug build may name another with `-CGMRelayStatusAddr <host:port>`,
-    /// only together with an explicit throwaway `-CGMRelayKeychainService`,
-    /// so a development run beside a running copy never reads that copy's
+    /// app reads it. It is RelayDefaults.statusAddr, which a debug build
+    /// may replace with `-CGMRelayStatusAddr <host:port>`, only together
+    /// with an explicit throwaway `-CGMRelayKeychainService`, so a
+    /// development run beside a running copy never reads that copy's
     /// status.
     private static func statusAddr(explicitKeychainServiceOverride: String?) -> String {
         #if DEBUG
@@ -203,7 +203,7 @@ struct CGMRelayApp: App {
             return address
         }
         #endif
-        return "127.0.0.1:1338"
+        return RelayDefaults.statusAddr
     }
 
     /// updateFeedURL is where a development run looks for updates instead of
@@ -255,13 +255,12 @@ struct CGMRelayApp: App {
     }
 
     /// loginItemManager is what Open at Login registers with. A release
-    /// build always uses the system's login items. A debug build shares the
-    /// real bundle identifier, so it never registers for real: it keeps a
-    /// file's worth of state instead, only when `-CGMRelayLoginItemFake
-    /// <path>` names that file together with an explicit throwaway
-    /// `-CGMRelayKeychainService` (LoginItemFakeLocator holds the
-    /// decision), and otherwise leaves the login item alone by reading it
-    /// as not available.
+    /// build always uses the system's login items. A debug build never
+    /// registers for real: it keeps a file's worth of state instead, only
+    /// when `-CGMRelayLoginItemFake <path>` names that file together with an
+    /// explicit throwaway `-CGMRelayKeychainService` (LoginItemFakeLocator
+    /// holds the decision), and otherwise leaves the login item alone by
+    /// reading it as not available.
     private static func loginItemManager(explicitKeychainServiceOverride: String?) -> any LoginItemManaging {
         #if DEBUG
         guard let stateFile = LoginItemFakeLocator.resolve(

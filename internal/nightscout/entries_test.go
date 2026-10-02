@@ -686,8 +686,11 @@ func TestVaryAlwaysSetRegardlessOfStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("401 on every registered endpoint", func(t *testing.T) {
+	t.Run("401 on every registered endpoint that requires a credential", func(t *testing.T) {
 		for _, path := range nightscoutEndpoints {
+			if openEndpoints[path] {
+				continue
+			}
 			t.Run(path, func(t *testing.T) {
 				h, err := nightscout.New(&fakeStore{}, testToken, nil)
 				if err != nil {

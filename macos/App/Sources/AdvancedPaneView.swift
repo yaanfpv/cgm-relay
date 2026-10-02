@@ -2,8 +2,8 @@ import CGMRelayCore
 import SwiftUI
 
 /// AdvancedPaneView holds the port, Tailscale HTTPS and reach settings most
-/// people never need to touch: the default (This Mac only, port 1337) never
-/// exposes the engine beyond this one Mac.
+/// people never need to touch: the default (This Mac only, on
+/// RelayDefaults.followerPort) never exposes the engine beyond this one Mac.
 struct AdvancedPaneView: View {
     @ObservedObject var model: AppModel
     @State private var portText = ""

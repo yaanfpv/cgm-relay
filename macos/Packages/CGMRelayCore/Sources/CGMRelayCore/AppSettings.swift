@@ -81,7 +81,7 @@ public struct AppSettings: Equatable, Sendable {
         tailscaleHTTPSEnabled ? .thisMacOnly : reach
     }
 
-    public static let defaultPort = 1337
+    public static let defaultPort = RelayDefaults.followerPort
     public static let portRange = 1024...65535
     public static let defaultRetentionDays = 15
     public static let retentionDaysRange = 1...90
@@ -273,4 +273,18 @@ public enum RetentionCommitDecision: Sendable, Equatable {
     public static func decide(current: Int, new: Int) -> RetentionCommitDecision {
         new < current ? .needsConfirmation : .commitsImmediately
     }
+}
+
+/// RelayDefaults are the follower port and status address a build uses
+/// until a port is saved. A Debug build takes its own pair so a development
+/// run never contends with an installed copy for a listener; Release keeps
+/// the engine's own defaults.
+public enum RelayDefaults {
+    #if DEBUG
+    public static let followerPort = 1347
+    public static let statusAddr = "127.0.0.1:1348"
+    #else
+    public static let followerPort = 1337
+    public static let statusAddr = "127.0.0.1:1338"
+    #endif
 }

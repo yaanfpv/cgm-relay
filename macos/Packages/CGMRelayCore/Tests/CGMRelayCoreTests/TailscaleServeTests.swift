@@ -177,7 +177,7 @@ struct TailscaleServeTests {
         let controller = RealTailscaleController(
             executableURL: fake.executable,
             runner: RealBoundedProcessRunner(extraEnvironment: RealTailscaleController.environment),
-            changeTimeout: testCase.mode == "hang" ? .milliseconds(500) : .seconds(10)
+            changeTimeout: testCase.mode == "hang" ? .seconds(2) : .seconds(10)
         )
         let outcome = await controller.enableHTTPS(proxyingToPort: 1337, httpsPort: 443)
         #expect(outcome == testCase.want)

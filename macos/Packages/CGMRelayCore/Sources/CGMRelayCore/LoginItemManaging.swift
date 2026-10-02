@@ -178,9 +178,8 @@ public struct UnavailableLoginItemManager: LoginItemManaging {
 /// LoginItemFakeLocator decides whether a launch uses a file-backed login
 /// item. Only a debug build does, and only when the launch also names a
 /// throwaway Keychain service, exactly as the synthetic account seed and
-/// the Tailscale fake do: a debug build shares the real bundle identifier,
-/// so registering for real from one would put a login item on the
-/// developer's own Mac.
+/// the Tailscale fake do: registering for real from a debug build would
+/// put a login item on the developer's own Mac.
 public enum LoginItemFakeLocator {
     /// resolve returns the state file to use, or nil when the launch uses
     /// the system's login items.

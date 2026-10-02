@@ -8,6 +8,7 @@ import (
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/config"
+	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 )
@@ -94,7 +95,8 @@ func (w *statusCapturingWriter) WriteHeader(status int) {
 // trackClients wraps the Nightscout API handler with User-Agent
 // tracking. It records the requesting client's last-seen time in
 // tracker, but only for a request that reached an endpoint the handler
-// implements with a valid credential: a 401 means checkAuth rejected it,
+// implements with a valid credential: a request to an endpoint that
+// needs no credential proved nothing, a 401 means checkAuth rejected it,
 // and a 404 means the path was never routed to checkAuth at all (an
 // unimplemented path, such as a follower app's own capability probe,
 // answers 404 before any credential check), so neither tells us a real
@@ -103,7 +105,7 @@ func trackClients(next http.Handler, tracker *clientTracker, now func() time.Tim
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusCapturingWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		if sw.status == http.StatusUnauthorized || sw.status == http.StatusNotFound {
+		if !nightscout.RequiresCredential(r) || sw.status == http.StatusUnauthorized || sw.status == http.StatusNotFound {
 			return
 		}
 		userAgent := r.UserAgent()
