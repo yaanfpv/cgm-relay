@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Redraw the drop in the app icon as a rounder, fuller teardrop, so it no longer reads as tall and narrow.
 - Add first-launch setup to the menu bar app: until it is finished, every launch opens a three-step window (sign in, reach your phone, connect your app with the address, token, QR code and the field names xDrip4iOS and xDrip+ use), and the menu shows "Finish setup…". With Tailscale running, setup can turn on Tailscale HTTPS for you by running one command it shows you first, after checking that its port has no entry in your Tailscale settings; Advanced shows what Tailscale itself reports and turns it off again after a confirmation, by running the matching command once it has checked that the entry there is this Mac's own.
 - Fix the Nightscout API answering 404 to `/api/v1/treatments`, `/api/v1/devicestatus` and `/api/v1/profiles.json`, which Nightguard, xDrip+, xDrip4iOS and LoopFollow request: each now gets the same empty answer as its `.json` or singular sibling, behind the same credential check.
 - Add CGM Relay's own app icon, so the Dock and Finder show it instead of a generic blank tile.
