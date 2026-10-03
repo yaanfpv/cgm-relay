@@ -165,6 +165,18 @@ public actor EngineSupervisor {
         current = nil
     }
 
+    /// stopAndWait stops the engine like stop(), then waits for its process
+    /// to be gone, killing it if it is still running after timeout, so the
+    /// caller can end its own process knowing no engine outlives it.
+    public func stopAndWait(timeout: Duration) async {
+        let process = current
+        stop()
+        guard let process else { return }
+        if await !process.waitUntilExit(timeout: timeout) {
+            process.kill()
+        }
+    }
+
     private func spawn(configuration: EngineConfiguration, generation: Int) async {
         guard generation == self.generation else { return }
         setState(.starting)

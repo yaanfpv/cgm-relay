@@ -1,10 +1,10 @@
-import AppKit
 import CGMRelayCore
 import SwiftUI
 
 /// GeneralPaneView holds the settings almost every install touches once:
 /// whether CGM Relay opens at login, which unit the menu shows readings
-/// in, and how long readings are kept.
+/// in, whether the reading sits beside the menu bar icon, and how long
+/// readings are kept.
 struct GeneralPaneView: View {
     @ObservedObject var model: AppModel
     @State private var retentionText = ""
@@ -17,13 +17,19 @@ struct GeneralPaneView: View {
         Form {
             Section {
                 Toggle("Open at Login", isOn: openAtLoginBinding)
+                    .disabled(model.loginItemStatus == .notFound)
+                if model.loginItemStatus == .notFound {
+                    Text(model.loginItemUnavailableReason ?? "This build can't open at login.")
+                        .font(.caption)
+                        .foregroundStyle(model.loginItemUnavailableReason == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                }
                 if model.loginItemStatus == .requiresApproval {
                     HStack {
                         Text("Needs approval in System Settings")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        AccessibleButton("Open System Settings…", style: .plain, action: openLoginItemsSettings)
-                            .font(.caption)
+                        Spacer()
+                        AccessibleButton("Open System Settings…", action: model.openLoginItemsSettings)
                     }
                 }
                 if let loginItemErrorMessage = model.loginItemErrorMessage {
@@ -41,6 +47,14 @@ struct GeneralPaneView: View {
                     Text("mmol/L").tag(GlucoseUnit.mmolL)
                 }
                 .pickerStyle(.segmented)
+            }
+
+            Section {
+                Toggle("Show the reading in the menu bar", isOn: showReadingBinding)
+            } header: {
+                Text("Menu Bar")
+            } footer: {
+                Text("Shows the latest reading and its trend beside the icon while readings are current. Off, the icon alone tells you when something is wrong.")
             }
 
             Section {
@@ -104,6 +118,10 @@ struct GeneralPaneView: View {
         )
     }
 
+    private var showReadingBinding: Binding<Bool> {
+        Binding(get: { model.settings.showReadingInMenuBar }, set: { model.updateShowReadingInMenuBar($0) })
+    }
+
     private var unitsBinding: Binding<GlucoseUnit> {
         Binding(get: { model.settings.units }, set: { model.updateUnits($0) })
     }
@@ -133,11 +151,6 @@ struct GeneralPaneView: View {
                 retentionText = String(value)
             }
         }
-    }
-
-    private func openLoginItemsSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") else { return }
-        NSWorkspace.shared.open(url)
     }
 
     /// confirmLowerRetention and cancelLowerRetention are the retention

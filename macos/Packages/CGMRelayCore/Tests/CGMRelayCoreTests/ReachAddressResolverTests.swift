@@ -151,6 +151,36 @@ struct ConnectPaneAddressStateTests {
     }
 }
 
+@Suite("PhoneReachability")
+struct PhoneReachabilityTests {
+    static let cases: [(name: String, reach: NetworkReach, chosen: Bool, serving: Bool, tailnet: Bool, lan: Bool, reachable: Bool)] = [
+        ("Tailscale HTTPS serving", .thisMacOnly, true, true, false, false, true),
+        ("Tailscale HTTPS serving, reach left at another choice", .myLocalNetwork, true, true, false, false, true),
+        ("Tailscale HTTPS chosen but not serving, a network up", .myLocalNetwork, true, false, true, true, false),
+        ("This Mac only, everything available", .thisMacOnly, false, false, true, true, false),
+        ("My tailnet with a Tailscale address", .myTailnet, false, false, true, false, true),
+        ("My tailnet with no Tailscale address", .myTailnet, false, false, false, true, false),
+        ("My local network with an address", .myLocalNetwork, false, false, false, true, true),
+        ("My local network with no address", .myLocalNetwork, false, false, true, false, false),
+    ]
+
+    @Test("a phone can be reached only through serving HTTPS, or a tailnet or local network choice with an address", arguments: cases)
+    func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, chosen: Bool, serving: Bool, tailnet: Bool, lan: Bool, reachable: Bool)) {
+        let got = PhoneReachability.decide(
+            reach: testCase.reach,
+            httpsChosen: testCase.chosen,
+            httpsServing: testCase.serving,
+            tailnetAvailable: testCase.tailnet,
+            localNetworkAvailable: testCase.lan
+        )
+        #expect(got.isReachable == testCase.reachable, Comment(rawValue: testCase.name))
+        if !testCase.reachable, case .blocked(let reason) = got {
+            #expect(!reason.isEmpty)
+        }
+        #expect(SetupCompletion.mayFinish(reachability: got) == testCase.reachable, Comment(rawValue: testCase.name))
+    }
+}
+
 @Suite("BoundAddressDecision")
 struct BoundAddressDecisionTests {
     @Test("nothing currently bound never needs a restart")
@@ -230,4 +260,34 @@ struct FollowerAddressTests {
         #expect(FollowerAppEntry.urlWithToken(address: "http://192.168.1.42:1337", token: "abc-_9") == "http://abc-_9@192.168.1.42:1337")
         #expect(FollowerAppEntry.urlWithToken(address: "https://relay-mac.example-tailnet.ts.net", token: "abc") == "https://abc@relay-mac.example-tailnet.ts.net")
     }
+
+    @Test("xDrip4iOS's instructions name where its fields live and leave API_SECRET blank, with a Port field only when the address names one")
+    func xDrip4iOSInstructions() {
+        let withPort = FollowerAppEntry.instructions(for: .xDrip4iOS, address: "http://192.168.1.42:1337")
+        #expect(withPort.steps.contains { $0.contains("Sharing and Services") && $0.contains("Nightscout") })
+        #expect(withPort.steps.contains { $0.contains("1337 in Port") })
+        #expect(withPort.steps.last == "Leave API_SECRET blank.")
+        #expect(withPort.fields == [
+            .init(label: "URL", value: "http://192.168.1.42"),
+            .init(label: "Port", value: "1337"),
+            .init(label: "Token", value: FollowerAppEntry.tokenPlaceholder),
+        ])
+        let noPort = FollowerAppEntry.instructions(for: .xDrip4iOS, address: "https://relay-mac.example-tailnet.ts.net")
+        #expect(!noPort.steps.contains { $0.contains("Port") })
+        #expect(noPort.fields.map(\.label) == ["URL", "Token"])
+    }
+
+    @Test("every app's instructions carry the token only as the placeholder, never a real value")
+    func instructionsHoldOnlyThePlaceholder() {
+        for entry in FollowerAppEntry.pairingApps(address: "http://192.168.1.42:1337") {
+            #expect(entry.fields.contains { $0.value.contains(FollowerAppEntry.tokenPlaceholder) }, Comment(rawValue: entry.name))
+        }
+        #expect(FollowerAppEntry.pairingApps(address: "https://h.example").map(\.name) == FollowerApp.allCases.map(\.displayName))
+    }
+
+    @Test("Nightguard takes one address carrying the token as a query item")
+    func nightguardURL() {
+        #expect(FollowerAppEntry.nightguardURL(address: "http://192.168.1.42:1337", token: "abc-_9") == "http://192.168.1.42:1337/?token=abc-_9")
+    }
 }
+

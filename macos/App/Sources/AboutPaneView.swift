@@ -2,19 +2,17 @@ import AppKit
 import CGMRelayCore
 import SwiftUI
 
-/// AboutPaneView shows the app's own version and a Copy Diagnostics
-/// button, for a person to paste into a bug report or a support message.
+/// AboutPaneView is the app's own page: its version and what changed in
+/// it, a check for updates, a Copy Diagnostics button for a bug report or a
+/// support message, and the two ways to reach the maintainer.
 struct AboutPaneView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updates: UpdatesModel
     @State private var copied = false
 
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
-    }
+    private var appVersion: String { AppVersion.short }
 
-    private var buildNumber: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
-    }
+    private var buildNumber: String { AppVersion.build }
 
     private var macOSVersion: String {
         ProcessInfo.processInfo.operatingSystemVersionString
@@ -37,9 +35,25 @@ struct AboutPaneView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
 
+                    HStack(spacing: 8) {
+                        AccessibleButton("What's New") { NSWorkspace.shared.open(UpdateLinks.changelog) }
+                        AccessibleButton(updates.menuTitle, action: updates.perform)
+                            .disabled(!updates.canPerformAction)
+                    }
+                    if let note = updates.unavailableNote {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     AccessibleButton(copied ? "Copied" : "Copy Diagnostics", style: .primary, action: copyDiagnostics)
 
-                    Text("Includes CGM Relay's running state, your settings, and follower activity. Never an account, a password, an address, or a reading.")
+                    HStack(spacing: 8) {
+                        AccessibleButton("Report a Bug") { FeedbackLinks.open(.bug) }
+                        AccessibleButton("Suggest a Feature") { FeedbackLinks.open(.feature) }
+                    }
+
+                    Text("Diagnostics include CGM Relay's running state, your settings, and follower activity, never an account, a password, an address, or a reading. Report a Bug and Suggest a Feature open a new GitHub issue with only this app's version and build, your macOS version and your chip. Checking for updates contacts GitHub, which sees this app's version and your internet address.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)

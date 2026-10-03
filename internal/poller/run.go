@@ -18,8 +18,9 @@ const authRetryInterval = 5 * time.Minute
 // success (capped at the last entry once that count runs out).
 var rateLimitBackoff = []time.Duration{60 * time.Second, 120 * time.Second, 300 * time.Second}
 
-// Run fetches a reading every Interval, storing it and filling any history
-// gaps, until ctx is done. It prunes on its first cycle and every
+// Run fetches a reading about once an Interval, timed from the readings
+// themselves so none the source publishes is skipped, storing it and filling
+// any history gaps, until ctx is done. It prunes on its first cycle and every
 // PruneInterval after that, so retention is enforced even across frequent
 // restarts. It backs off after a rate limit or an authentication failure
 // and retries a transient failure, a fetch that timed out, or a rejected
@@ -33,13 +34,15 @@ func (p *Poller) Run(ctx context.Context) error {
 	// crashes and comes back, would never prune at all.
 	lastPrune := p.clock.Now().Add(-PruneInterval)
 	rateLimitAttempt := 0
+	var pace pacer
+	gaps := gapWatch{lastNew: p.clock.Now(), logger: p.logger}
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		wait, err := p.fetchAndStore(ctx, &rateLimitAttempt)
+		wait, err := p.fetchAndStore(ctx, &rateLimitAttempt, &pace, &gaps)
 		if err != nil {
 			return err
 		}
@@ -60,11 +63,12 @@ func (p *Poller) Run(ctx context.Context) error {
 // any) and any history readings, updates Status to match, and returns how
 // long Run should wait before the next cycle. rateLimitAttempt is the
 // running count of consecutive rate-limit responses since the last
-// success; fetchAndStore updates it in place. The only error fetchAndStore
-// returns is ctx's own error, once ctx is done -- a fetch that timed out,
-// or any other fetch or store failure, is reported through Status, never
-// returned.
-func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int) (time.Duration, error) {
+// success; fetchAndStore updates it in place. pace and gaps carry the
+// schedule and the reading-gap log state between cycles. The only error
+// fetchAndStore returns is ctx's own error, once ctx is done -- a fetch
+// that timed out, or any other fetch or store failure, is reported through
+// Status, never returned.
+func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int, pace *pacer, gaps *gapWatch) (time.Duration, error) {
 	fetchCtx, cancelFetch := context.WithTimeout(ctx, p.fetchTimeout)
 	current, history, err := p.source.Fetch(fetchCtx)
 	cancelFetch()
@@ -72,7 +76,9 @@ func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int) (time
 		return 0, ctxErr
 	}
 	if err != nil {
-		return p.handleFetchError(err, rateLimitAttempt), nil
+		wait, failure := p.handleFetchError(err, rateLimitAttempt)
+		gaps.check(p.clock.Now(), false, failure)
+		return wait, nil
 	}
 
 	*rateLimitAttempt = 0
@@ -99,12 +105,16 @@ func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int) (time
 		}
 	}
 
-	return Interval, nil
+	now := p.clock.Now()
+	wait, fresh := pace.observe(now, current)
+	gaps.check(now, fresh, "")
+	return wait, nil
 }
 
 // handleFetchError classifies a Source.Fetch error, records it on Status,
-// and returns how long Run should wait before retrying.
-func (p *Poller) handleFetchError(err error, rateLimitAttempt *int) time.Duration {
+// and returns how long Run should wait before retrying, with the same
+// secret-free description it recorded.
+func (p *Poller) handleFetchError(err error, rateLimitAttempt *int) (time.Duration, string) {
 	var rateLimitErr *cgm.RateLimitError
 	var authErr *cgm.AuthError
 	var transientErr *cgm.TransientError
@@ -117,19 +127,19 @@ func (p *Poller) handleFetchError(err error, rateLimitAttempt *int) time.Duratio
 		}
 		*rateLimitAttempt++
 		p.recordFailure("rate limited, backing off", false)
-		return wait
+		return wait, "rate limited"
 
 	case errors.As(err, &authErr):
 		p.recordFailure("sign-in failed", true)
-		return authRetryInterval
+		return authRetryInterval, "sign-in failed"
 
 	case errors.As(err, &transientErr), errors.Is(err, context.DeadlineExceeded):
 		p.recordFailure("temporary fetch failure, retrying", false)
-		return Interval
+		return Interval, "temporary fetch failure"
 
 	default:
 		p.recordFailure("fetch failed, retrying", false)
-		return Interval
+		return Interval, "fetch failed"
 	}
 }
 
@@ -175,6 +185,7 @@ func (p *Poller) recordStored(r cgm.Reading) {
 	defer p.mu.Unlock()
 	p.status.LastReadingTime = r.Time
 	p.status.LastReadingMgDl = r.MgDl
+	p.status.LastReadingTrend = r.Trend
 }
 
 func (p *Poller) recordStoreError() {

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 )
 
@@ -29,13 +31,15 @@ func (f fakePollerStatus) Status() poller.Status { return f.status }
 
 // TestClientTrackerRecordsOnlyAuthenticatedRequests checks the exclusion
 // rule directly against trackClients: a request the wrapped handler
-// answers with 401 (rejected credential) or 404 (an unimplemented path,
-// never even reaching a credential check) is never recorded, and every
-// other status code is, keyed by the request's User-Agent.
+// answers with 401 (rejected credential), 404 (an unimplemented path,
+// never even reaching a credential check), or from an endpoint that needs
+// no credential at all is never recorded, and every other status code is,
+// keyed by the request's User-Agent.
 func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name        string
+		path        string
 		status      int
 		userAgent   string
 		wantTracked bool
@@ -45,6 +49,8 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 		{name: "an unimplemented path", status: http.StatusNotFound, userAgent: "Nightguard/1.0", wantTracked: false},
 		{name: "authenticated ok", status: http.StatusOK, userAgent: "LoopFollow/1.0", wantTracked: true, wantKey: "LoopFollow/1.0"},
 		{name: "authenticated but a bad request", status: http.StatusBadRequest, userAgent: "Nightguard/1.0", wantTracked: true, wantKey: "Nightguard/1.0"},
+		{name: "the credential-free status check", path: "/api/v1/status.json", status: http.StatusOK, userAgent: "xDrip4iOS/1.0", wantTracked: false},
+		{name: "the credential-free page", path: "/", status: http.StatusOK, userAgent: "Mozilla/5.0", wantTracked: false},
 		{name: "authenticated with no user agent", status: http.StatusOK, userAgent: "", wantTracked: true, wantKey: unknownUserAgent},
 	}
 	for _, c := range cases {
@@ -57,7 +63,11 @@ func TestClientTrackerRecordsOnlyAuthenticatedRequests(t *testing.T) {
 			})
 			wrapped := trackClients(inner, tracker, fixedNow(now))
 
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/entries.json", nil)
+			path := c.path
+			if path == "" {
+				path = "/api/v1/entries.json"
+			}
+			req := httptest.NewRequest(http.MethodGet, path, nil)
 			if c.userAgent != "" {
 				req.Header.Set("User-Agent", c.userAgent)
 			}
@@ -145,11 +155,12 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 	lastFetch := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	lastReading := lastFetch.Add(-30 * time.Second)
 	fake := fakePollerStatus{status: poller.Status{
-		LastFetchTime:   lastFetch,
-		LastReadingTime: lastReading,
-		LastReadingMgDl: 145,
-		SignInFailing:   true,
-		LastError:       "sign-in failed",
+		LastFetchTime:    lastFetch,
+		LastReadingTime:  lastReading,
+		LastReadingMgDl:  145,
+		LastReadingTrend: cgm.TrendFortyFiveUp,
+		SignInFailing:    true,
+		LastError:        "sign-in failed",
 	}}
 
 	tracker := newClientTracker()
@@ -157,7 +168,7 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 	tracker.record("xDrip4iOS/1.0", seenAt)
 	tracker.record("LoopFollow/1.0", seenAt.Add(time.Minute))
 
-	h := newStatusHandler(fake, tracker)
+	h := newStatusHandler(fake, tracker, pairing.NewStore(nil))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Host = "127.0.0.1:1338" // this test is about the response shape, not the Host gate
@@ -183,6 +194,9 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 	if got.LastReadingMgDl != 145 {
 		t.Errorf("last_reading_mg_dl = %d, want 145", got.LastReadingMgDl)
 	}
+	if got.LastReadingTrend != "FortyFiveUp" {
+		t.Errorf("last_reading_trend = %q, want FortyFiveUp", got.LastReadingTrend)
+	}
 	if !got.SignInFailing {
 		t.Error("sign_in_failing = false, want true")
 	}
@@ -205,7 +219,7 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 // rather than the zero time formatted as if it meant something.
 func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 	t.Parallel()
-	h := newStatusHandler(fakePollerStatus{}, newClientTracker())
+	h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Host = "127.0.0.1:1338" // this test is about the response shape, not the Host gate
@@ -221,6 +235,35 @@ func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 	if _, present := raw["last_reading_time"]; present {
 		t.Error(`"last_reading_time" is present before any reading has been stored`)
 	}
+	if _, present := raw["last_reading_trend"]; present {
+		t.Error(`"last_reading_trend" is present before any reading has been stored`)
+	}
+}
+
+// TestStatusHandlerOmitsTrendTheDeviceDidNotCompute checks that a stored
+// reading with no computed trend carries no last_reading_trend, rather than
+// a direction name that would render as an arrow.
+func TestStatusHandlerOmitsTrendTheDeviceDidNotCompute(t *testing.T) {
+	t.Parallel()
+	for _, trend := range []cgm.Trend{cgm.TrendUnknown, cgm.TrendNotComputable} {
+		fake := fakePollerStatus{status: poller.Status{
+			LastReadingTime:  time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+			LastReadingMgDl:  120,
+			LastReadingTrend: trend,
+		}}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		req.Host = "127.0.0.1:1338"
+		newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil)).ServeHTTP(rec, req)
+
+		var raw map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("decode /status: %v", err)
+		}
+		if v, present := raw["last_reading_trend"]; present {
+			t.Errorf("trend %d: last_reading_trend = %v, want it omitted", trend, v)
+		}
+	}
 }
 
 // TestStatusHandlerRequiresLoopbackHost checks the handler's own Host
@@ -235,7 +278,7 @@ func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 	t.Parallel()
 	fake := fakePollerStatus{status: poller.Status{LastReadingMgDl: 145}}
-	h := newStatusHandler(fake, newClientTracker())
+	h := newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil))
 
 	cases := []struct {
 		host       string

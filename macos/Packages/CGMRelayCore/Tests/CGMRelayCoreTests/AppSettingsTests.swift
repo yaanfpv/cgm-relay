@@ -30,6 +30,29 @@ struct AppSettingsTests {
         #expect(decoded.noReadingAlertEnabled == AppSettings.default.noReadingAlertEnabled, "the missing field must fall back to its own default rather than resetting the whole struct")
     }
 
+    @Test("the default follower port and status address are the build configuration's own pair")
+    func defaultsFollowTheBuildConfiguration() {
+        #if DEBUG
+        #expect(AppSettings.default.port == 1347)
+        #expect(AppSettings.defaultPort == 1347)
+        #expect(RelayDefaults.statusAddr == "127.0.0.1:1348")
+        #else
+        #expect(AppSettings.default.port == 1337)
+        #expect(AppSettings.defaultPort == 1337)
+        #expect(RelayDefaults.statusAddr == "127.0.0.1:1338")
+        #endif
+    }
+
+    @Test("a saved port is honoured exactly, whatever the default is")
+    func savedPortWinsOverDefault() throws {
+        for saved in [1337, 1347, 5001] {
+            var settings = AppSettings.default
+            settings.port = saved
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.port == saved)
+        }
+    }
+
     @Test("an empty JSON object decodes to every field's own default")
     func emptyObjectDecodesToDefaults() throws {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
@@ -66,5 +89,31 @@ struct AppSettingsTests {
         settings.tailscaleHTTPSEnabled = true
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
         #expect(decoded == settings)
+    }
+
+    @Test("the reading in the menu bar is off by default, absent from an older settings file, and survives a round trip")
+    func showReadingInMenuBar() throws {
+        #expect(AppSettings.default.showReadingInMenuBar == false)
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "setupFinished": true}"#.utf8))
+        #expect(older.showReadingInMenuBar == false)
+        #expect(older.port == 4000, "an older file keeps every other field")
+        var settings = AppSettings.default
+        settings.showReadingInMenuBar = true
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded.showReadingInMenuBar == true)
+    }
+
+    @Test("the chosen follower app defaults to xDrip4iOS, is absent from an older settings file, and survives a round trip")
+    func connectFollowerApp() throws {
+        #expect(AppSettings.default.connectFollowerApp == .xDrip4iOS)
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000}"#.utf8))
+        #expect(older.connectFollowerApp == .xDrip4iOS)
+        let unknown = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "connectFollowerApp": "someNewerApp"}"#.utf8))
+        #expect(unknown.connectFollowerApp == .xDrip4iOS)
+        #expect(unknown.port == 4000, "an unknown follower app keeps every other field")
+        var settings = AppSettings.default
+        settings.connectFollowerApp = .loopFollow
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded.connectFollowerApp == .loopFollow)
     }
 }

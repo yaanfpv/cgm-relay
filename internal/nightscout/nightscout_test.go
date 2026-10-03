@@ -4,9 +4,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/store"
 )
@@ -82,6 +84,61 @@ func TestUnimplementedPathReturns404BeforeAuth(t *testing.T) {
 				t.Errorf("status = %d, want %d (body: %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestRootPage checks the plain page at "/", which follower apps open when
+// someone taps a service status: it answers 200 with no credential, names
+// the relay, carries the hardening headers, and shows no reading, token,
+// account, address or version; while any other unregistered path, and any
+// method but GET, still gets no page.
+func TestRootPage(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	h, err := nightscout.New(&fakeStore{readings: []cgm.Reading{reading(now, 123)}}, testToken, fixedClock(now))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>CGM Relay</title>") || !strings.Contains(body, "access token") {
+		t.Errorf("page lacks its title or its explanation: %s", body)
+	}
+	for _, leak := range []string{testToken, "123", "mg/dl", "http", "version"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("page contains %q: %s", leak, body)
+		}
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", got)
+	}
+	for header, want := range map[string]string{
+		"X-Content-Type-Options":  "nosniff",
+		"X-Robots-Tag":            "noindex",
+		"Referrer-Policy":         "no-referrer",
+		"Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+	} {
+		if got := rec.Header().Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/index.html"},
+		{http.MethodGet, "/api"},
+		{http.MethodGet, "/api/v1/"},
+		{http.MethodPost, "/"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("%s %s answered 200, want no page", c.method, c.path)
+		}
 	}
 }
 
@@ -393,8 +450,9 @@ func TestAliasesAnswerAsTheirSibling(t *testing.T) {
 // row.wantStatus, and for a 200 row must actually serve JSON), with no
 // credential, and with a wrong one of the row's own form (both of the
 // latter two must get 401 with a plain-text body, never the JSON shape a
-// real reading would carry). A row whose wantStatus is 404 is
-// credential-independent by construction — this handler answers 404
+// real reading would carry, except on an open endpoint, which answers
+// them 200 exactly as it does the right one). A row whose wantStatus is
+// 404 is credential-independent by construction — this handler answers 404
 // before checkAuth ever runs (see TestUnimplementedPathReturns404BeforeAuth)
 // — so only the single request is checked, and row.note carries why that
 // app tolerates it.
@@ -433,6 +491,12 @@ func TestFollowerAppRequests(t *testing.T) {
 				t.Run(c.name, func(t *testing.T) {
 					rec := httptest.NewRecorder()
 					h.ServeHTTP(rec, row.request(c.secret))
+					if openEndpoints[row.path] {
+						if rec.Code != row.wantStatus {
+							t.Errorf("open endpoint: status = %d, want %d (body: %s)", rec.Code, row.wantStatus, rec.Body.String())
+						}
+						return
+					}
 					if rec.Code != http.StatusUnauthorized {
 						t.Errorf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnauthorized, rec.Body.String())
 					}

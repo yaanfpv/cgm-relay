@@ -5,6 +5,8 @@ package poller
 
 import (
 	"context"
+	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -12,7 +14,8 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/store"
 )
 
-// Interval is how often Run requests a fresh reading.
+// Interval is how often Run requests a fresh reading when nothing in the
+// readings themselves says to ask sooner or later.
 const Interval = time.Minute
 
 // PruneInterval is how often Run removes readings older than its
@@ -41,10 +44,12 @@ type Status struct {
 	// LastFetchTime is when Run last completed a fetch without error, or
 	// the zero Time if that has never happened.
 	LastFetchTime time.Time
-	// LastReadingTime and LastReadingMgDl describe the most recent reading
-	// Run has stored, or the zero Time and 0 if none has been stored yet.
-	LastReadingTime time.Time
-	LastReadingMgDl int
+	// LastReadingTime, LastReadingMgDl and LastReadingTrend describe the most
+	// recent reading Run has stored, or the zero Time, 0 and TrendUnknown if
+	// none has been stored yet.
+	LastReadingTime  time.Time
+	LastReadingMgDl  int
+	LastReadingTrend cgm.Trend
 	// SignInFailing is true while the source is rejecting the configured
 	// credentials.
 	SignInFailing bool
@@ -60,6 +65,7 @@ type Poller struct {
 	clock        Clock
 	retention    time.Duration
 	fetchTimeout time.Duration
+	logger       *log.Logger
 
 	mu     sync.Mutex
 	status Status
@@ -81,6 +87,12 @@ func WithFetchTimeout(d time.Duration) Option {
 	return func(p *Poller) { p.fetchTimeout = d }
 }
 
+// WithLogger sets where Run reports that readings have stopped arriving and
+// that they resumed. The default discards them.
+func WithLogger(l *log.Logger) Option {
+	return func(p *Poller) { p.logger = l }
+}
+
 // New returns a Poller that fetches from source once a minute, stores
 // results in st, and prunes readings older than retention once a day.
 // Callers pass their store's own documented default retention unless they
@@ -92,6 +104,7 @@ func New(source cgm.Source, st Store, retention time.Duration, opts ...Option) *
 		clock:        realClock{},
 		retention:    retention,
 		fetchTimeout: DefaultFetchTimeout,
+		logger:       log.New(io.Discard, "", 0),
 	}
 	for _, opt := range opts {
 		opt(p)

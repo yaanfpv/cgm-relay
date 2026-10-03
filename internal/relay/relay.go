@@ -20,6 +20,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/config"
 	"github.com/yaanfpv/cgm-relay/internal/librelinkup"
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
+	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 	"github.com/yaanfpv/cgm-relay/internal/store"
 )
@@ -124,7 +125,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 
 	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour
-	p := poller.New(source, db, retention)
+	p := poller.New(source, db, retention, poller.WithLogger(logger))
 
 	nsHandler, err := nightscout.New(db, cfg.Token, nil)
 	if err != nil {
@@ -132,13 +133,14 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 
 	tracker := newClientTracker()
-	nsServer, err := startServer(cfg.ListenAddr, trackClients(nsHandler, tracker, time.Now))
+	pairings := pairing.NewStore(nil)
+	nsServer, err := startServer(cfg.ListenAddr, withPairingPage(trackClients(nsHandler, tracker, time.Now), pairings, cfg.Token))
 	if err != nil {
 		return fmt.Errorf("relay: listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer nsServer.shutdown()
 
-	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker))
+	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings))
 	if err != nil {
 		return fmt.Errorf("relay: listen on %s: %w", cfg.StatusAddr, err)
 	}

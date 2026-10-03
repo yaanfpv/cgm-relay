@@ -6,38 +6,94 @@ import SwiftUI
 /// before the click, and runs only that command. Whether HTTPS is on, and
 /// which port it would use, come from what Tailscale itself reports, read
 /// again just before anything runs. Shown in setup and in Advanced from this
-/// one definition.
+/// one definition, as a status row with its notes beneath.
 struct TailscaleHTTPSControl: View {
     @ObservedObject var model: AppModel
+    /// Part is which piece of the control a caller draws: the titled row
+    /// (the state and its one action in the row's slot) inside a card, and
+    /// the notes (the command a click runs, a failure) beneath it.
+    enum Part {
+        case statusRow, notes
+    }
+
+    let part: Part
     @State private var isConfirmingTurnOff = false
 
     var body: some View {
-        stateView
-            .onAppear { model.clearTailscaleFailure() }
+        Group {
+            switch part {
+            case .statusRow: statusRowView
+            case .notes: notesView
+            }
+        }
+        .onAppear { model.clearTailscaleFailure() }
+    }
+
+    private static let title = "Tailscale HTTPS"
+    private static let offCaption = "A private address that works at home and away."
+
+    @ViewBuilder
+    private var statusRowView: some View {
+        switch model.httpsState {
+        case .unknown:
+            row("Checking Tailscale's settings.", .checking)
+        case .unavailable:
+            row("Connect Tailscale to change this.", .unavailable("Not available"))
+        case .unreadable:
+            row("Couldn't read Tailscale's settings.", .action("Check Again") { Task { await model.refreshTailscale() } })
+        case .noFreePort:
+            row("Every port CGM Relay can use is taken.", .unavailable("Not available"))
+        case .off(let port):
+            row(
+                model.settings.tailscaleHTTPSEnabled ? "Turned off in Tailscale. Turn it on again." : Self.offCaption,
+                model.isChangingTailscale
+                    ? .checking
+                    : .action("Use Tailscale HTTPS", style: .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
+            )
+        case .on(let port):
+            row(
+                port == 443 ? "Followers reach this Mac over https." : "Followers reach this Mac over https, port " + String(port) + ".",
+                model.isChangingTailscale
+                    ? .checking
+                    : .doneWithAction("On", actionLabel: "Turn Off…", accessibleName: "Turn Off Tailscale HTTPS") { isConfirmingTurnOff = true }
+            )
+            .confirmationDialog(
+                "Turn Off Tailscale HTTPS?",
+                isPresented: $isConfirmingTurnOff,
+                titleVisibility: .visible
+            ) {
+                Button("Turn Off", role: .destructive) {
+                    Task { await model.disableTailscaleHTTPS(shownPort: port) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Follower apps using the https address stop reading until you give them a new address. This runs: \(TailscaleServeCommand.disableHTTPS(httpsPort: port).displayText)")
+            }
+        }
     }
 
     @ViewBuilder
-    private var stateView: some View {
+    private var notesView: some View {
         switch model.httpsState {
-        case .unknown:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Checking Tailscale…")
-            }
-        case .unavailable:
-            note("Tailscale isn't running right now. Connect it to change Tailscale HTTPS.")
-        case .unreadable:
-            VStack(alignment: .leading, spacing: 8) {
-                note("Couldn't read Tailscale's settings right now.")
-                AccessibleButton("Check Again") { Task { await model.refreshTailscale() } }
-            }
+        case .unknown, .unavailable, .unreadable:
+            EmptyView()
         case .noFreePort:
             note("Tailscale already serves on every port CGM Relay can use (\(portList)), so it can't turn on HTTPS. Use one of the other ways below.")
         case .off(let port):
-            turnedOff(port: port)
-        case .on(let port):
-            turnedOn(port: port)
+            // A failure takes the command's place, so the step stays inside
+            // its window height.
+            if model.tailscaleFailure == nil {
+                commandLine(.enableHTTPS(proxyingToPort: model.settings.port, httpsPort: port))
+            } else {
+                failureLine
+            }
+        case .on:
+            failureLine
         }
+    }
+
+    private func row(_ caption: String, _ slot: SetupStatusRow.Slot) -> some View {
+        SetupStatusRow(name: "tailscale-https", title: Self.title, caption: caption, slot: slot)
     }
 
     private var portList: String {
@@ -49,55 +105,6 @@ struct TailscaleHTTPSControl: View {
         Text(text)
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(.secondary)
-    }
-
-    private func turnedOff(port: Int) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if model.settings.tailscaleHTTPSEnabled {
-                Text("Tailscale HTTPS is off right now.")
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack {
-                AccessibleButton("Use Tailscale HTTPS", style: .primary) {
-                    Task { await model.enableTailscaleHTTPS(shownPort: port) }
-                }
-                .disabled(model.isChangingTailscale)
-                if model.isChangingTailscale {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            commandLine(.enableHTTPS(proxyingToPort: model.settings.port, httpsPort: port))
-            failureLine
-        }
-    }
-
-    private func turnedOn(port: Int) -> some View {
-        let offCommand = TailscaleServeCommand.disableHTTPS(httpsPort: port)
-        return VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Tailscale HTTPS") {
-                Text(port == 443 ? "On" : "On, port " + String(port)).foregroundStyle(.secondary)
-            }
-            HStack {
-                AccessibleButton("Turn Off…") { isConfirmingTurnOff = true }
-                    .disabled(model.isChangingTailscale)
-                    .confirmationDialog(
-                        "Turn Off Tailscale HTTPS?",
-                        isPresented: $isConfirmingTurnOff,
-                        titleVisibility: .visible
-                    ) {
-                        Button("Turn Off", role: .destructive) {
-                            Task { await model.disableTailscaleHTTPS(shownPort: port) }
-                        }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("Follower apps using the https address stop reading until you give them a new address. This runs: \(offCommand.displayText)")
-                    }
-                if model.isChangingTailscale {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            failureLine
-        }
     }
 
     private func commandLine(_ command: TailscaleServeCommand) -> some View {

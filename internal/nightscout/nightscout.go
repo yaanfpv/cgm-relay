@@ -35,10 +35,24 @@ type handler struct {
 	mux          *http.ServeMux
 }
 
+// openPaths are the paths answered without a credential. Every other
+// registered path requires one (see ServeHTTP).
+var openPaths = map[string]bool{
+	"/":                   true,
+	"/api/v1/status.json": true,
+}
+
+// RequiresCredential reports whether a request the handler routes needs a
+// valid credential, so a caller wrapping the handler can tell a request
+// that proved itself from one that never had to.
+func RequiresCredential(r *http.Request) bool {
+	return !openPaths[r.URL.Path]
+}
+
 // New builds the Nightscout API handler. token authenticates every request
-// (see checkAuth) and must not be empty: a handler with no token would
-// serve readings to anyone who could reach it. clock may be nil, in which
-// case time.Now is used.
+// except those to openPaths (see checkAuth) and must not be empty: a
+// handler with no token would serve readings to anyone who could reach it.
+// clock may be nil, in which case time.Now is used.
 func New(readings ReadingRange, token string, clock Clock) (http.Handler, error) {
 	if readings == nil {
 		return nil, errors.New("nightscout: readings must not be nil")
@@ -62,7 +76,13 @@ func New(readings ReadingRange, token string, clock Clock) (http.Handler, error)
 }
 
 // registerRoutes wires every supported Nightscout endpoint to its handler.
+// Two answers (openPaths) are served without a credential, because a
+// follower app checks a service's status without one: status.json (it
+// reports only that the relay is up, its clock and its unit) and the plain
+// page at "/" that tapping the status opens. Everything else requires a
+// valid credential.
 func (h *handler) registerRoutes() {
+	h.mux.HandleFunc("GET /{$}", h.handleRoot)
 	h.mux.HandleFunc("GET /api/v1/entries/sgv.json", h.handleEntries)
 	h.mux.HandleFunc("GET /api/v1/entries.json", h.handleEntries)
 	h.mux.HandleFunc("GET /api/v1/entries/current.json", h.handleCurrent)
@@ -91,22 +111,23 @@ func (h *handler) registerRoutes() {
 // and later serve a gzip body to a client that never asked for one, or
 // vice versa, on any status code.
 //
-// After that, the request is routed, then authenticated before running
-// the matched endpoint. A path this handler does not implement is
-// answered with 404 before any credential is checked, matching a real
-// Nightscout server: some follower apps (e.g. Nightguard, probing
-// /api/v3/version to decide whether to fall back to this v1 subset)
-// treat any response other than 404 or 405 to an unimplemented path as a
-// fatal error, so answering an unknown path with 401 would break them
-// outright. Every implemented endpoint still requires a valid
-// credential; a request that fails checkAuth never reaches its handler.
+// After that, the request is routed, then, unless its path is one of
+// openPaths, authenticated before running the matched endpoint. A path
+// this handler does not implement is answered with 404 before any
+// credential is checked, matching a real Nightscout server: some follower
+// apps (e.g. Nightguard, probing /api/v3/version to decide whether to fall
+// back to this v1 subset) treat any response other than 404 or 405 to an
+// unimplemented path as a fatal error, so answering an unknown path with
+// 401 would break them outright. Every implemented endpoint except the
+// open ones still requires a valid credential; a request that fails
+// checkAuth never reaches its handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "Accept-Encoding")
 	if _, pattern := h.mux.Handler(r); pattern == "" {
 		http.NotFound(w, r)
 		return
 	}
-	if !h.checkAuth(r) {
+	if RequiresCredential(r) && !h.checkAuth(r) {
 		http.Error(w, "nightscout: missing or invalid credential", http.StatusUnauthorized)
 		return
 	}

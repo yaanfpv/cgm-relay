@@ -11,11 +11,12 @@ defaults:
   run:
     shell: bash
 
+# One job per check, each named for what it checks. The work lives in .github/checks, which is what
+# the local gate and a contributor run too.
 jobs:
-  test:
+  go-format:
+    name: Go formatting
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: 0
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,44 +28,29 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            while IFS= read -r f; do
-              echo "::error file=${f},title=gofmt::not gofmt-formatted; run gofmt -w ${f}"
-            done <<< "$unformatted"
-            exit 1
-          fi
+      - name: check formatting
+        run: bash .github/checks/go-format.sh
+
+  go-vet:
+    name: Go vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
 
       - name: vet
-        id: vet
-        run: go vet ./... 2>&1 | tee "$RUNNER_TEMP/vet.log"
+        run: bash .github/checks/go-vet.sh
 
-      - name: annotate vet failure
-        if: failure() && steps.vet.outcome == 'failure'
-        run: bash .github/annotate-go-output.sh vet "$RUNNER_TEMP/vet.log"
-
-      - name: test
-        id: test
-        env:
-          CGO_ENABLED: 1
-        run: go test -race -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/test.log"
-
-      - name: annotate test failure
-        if: failure() && steps.test.outcome == 'failure'
-        run: bash .github/annotate-go-output.sh test "$RUNNER_TEMP/test.log"
-
-      - name: build
-        id: build
-        run: go build ./... 2>&1 | tee "$RUNNER_TEMP/build.log"
-
-      - name: annotate build failure
-        if: failure() && steps.build.outcome == 'failure'
-        run: bash .github/annotate-go-output.sh build "$RUNNER_TEMP/build.log"
-
-  macos-app:
-    runs-on: macos-26
+  go-test:
+    name: Go tests
+    runs-on: ubuntu-latest
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,22 +61,67 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: test
+        run: bash .github/checks/go-test.sh
+
+  go-build:
+    name: Go build
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: build
+        run: bash .github/checks/go-build.sh
+
+  swift-test:
+    name: Swift tests
+    # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
+    runs-on: xcode-27
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - name: swift test
+        run: bash .github/checks/swift-test.sh
+
+  mac-app-build:
+    name: Mac app build
+    # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
+    runs-on: xcode-27
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version
 
       - name: install xcodegen
         run: brew install xcodegen
 
-      - name: swift test
-        id: swift-test
-        run: swift test --package-path macos/Packages/CGMRelayCore 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
-
-      - name: annotate swift test failure
-        if: failure() && steps.swift-test.outcome == 'failure'
-        run: bash .github/annotate-swift-output.sh "swift test" "$RUNNER_TEMP/swift-test.log"
-
       - name: build app (unsigned)
-        id: build-app
-        run: bash macos/scripts/build.sh CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$RUNNER_TEMP/build-app.log"
-
-      - name: annotate app build failure
-        if: failure() && steps.build-app.outcome == 'failure'
-        run: bash .github/annotate-swift-output.sh "build app" "$RUNNER_TEMP/build-app.log"
+        run: bash .github/checks/mac-app-build.sh

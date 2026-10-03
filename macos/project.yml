@@ -20,6 +20,9 @@ settings:
 packages:
   CGMRelayCore:
     path: Packages/CGMRelayCore
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
 
 targets:
   CGMRelay:
@@ -31,13 +34,22 @@ targets:
     settings:
       base:
         PRODUCT_NAME: "CGM Relay"
-        PRODUCT_BUNDLE_IDENTIFIER: com.yaanfpv.cgmrelay
         INFOPLIST_FILE: App/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: CGMRelay
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # The EdDSA public key that update archives are verified against.
+        # Empty until a release supplies it (SPARKLE_PUBLIC_ED_KEY=<key> on
+        # the build command); a build without one starts no updater.
+        SPARKLE_PUBLIC_ED_KEY: ""
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.yaanfpv.cgmrelay.debug
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.yaanfpv.cgmrelay
     dependencies:
       - package: CGMRelayCore
+      - package: Sparkle
     postCompileScripts:
       - name: "Embed CGM Relay Engine"
         script: |

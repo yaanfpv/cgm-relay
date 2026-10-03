@@ -1,8 +1,10 @@
 import Foundation
 
-/// StatusDot is the colour the menu bar shows at a glance: green for
-/// flowing readings, amber for a stale one, red for a stopped engine or a
-/// sign-in failure, grey while the account is not yet configured.
+/// StatusDot is the colour the panel shows at a glance: green for flowing
+/// readings; amber for a stale reading, or while the engine starts,
+/// connects or waits for its first reading; red for a stopped, restarting
+/// or failed engine, or a sign-in failure; grey while the account is not
+/// yet configured.
 public enum StatusDot: Sendable, Equatable {
     case green, amber, red, grey
 }
@@ -33,6 +35,9 @@ public struct MenuDisplayState: Sendable, Equatable {
     public var readingValue: String?
     public var readingUnit: String?
     public var readingAge: String?
+    /// readingTrendArrow is the arrow for the reading's trend, nil when the
+    /// reading has none or there is no reading.
+    public var readingTrendArrow: String?
     /// shortStatus is statusLine's own text for every state except the
     /// two whose full wording already restates the age that now sits
     /// beside it on the same secondary line ("Reading is current" /
@@ -58,6 +63,24 @@ public struct MenuDisplayState: Sendable, Equatable {
     /// except sign-in failing, where it carries the instruction.
     public var statusDetail: String?
 
+    /// hasProblem is true when the state is one a person should be told
+    /// about: every red state (stopped, restarting, failed, sign-in
+    /// failing) and every amber state with a reading on file (stale, or
+    /// starting again). Current readings, no reading yet and an account not
+    /// yet set up are not problems.
+    public var hasProblem: Bool {
+        switch dot {
+        case .red: return true
+        case .amber: return readingValue != nil
+        case .green, .grey: return false
+        }
+    }
+
+    /// showsStatusLine is whether the panel has a state to report: every
+    /// state except an account not yet set up, where the panel's own
+    /// "Finish setup…" says the same thing.
+    public var showsStatusLine: Bool { dot != .grey }
+
     /// freshWindow is how recent a reading has to be to still count as
     /// flowing (green) rather than stale (amber): five minutes.
     public static let freshWindow: TimeInterval = 5 * 60
@@ -70,6 +93,7 @@ public struct MenuDisplayState: Sendable, Equatable {
         readingValue: String? = nil,
         readingUnit: String? = nil,
         readingAge: String? = nil,
+        readingTrendArrow: String? = nil,
         shortStatus: String? = nil,
         statusAge: String? = nil,
         statusDetail: String? = nil
@@ -81,6 +105,7 @@ public struct MenuDisplayState: Sendable, Equatable {
         self.readingValue = readingValue
         self.readingUnit = readingUnit
         self.readingAge = readingAge
+        self.readingTrendArrow = readingTrendArrow
         // shortStatus defaults to statusLine itself so every existing
         // caller that never mentions it (in particular this type's own
         // tests, which predate the field) keeps the one status string it
@@ -133,6 +158,7 @@ public struct MenuDisplayState: Sendable, Equatable {
                 readingValue: reading.value,
                 readingUnit: reading.unit,
                 readingAge: reading.age,
+                readingTrendArrow: reading.trendArrow,
                 statusAge: agedReadingLine(reading.age)
             )
 
@@ -146,6 +172,7 @@ public struct MenuDisplayState: Sendable, Equatable {
                 readingValue: reading.value,
                 readingUnit: reading.unit,
                 readingAge: reading.age,
+                readingTrendArrow: reading.trendArrow,
                 statusAge: agedReadingLine(reading.age)
             )
 
@@ -159,6 +186,7 @@ public struct MenuDisplayState: Sendable, Equatable {
                 readingValue: reading.value,
                 readingUnit: reading.unit,
                 readingAge: reading.age,
+                readingTrendArrow: reading.trendArrow,
                 statusAge: agedReadingLine(reading.age)
             )
 
@@ -190,6 +218,7 @@ public struct MenuDisplayState: Sendable, Equatable {
                     readingValue: reading.value,
                     readingUnit: reading.unit,
                     readingAge: reading.age,
+                    readingTrendArrow: reading.trendArrow,
                     shortStatus: "Sign-in failing",
                     statusAge: agedReadingLine(reading.age),
                     statusDetail: "Check your LibreLinkUp email and password in Settings."
@@ -216,6 +245,7 @@ public struct MenuDisplayState: Sendable, Equatable {
                 readingValue: reading.value,
                 readingUnit: reading.unit,
                 readingAge: reading.age,
+                readingTrendArrow: reading.trendArrow,
                 shortStatus: isFresh ? "Current" : "Stale",
                 // The bare age, not agedReadingLine's "last reading …"
                 // prefix: shortStatus already names the reading as its
@@ -320,17 +350,24 @@ private struct ReadingText {
     let value: String?
     let unit: String?
     let age: String?
+    let trendArrow: String?
 
     static func make(for status: EngineStatus?, now: Date, units: GlucoseUnit) -> ReadingText {
         guard let status, let readingTime = status.lastReadingTime else {
-            return ReadingText(line: "No reading yet", value: nil, unit: nil, age: nil)
+            return ReadingText(line: "No reading yet", value: nil, unit: nil, age: nil, trendArrow: nil)
         }
         guard let mgDl = status.lastReadingMgDl else {
-            return ReadingText(line: "Reading unavailable", value: nil, unit: nil, age: nil)
+            return ReadingText(line: "Reading unavailable", value: nil, unit: nil, age: nil, trendArrow: nil)
         }
         let value = units.formatValue(mgDl: mgDl)
         let unit = units.label
         let age = MenuDisplayState.relativeAgeText(from: readingTime, to: now)
-        return ReadingText(line: "\(value) \(unit) (\(age))", value: value, unit: unit, age: age)
+        return ReadingText(
+            line: "\(value) \(unit) (\(age))",
+            value: value,
+            unit: unit,
+            age: age,
+            trendArrow: TrendArrow.symbol(forDirection: status.lastReadingTrend)
+        )
     }
 }

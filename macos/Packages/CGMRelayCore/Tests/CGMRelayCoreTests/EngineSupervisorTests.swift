@@ -325,4 +325,18 @@ struct EngineSupervisorTests {
         await clock.advance(by: .seconds(2))
         try await Task.sleep(for: .milliseconds(20))
     }
+
+    @Test("stopAndWait waits for the engine to exit and kills one that ignores the request", arguments: [(true, false), (false, true)])
+    func stopAndWaitEndsTheEngine(_ testCase: (exits: Bool, killed: Bool)) async throws {
+        let launcher = FakeProcessLauncher()
+        launcher.processesIgnoreTerminate = !testCase.exits
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+
+        await supervisor.stopAndWait(timeout: .seconds(1))
+
+        #expect(launcher.wasTerminated(at: 0))
+        #expect(launcher.wasKilled(at: 0) == testCase.killed)
+        #expect(await supervisor.state == .stopped)
+    }
 }

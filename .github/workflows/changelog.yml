@@ -1,0 +1,31 @@
+name: CI
+
+# Runs apart from ci.yml so adding or removing the `no changelog` label re-checks only this.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  changelog-entry:
+    name: Changelog entry
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no changelog') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: changelog entry
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/checks/changelog-entry.sh

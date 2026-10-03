@@ -64,6 +64,13 @@ public struct AppSettings: Equatable, Sendable {
     /// setupFinished is whether the person reached Done in first-launch
     /// setup. Setup is complete only together with a signed-in account.
     public var setupFinished: Bool
+    /// showReadingInMenuBar puts the latest reading and its trend arrow
+    /// beside the menu bar mark. Off by default: the mark alone says all is
+    /// well.
+    public var showReadingInMenuBar: Bool
+    /// connectFollowerApp is the follower app last chosen in the Connect
+    /// pane, so its QR code is the one shown the next time.
+    public var connectFollowerApp: FollowerApp
 
     /// effectiveReach is the reach the relay is actually bound to: this
     /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
@@ -74,7 +81,7 @@ public struct AppSettings: Equatable, Sendable {
         tailscaleHTTPSEnabled ? .thisMacOnly : reach
     }
 
-    public static let defaultPort = 1337
+    public static let defaultPort = RelayDefaults.followerPort
     public static let portRange = 1024...65535
     public static let defaultRetentionDays = 15
     public static let retentionDaysRange = 1...90
@@ -90,7 +97,9 @@ public struct AppSettings: Equatable, Sendable {
         noReadingAlertMinutes: defaultNoReadingAlertMinutes,
         signInFailingAlertEnabled: false,
         tailscaleHTTPSEnabled: false,
-        setupFinished: false
+        setupFinished: false,
+        showReadingInMenuBar: false,
+        connectFollowerApp: .xDrip4iOS
     )
 
     public init(
@@ -102,7 +111,9 @@ public struct AppSettings: Equatable, Sendable {
         noReadingAlertMinutes: Int,
         signInFailingAlertEnabled: Bool,
         tailscaleHTTPSEnabled: Bool = false,
-        setupFinished: Bool = false
+        setupFinished: Bool = false,
+        showReadingInMenuBar: Bool = false,
+        connectFollowerApp: FollowerApp = .xDrip4iOS
     ) {
         self.port = port
         self.reach = reach
@@ -113,6 +124,8 @@ public struct AppSettings: Equatable, Sendable {
         self.signInFailingAlertEnabled = signInFailingAlertEnabled
         self.tailscaleHTTPSEnabled = tailscaleHTTPSEnabled
         self.setupFinished = setupFinished
+        self.showReadingInMenuBar = showReadingInMenuBar
+        self.connectFollowerApp = connectFollowerApp
     }
 }
 
@@ -126,7 +139,7 @@ public struct AppSettings: Equatable, Sendable {
 extension AppSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
-        case tailscaleHTTPSEnabled, setupFinished
+        case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp
     }
 
     public init(from decoder: Decoder) throws {
@@ -141,6 +154,10 @@ extension AppSettings: Codable {
         signInFailingAlertEnabled = try container.decodeIfPresent(Bool.self, forKey: .signInFailingAlertEnabled) ?? fallback.signInFailingAlertEnabled
         tailscaleHTTPSEnabled = try container.decodeIfPresent(Bool.self, forKey: .tailscaleHTTPSEnabled) ?? fallback.tailscaleHTTPSEnabled
         setupFinished = try container.decodeIfPresent(Bool.self, forKey: .setupFinished) ?? fallback.setupFinished
+        showReadingInMenuBar = try container.decodeIfPresent(Bool.self, forKey: .showReadingInMenuBar) ?? fallback.showReadingInMenuBar
+        // A value this version does not know (a newer version's app) falls
+        // back to the default rather than failing the whole decode.
+        connectFollowerApp = ((try? container.decodeIfPresent(FollowerApp.self, forKey: .connectFollowerApp)) ?? nil) ?? fallback.connectFollowerApp
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -154,6 +171,8 @@ extension AppSettings: Codable {
         try container.encode(signInFailingAlertEnabled, forKey: .signInFailingAlertEnabled)
         try container.encode(tailscaleHTTPSEnabled, forKey: .tailscaleHTTPSEnabled)
         try container.encode(setupFinished, forKey: .setupFinished)
+        try container.encode(showReadingInMenuBar, forKey: .showReadingInMenuBar)
+        try container.encode(connectFollowerApp, forKey: .connectFollowerApp)
     }
 }
 
@@ -254,4 +273,18 @@ public enum RetentionCommitDecision: Sendable, Equatable {
     public static func decide(current: Int, new: Int) -> RetentionCommitDecision {
         new < current ? .needsConfirmation : .commitsImmediately
     }
+}
+
+/// RelayDefaults are the follower port and status address a build uses
+/// until a port is saved. A Debug build takes its own pair so a development
+/// run never contends with an installed copy for a listener; Release keeps
+/// the engine's own defaults.
+public enum RelayDefaults {
+    #if DEBUG
+    public static let followerPort = 1347
+    public static let statusAddr = "127.0.0.1:1348"
+    #else
+    public static let followerPort = 1337
+    public static let statusAddr = "127.0.0.1:1338"
+    #endif
 }

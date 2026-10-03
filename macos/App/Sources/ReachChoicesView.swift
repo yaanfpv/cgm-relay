@@ -3,12 +3,16 @@ import SwiftUI
 
 /// ReachChoicesView is the one definition of "who can reach the relay",
 /// shown in Advanced and in setup when Tailscale HTTPS is not an option:
-/// three choices, each with what it means, and the notes that go with them.
+/// the choices, each with what it means, and the notes that go with them.
+/// The section that holds it carries its title.
 struct ReachChoicesView: View {
     @ObservedObject var model: AppModel
-    /// showsTitle is false where a section header already says what these
-    /// choices are.
-    var showsTitle = true
+    /// offersThisMacOnly is false in setup, where every choice must be a way
+    /// for a phone to connect; Advanced offers all three.
+    var offersThisMacOnly = true
+    /// showsAvailabilityNotes is false where the surrounding screen already
+    /// says, once, why the person cannot go on.
+    var showsAvailabilityNotes = true
 
     /// isLocked is true while Tailscale HTTPS is set up: the relay then
     /// serves this Mac only and Tailscale does the reaching, so the choice
@@ -16,11 +20,10 @@ struct ReachChoicesView: View {
     private var isLocked: Bool { model.httpsLocked }
 
     var body: some View {
-        if showsTitle {
-            Text("Who can reach it")
-        }
         VStack(alignment: .leading, spacing: 2) {
-            reachRow(.thisMacOnly, title: "This Mac only", description: "Only apps on this Mac can connect.", disabled: isLocked)
+            if offersThisMacOnly {
+                reachRow(.thisMacOnly, title: "This Mac only", description: "Only apps on this Mac can connect.", disabled: isLocked)
+            }
             reachRow(.myTailnet, title: "My tailnet", description: "Any device on your tailnet can connect.", disabled: isLocked || !model.tailnetAvailable)
             reachRow(.myLocalNetwork, title: "My local network", description: "Any device on your Wi-Fi or wired network can connect.", disabled: isLocked)
         }
@@ -32,13 +35,13 @@ struct ReachChoicesView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            if !model.tailnetAvailable {
+            if showsAvailabilityNotes, !model.tailnetAvailable {
                 Text("My tailnet is unavailable: this Mac has no Tailscale address right now.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             if model.settings.reach == .myLocalNetwork {
-                if !model.localNetworkAvailable {
+                if showsAvailabilityNotes, !model.localNetworkAvailable {
                     Text("My local network is unavailable: this Mac has no network address right now.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -54,7 +57,7 @@ struct ReachChoicesView: View {
     /// a `Picker` styled `.radioGroup`: on this platform, a `.radioGroup`
     /// option whose content is more than a single plain `Text` (this one
     /// needs both a title and a description) is announced by the
-    /// Picker's own shared label ("Who can reach it") instead of its own.
+    /// Picker's own label instead of the option's.
     /// Each row is its own `Button` so it keeps a real tap target and a
     /// working `.accessibleRadioName` (AccessibleButtonName.swift),
     /// styled as a plain-system radio row: an outline or filled circle

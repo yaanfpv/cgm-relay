@@ -63,6 +63,25 @@ struct SettingsEngineConfigurationBuilderTests {
         #expect(config?.listenAddr == "100.101.102.5:1337")
     }
 
+    @Test("never-saved settings hand the engine the build's default pair")
+    func defaultSettingsReachTheEngineAsTheDefaultPair() throws {
+        let config = try SettingsEngineConfigurationBuilder.build(
+            settings: .default,
+            from: Self.store(),
+            interfaces: [],
+            statusAddr: RelayDefaults.statusAddr,
+            databasePath: "/tmp/readings.db"
+        )
+
+        #if DEBUG
+        #expect(config?.listenAddr == "127.0.0.1:1347")
+        #expect(config?.statusAddr == "127.0.0.1:1348")
+        #else
+        #expect(config?.listenAddr == "127.0.0.1:1337")
+        #expect(config?.statusAddr == "127.0.0.1:1338")
+        #endif
+    }
+
     @Test("retentionDays reaches the engine's retention_days")
     func retentionDaysReachesRetentionDays() throws {
         var settings = AppSettings.default

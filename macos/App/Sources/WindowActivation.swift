@@ -32,29 +32,45 @@ enum WindowActivation {
 }
 
 extension WindowActivation {
-    /// returnToMenuBarOnlyIfNoWindowsRemain is what each window of this app
-    /// does when it closes: the Dock icon goes only once neither Settings
+    /// returnToMenuBarOnlyIfNoWindowsRemain is what the app does whenever a
+    /// window closes: the Dock icon goes only once neither Settings
     /// nor setup is left on screen (or minimized), so closing one never
     /// strands the other. Checked one turn later, when the closing window
     /// has left the screen.
     @MainActor
     static func returnToMenuBarOnlyIfNoWindowsRemain() {
         DispatchQueue.main.async {
-            let windowRemains = NSApp.windows.contains { window in
-                (window.isVisible || window.isMiniaturized)
-                    && window.styleMask.contains(.titled)
-                    && !(window is NSPanel)
-            }
-            if !windowRemains {
+            if appWindows.isEmpty {
                 NSApp.setActivationPolicy(.accessory)
             }
+        }
+    }
+
+    /// closeAppWindows closes Settings and setup, which returns the app to
+    /// the menu bar.
+    @MainActor
+    static func closeAppWindows() {
+        for window in appWindows {
+            window.close()
+        }
+        returnToMenuBarOnlyIfNoWindowsRemain()
+    }
+
+    /// appWindows are the windows a person can see or has minimized: the
+    /// menu panel, the status item and the app's hidden window are not.
+    @MainActor
+    private static var appWindows: [NSWindow] {
+        NSApp.windows.filter { window in
+            (window.isVisible || window.isMiniaturized)
+                && window.styleMask.contains(.titled)
+                && !(window is NSPanel)
         }
     }
 }
 
 /// SetupPresenter opens setup once when the model asks for it after a
-/// launch that found setup incomplete. It rides on the menu bar item's own
-/// label, the one view that exists from launch.
+/// launch that found setup incomplete. It rides on SceneBridgeView, the one
+/// view that exists from launch.
 struct SetupPresenter: ViewModifier {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow

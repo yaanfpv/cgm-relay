@@ -27,10 +27,7 @@ extension View {
     /// accessibleImageName gives a purely informational image inside an
     /// ordinary window (a QR code, a diagram) a real accessible name,
     /// through the same native-view substitution AccessibleActionName uses
-    /// for a control's name. A menu bar status item's own image does not
-    /// pick up this substitution at all -- it reads its name from the
-    /// underlying NSImage's own accessibilityDescription instead (see
-    /// StatusDotView.swift's MenuBarLabel).
+    /// for a control's name.
     func accessibleImageName(_ label: String) -> some View {
         accessibilityRepresentation {
             AccessibleImageName(label: label)

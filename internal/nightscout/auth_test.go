@@ -24,9 +24,11 @@ func sha1Hex(s string) string {
 }
 
 // nightscoutEndpoints is every route the handler registers. Every one of
-// them must refuse without a valid credential, so the auth tests below
-// run this exact list rather than a sample of it.
+// them must refuse without a valid credential except the ones in
+// openEndpoints, so the auth tests below run this exact list rather than a
+// sample of it.
 var nightscoutEndpoints = []string{
+	"/",
 	"/api/v1/entries/sgv.json",
 	"/api/v1/entries.json",
 	"/api/v1/entries/current.json",
@@ -40,14 +42,27 @@ var nightscoutEndpoints = []string{
 	"/api/v1/profiles.json",
 }
 
-// TestEveryEndpointRequiresAuth checks, across every registered endpoint,
-// that no credential and a wrong credential in either accepted form both
-// get 401, and that the token query parameter and the api-secret header
+// openEndpoints are the only routes answered without a credential: the
+// service-status check follower apps run without one, and the plain page
+// opened from it.
+var openEndpoints = map[string]bool{
+	"/":                   true,
+	"/api/v1/status.json": true,
+}
+
+// TestEveryEndpointRequiresAuth checks, across every registered endpoint
+// other than the open ones, that no credential and a wrong credential in
+// either accepted form both get 401, that the open ones answer 200 with
+// either, and that the token query parameter and the api-secret header
 // each independently let a request through when correct.
 func TestEveryEndpointRequiresAuth(t *testing.T) {
 	t.Parallel()
 	for _, path := range nightscoutEndpoints {
 		t.Run(path, func(t *testing.T) {
+			refused := http.StatusUnauthorized
+			if openEndpoints[path] {
+				refused = http.StatusOK
+			}
 			h, err := nightscout.New(&fakeStore{}, testToken, nil)
 			if err != nil {
 				t.Fatalf("New: %v", err)
@@ -58,23 +73,53 @@ func TestEveryEndpointRequiresAuth(t *testing.T) {
 				configure  func(r *http.Request)
 				wantStatus int
 			}{
-				{"no credential", func(r *http.Request) {}, http.StatusUnauthorized},
+				{"no credential", func(r *http.Request) {}, refused},
 				{"wrong token query param", func(r *http.Request) {
 					q := r.URL.Query()
 					q.Set("token", "wrong-token")
 					r.URL.RawQuery = q.Encode()
-				}, http.StatusUnauthorized},
+				}, refused},
 				{"wrong api-secret header (wrong hash)", func(r *http.Request) {
 					r.Header.Set("api-secret", wrongTokenSHA1Hex)
-				}, http.StatusUnauthorized},
+				}, refused},
 				{"wrong api-secret header (wrong raw token)", func(r *http.Request) {
 					r.Header.Set("api-secret", "wrong-token")
-				}, http.StatusUnauthorized},
+				}, refused},
 				{"empty token query param", func(r *http.Request) {
 					q := r.URL.Query()
 					q.Set("token", "")
 					r.URL.RawQuery = q.Encode()
-				}, http.StatusUnauthorized},
+				}, refused},
+				{"token query param with a trailing space", func(r *http.Request) {
+					r.URL.RawQuery = "token=" + testToken + "%20"
+				}, http.StatusOK},
+				{"token query param with a trailing newline", func(r *http.Request) {
+					r.URL.RawQuery = "token=" + testToken + "%0A"
+				}, http.StatusOK},
+				{"token query param with a leading newline and a trailing CRLF", func(r *http.Request) {
+					r.URL.RawQuery = "token=%0A" + testToken + "%0D%0A"
+				}, http.StatusOK},
+				{"token query param with a tab and a plus-encoded space", func(r *http.Request) {
+					r.URL.RawQuery = "token=%09" + testToken + "+"
+				}, http.StatusOK},
+				{"wrong token with trailing whitespace", func(r *http.Request) {
+					r.URL.RawQuery = "token=wrong-token%20"
+				}, refused},
+				{"token with whitespace inside", func(r *http.Request) {
+					r.URL.RawQuery = "token=correct%20-token"
+				}, refused},
+				{"whitespace only token", func(r *http.Request) {
+					r.URL.RawQuery = "token=%20%0A"
+				}, refused},
+				{"right api-secret header with surrounding whitespace, SHA-1 hex", func(r *http.Request) {
+					r.Header.Set("api-secret", " "+sha1Hex(testToken)+"\t")
+				}, http.StatusOK},
+				{"right api-secret header with a trailing newline, raw token", func(r *http.Request) {
+					r.Header.Set("api-secret", testToken+"\n")
+				}, http.StatusOK},
+				{"wrong api-secret header with trailing whitespace", func(r *http.Request) {
+					r.Header.Set("api-secret", "wrong-token ")
+				}, refused},
 				{"right token query param", func(r *http.Request) {
 					q := r.URL.Query()
 					q.Set("token", testToken)

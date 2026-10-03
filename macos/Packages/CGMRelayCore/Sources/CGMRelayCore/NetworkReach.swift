@@ -126,6 +126,56 @@ public enum ConnectPaneAddressState: Sendable, Equatable {
     }
 }
 
+/// SetupCompletion decides whether setup may be marked finished: only when a
+/// phone can reach this Mac. Closing setup without that never finishes it.
+public enum SetupCompletion {
+    public static func mayFinish(reachability: PhoneReachability) -> Bool {
+        reachability.isReachable
+    }
+}
+
+/// PhoneReachability is whether a phone can be given an address for this
+/// Mac at all, by the choices made so far. Setup's reach step continues
+/// only on `.reachable`, and the connect step is shown only then; a
+/// `.blocked` reason is one plain sentence naming what is missing.
+public enum PhoneReachability: Sendable, Equatable {
+    case reachable
+    case blocked(reason: String)
+
+    public var isReachable: Bool { self == .reachable }
+
+    /// decide is the one pure answer: Tailscale HTTPS reaches a phone only
+    /// while Tailscale itself reports it serving (httpsServing); otherwise
+    /// only My tailnet or My local network with an address right now do.
+    /// This Mac only never does. httpsChosen is the saved Tailscale HTTPS
+    /// choice, so a choice Tailscale no longer backs is blocked rather than
+    /// treated as reachable.
+    public static func decide(
+        reach: NetworkReach,
+        httpsChosen: Bool,
+        httpsServing: Bool,
+        tailnetAvailable: Bool,
+        localNetworkAvailable: Bool
+    ) -> PhoneReachability {
+        if httpsServing { return .reachable }
+        if httpsChosen {
+            return .blocked(reason: "Tailscale HTTPS isn't serving right now. Connect Tailscale, or set up later.")
+        }
+        switch reach {
+        case .thisMacOnly:
+            return .blocked(reason: "Choose a way for your phone to reach this Mac to continue.")
+        case .myTailnet:
+            return tailnetAvailable
+                ? .reachable
+                : .blocked(reason: "This Mac has no Tailscale address right now. Connect Tailscale, or choose another way.")
+        case .myLocalNetwork:
+            return localNetworkAvailable
+                ? .reachable
+                : .blocked(reason: "This Mac has no network address right now. Connect to a network, or set up later.")
+        }
+    }
+}
+
 /// ReachAddressResolver computes the two addresses NetworkReach's choice
 /// actually implies: the host the engine should bind to (bindHost), and
 /// the host a follower app should be given (displayHost). The two differ

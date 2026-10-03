@@ -18,6 +18,10 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
     /// field's zero value, since the engine's own `omitempty` tag cannot
     /// tell those two cases apart on the wire.
     public var lastReadingMgDl: Int?
+    /// lastReadingTrend is the Nightscout direction name of the last
+    /// reading ("Flat", "FortyFiveUp", ...); nil when the device computed
+    /// none or the engine is older than the field.
+    public var lastReadingTrend: String?
     public var signInFailing: Bool
     public var lastError: String?
     /// clients maps each follower app's User-Agent to the last time it
@@ -29,6 +33,7 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         case lastFetchTime = "last_fetch_time"
         case lastReadingTime = "last_reading_time"
         case lastReadingMgDl = "last_reading_mg_dl"
+        case lastReadingTrend = "last_reading_trend"
         case signInFailing = "sign_in_failing"
         case lastError = "last_error"
         case clients
@@ -39,6 +44,7 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         lastFetchTime: Date? = nil,
         lastReadingTime: Date? = nil,
         lastReadingMgDl: Int? = nil,
+        lastReadingTrend: String? = nil,
         signInFailing: Bool = false,
         lastError: String? = nil,
         clients: [String: Date]? = nil
@@ -47,6 +53,7 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         self.lastFetchTime = lastFetchTime
         self.lastReadingTime = lastReadingTime
         self.lastReadingMgDl = lastReadingMgDl
+        self.lastReadingTrend = lastReadingTrend
         self.signInFailing = signInFailing
         self.lastError = lastError
         self.clients = clients
