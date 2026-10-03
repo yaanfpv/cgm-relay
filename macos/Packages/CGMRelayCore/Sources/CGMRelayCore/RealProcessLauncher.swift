@@ -42,9 +42,15 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
 /// lifeline: the engine watches it for EOF, so this app's own end --
 /// crash, force quit, or an ordinary stop -- reaches the engine even with
 /// no signal delivered at all, since the OS closes every pipe a dead
-/// process still held open.
+/// process still held open. The engine's stderr, where it writes its log
+/// lines, is read line by line and handed to engineLog, by default the
+/// system log (subsystem com.yaanfpv.cgmrelay, category engine).
 public struct RealProcessLauncher: ProcessLauncher {
-    public init() {}
+    private let engineLog: EngineLogSink
+
+    public init(engineLog: @escaping EngineLogSink = EngineLogForwarder.unifiedLog) {
+        self.engineLog = engineLog
+    }
 
     public func launch(
         executableURL: URL,
@@ -59,6 +65,8 @@ public struct RealProcessLauncher: ProcessLauncher {
 
         let inputPipe = Pipe()
         process.standardInput = inputPipe
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
         disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
         process.terminationHandler = { finished in
             // terminationStatus is the SIGNAL number, not an exit code,
@@ -74,6 +82,11 @@ public struct RealProcessLauncher: ProcessLauncher {
         }
 
         try process.run()
+
+        // This end must close here, or the forwarder never sees EOF once
+        // the engine exits, since the parent would still hold a writer.
+        try? errorPipe.fileHandleForWriting.close()
+        EngineLogForwarder.forward(from: errorPipe.fileHandleForReading, to: engineLog)
 
         // The write happens off the calling thread so a stalled or slow
         // child (never expected for a small JSON handshake, but not ruled

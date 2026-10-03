@@ -87,4 +87,72 @@ struct RealProcessLauncherTests {
         let got = try await exitCode(forShellCommand: testCase.shellCommand)
         #expect(got == 0, "\(testCase.label): shell command \"\(testCase.shellCommand)\" exited \(got)")
     }
+
+    /// LineCollector gathers the lines the launcher forwards.
+    private final class LineCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String] = []
+        var lines: [String] { lock.withLock { stored } }
+        func add(_ line: String) { lock.withLock { stored.append(line) } }
+    }
+
+    /// forwardedLines runs shellCommand through a launcher whose log sink is
+    /// a collector, waits for the child to exit and its stderr to drain,
+    /// and returns every line forwarded.
+    private func forwardedLines(forShellCommand shellCommand: String, standardInputData: Data = Data()) async throws -> [String] {
+        let collector = LineCollector()
+        let launcher = RealProcessLauncher(engineLog: { collector.add($0) })
+        _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int32, Error>) in
+            do {
+                _ = try launcher.launch(
+                    executableURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: ["-c", shellCommand],
+                    standardInputData: standardInputData
+                ) { continuation.resume(returning: $0) }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+        // The exit callback can precede the last stderr read by a moment.
+        for _ in 0..<200 where collector.lines.count < 3 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        return collector.lines
+    }
+
+    @Test("every complete line the engine writes to stderr is forwarded whole, with CRLF stripped and an unterminated last line kept")
+    func engineStderrLinesAreForwardedWhole() async throws {
+        let got = try await forwardedLines(
+            forShellCommand: "printf 'poller: first\\n' >&2; printf 'poller: second\\r\\n\\n' >&2; printf 'poller: no newline' >&2"
+        )
+
+        #expect(got == ["poller: first", "poller: second", "poller: no newline"])
+    }
+
+    @Test("a line the engine writes is forwarded while the engine is still running, not when it exits")
+    func lineArrivesWhileEngineStillRuns() async throws {
+        let collector = LineCollector()
+        let launcher = RealProcessLauncher(engineLog: { collector.add($0) })
+        let process = try launcher.launch(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "printf 'poller: alive\\n' >&2; exec sleep 30"],
+            standardInputData: Data()
+        ) { _ in }
+        defer { process.terminate() }
+
+        for _ in 0..<120 where collector.lines.isEmpty {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(collector.lines == ["poller: alive"])
+    }
+
+    @Test("a line longer than the bound is cut to it, and the lines after it still arrive")
+    func overlongLineIsBounded() async throws {
+        let got = try await forwardedLines(
+            forShellCommand: "head -c 20000 /dev/zero | tr '\\0' 'x' >&2; printf '\\npoller: after\\npoller: last\\n' >&2"
+        )
+        #expect(got.count == 3)
+        #expect(got.first?.utf8.count == EngineLineSplitter.maxLineBytes)
+        #expect(Array(got.dropFirst()) == ["poller: after", "poller: last"])
+    }
 }

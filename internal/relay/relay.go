@@ -125,7 +125,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 
 	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour
-	p := poller.New(source, db, retention)
+	p := poller.New(source, db, retention, poller.WithLogger(logger))
 
 	nsHandler, err := nightscout.New(db, cfg.Token, nil)
 	if err != nil {
