@@ -92,59 +92,69 @@ struct EngineConfigurationBuilderTests {
         #expect(config == nil)
     }
 
-    @Test("passes the launch's status secret through into the stdin JSON, and omits the field without one")
+    @Test("withStatusSecret sets the stdin JSON's status_secret and leaves every other field alone, and no secret omits the field")
     func carriesStatusSecretIntoStandardInput() throws {
-        let store = FakeCredentialStore(values: [
-            .librelinkupEmail: "person@example.invalid",
-            .librelinkupPassword: "not-a-real-password",
-            .token: "a-token",
-            .storeKey: "a-key",
-        ])
+        let base = EngineConfiguration.fixture()
 
-        let withSecret = try EngineConfigurationBuilder.build(
-            from: store,
-            listenAddr: "127.0.0.1:1337",
-            statusAddr: "127.0.0.1:1338",
-            databasePath: "/tmp/readings.db",
-            retentionDays: 15,
-            statusSecret: "a-launch-secret"
-        )
-        let sentData = try #require(withSecret).encodedForStandardInput()
-        let sent = try #require(JSONSerialization.jsonObject(with: sentData) as? [String: Any])
-        #expect(sent["status_secret"] as? String == "a-launch-secret")
+        let withSecret = base.withStatusSecret("a-process-secret")
+        let sent = try #require(JSONSerialization.jsonObject(with: withSecret.encodedForStandardInput()) as? [String: Any])
+        #expect(sent["status_secret"] as? String == "a-process-secret")
+        #expect(withSecret.withStatusSecret(nil) == base)
 
-        let withoutSecret = try EngineConfigurationBuilder.build(
-            from: store,
-            listenAddr: "127.0.0.1:1337",
-            statusAddr: "127.0.0.1:1338",
-            databasePath: "/tmp/readings.db",
-            retentionDays: 15
-        )
-        let unsentData = try #require(withoutSecret).encodedForStandardInput()
-        let unsent = try #require(JSONSerialization.jsonObject(with: unsentData) as? [String: Any])
+        let unsent = try #require(JSONSerialization.jsonObject(with: base.encodedForStandardInput()) as? [String: Any])
         #expect(unsent["status_secret"] == nil)
     }
 
-    @Test("each renewal makes a new 32-byte URL-safe secret and replaces the last, and a failed one leaves none")
-    func renewMakesAFreshSecret() throws {
+    @Test("each renewal makes a new 32-byte URL-safe secret that stays unusable until armed, arming ignores any other value, and clear forgets it")
+    func secretLifecycle() throws {
         let secret = LocalStatusSecret(randomBytes: FakeRandomBytesGenerator())
-        #expect(secret.current == nil)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:1/status")!)
+        #expect(!secret.isArmed)
+        #expect(!secret.authorize(&request))
 
         let first = try secret.renew()
-        #expect(secret.current == first)
         #expect(Data(base64Encoded: first.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/") + "=")?.count == 32)
+        #expect(!secret.isArmed)
+        #expect(!secret.authorize(&request))
+        #expect(request.value(forHTTPHeaderField: LocalStatusSecret.headerName) == nil, "a pending secret is never presented")
+
+        secret.arm("not-the-pending-secret")
+        #expect(!secret.isArmed, "a stale arm from an older engine process is ignored")
+
+        secret.arm(first)
+        #expect(secret.authorize(&request))
+        #expect(request.value(forHTTPHeaderField: LocalStatusSecret.headerName) == first)
 
         let real = LocalStatusSecret()
         let a = try real.renew()
+        real.arm(a)
         let b = try real.renew()
         #expect(a != b)
-        #expect(real.current == b)
+        #expect(!real.isArmed, "a renewal discards the armed secret")
+        real.arm(a)
+        #expect(!real.isArmed, "the replaced secret can never be armed again")
 
-        struct Failing: RandomBytesGenerating {
-            func randomBytes(count: Int) throws -> Data { throw RandomBytesError.generationFailed(-1) }
+        secret.clear()
+        #expect(!secret.isArmed)
+        var cleared = URLRequest(url: request.url!)
+        #expect(!secret.authorize(&cleared))
+    }
+
+    @Test("a failed renewal leaves no secret")
+    func failedRenewalLeavesNone() throws {
+        final class FailsOnSecondCall: RandomBytesGenerating, @unchecked Sendable {
+            private var calls = 0
+            func randomBytes(count: Int) throws -> Data {
+                calls += 1
+                if calls > 1 { throw RandomBytesError.generationFailed(-1) }
+                return Data(repeating: 1, count: count)
+            }
         }
-        let failing = LocalStatusSecret(randomBytes: Failing())
-        #expect(throws: RandomBytesError.self) { try failing.renew() }
-        #expect(failing.current == nil)
+        let secret = LocalStatusSecret(randomBytes: FailsOnSecondCall())
+        secret.arm(try secret.renew())
+        #expect(secret.isArmed)
+
+        #expect(throws: RandomBytesError.self) { try secret.renew() }
+        #expect(!secret.isArmed)
     }
 }

@@ -30,9 +30,10 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
     /// itself refuses anything but https, or plain http to a loopback
     /// address, at load time.
     public var librelinkupBaseURL: String?
-    /// statusSecret is this launch's LocalStatusSecret value, which the
-    /// engine requires of every caller of its local status listener. nil
-    /// leaves the engine without one, so it refuses to mint pairing codes.
+    /// statusSecret is the LocalStatusSecret value of the engine process
+    /// this configuration is written to, which the engine requires of every
+    /// caller of its local status listener. nil leaves the engine without
+    /// one, so it refuses to mint pairing codes.
     public var statusSecret: String?
 
     private enum CodingKeys: String, CodingKey {
@@ -72,6 +73,14 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         self.statusSecret = statusSecret
     }
 
+    /// withStatusSecret returns this configuration carrying secret as its
+    /// status secret, so every engine process can be given its own.
+    public func withStatusSecret(_ secret: String?) -> EngineConfiguration {
+        var copy = self
+        copy.statusSecret = secret
+        return copy
+    }
+
     /// encodedForStandardInput renders the configuration as the single
     /// JSON value the engine expects on stdin.
     public func encodedForStandardInput() throws -> Data {
@@ -92,8 +101,7 @@ public enum EngineConfigurationBuilder {
         statusAddr: String,
         databasePath: String,
         retentionDays: Int,
-        librelinkupBaseURL: String? = nil,
-        statusSecret: String? = nil
+        librelinkupBaseURL: String? = nil
     ) throws -> EngineConfiguration? {
         guard
             let email = try store.string(for: .librelinkupEmail), !email.isEmpty,
@@ -112,8 +120,7 @@ public enum EngineConfigurationBuilder {
             databasePath: databasePath,
             retentionDays: retentionDays,
             key: key,
-            librelinkupBaseURL: librelinkupBaseURL,
-            statusSecret: statusSecret
+            librelinkupBaseURL: librelinkupBaseURL
         )
     }
 }

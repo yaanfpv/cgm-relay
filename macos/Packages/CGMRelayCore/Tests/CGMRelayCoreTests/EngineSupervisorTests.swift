@@ -339,4 +339,99 @@ struct EngineSupervisorTests {
         #expect(launcher.wasKilled(at: 0) == testCase.killed)
         #expect(await supervisor.state == .stopped)
     }
+
+    /// armedSecret is the secret a request would carry right now, nil while
+    /// none is armed.
+    private func armedSecret(_ secret: LocalStatusSecret) -> String? {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:1/status")!)
+        guard secret.authorize(&request) else { return nil }
+        return request.value(forHTTPHeaderField: LocalStatusSecret.headerName)
+    }
+
+    private func stdinSecret(_ launcher: FakeProcessLauncher, launch index: Int) throws -> String {
+        let decoded = try JSONDecoder().decode(EngineConfiguration.self, from: launcher.launchRecords()[index].standardInputData)
+        return try #require(decoded.statusSecret)
+    }
+
+    @Test("every spawn, a crash restart included, gets its own status secret, armed only when that process reports ready")
+    func eachSpawnGetsItsOwnSecretArmedOnReady() async throws {
+        let secret = LocalStatusSecret(randomBytes: CountingRandomBytesGenerator())
+        let launcher = FakeProcessLauncher()
+        let clock = FakeVirtualClock()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock, statusSecret: secret)
+
+        await supervisor.start(configuration: .fixture())
+        let first = try stdinSecret(launcher, launch: 0)
+        #expect(!secret.isArmed, "a launched engine has not proved it owns the port yet")
+
+        launcher.reportReady(at: 0)
+        #expect(await waitUntil { secret.isArmed })
+        #expect(armedSecret(secret) == first)
+
+        launcher.finishLaunch(at: 0, exitCode: 1)
+        #expect(await waitUntil { await clock.sleepRequests.count == 1 })
+        #expect(!secret.isArmed, "an exited engine's secret must not be presented to whatever takes its port")
+
+        await clock.advance(by: .seconds(2))
+        #expect(await waitUntil { launcher.launchCount == 2 })
+        let second = try stdinSecret(launcher, launch: 1)
+        #expect(second != first, "a restarted engine must not reuse the previous process's secret")
+        #expect(!secret.isArmed)
+
+        launcher.reportReady(at: 1)
+        #expect(await waitUntil { secret.isArmed })
+        #expect(armedSecret(secret) == second)
+    }
+
+    @Test("a ready report from a superseded process arms nothing")
+    func staleReadyArmsNothing() async throws {
+        let secret = LocalStatusSecret(randomBytes: CountingRandomBytesGenerator())
+        let launcher = FakeProcessLauncher()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock(), statusSecret: secret)
+
+        await supervisor.start(configuration: .fixture())
+        await supervisor.stop()
+        launcher.reportReady(at: 0)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!secret.isArmed, "a ready from a stopped run")
+
+        await supervisor.start(configuration: .fixture())
+        launcher.reportReady(at: 0)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!secret.isArmed, "a ready from an earlier run, while a newer one is still pending")
+
+        launcher.reportReady(at: 1)
+        #expect(await waitUntil { secret.isArmed })
+        #expect(armedSecret(secret) == (try stdinSecret(launcher, launch: 1)))
+    }
+
+    @Test("an exit or a stop clears an armed secret", arguments: ["exit", "stop"])
+    func endingTheEngineClearsTheSecret(_ how: String) async throws {
+        let secret = LocalStatusSecret(randomBytes: CountingRandomBytesGenerator())
+        let launcher = FakeProcessLauncher()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock(), statusSecret: secret)
+        await supervisor.start(configuration: .fixture())
+        launcher.reportReady(at: 0)
+        #expect(await waitUntil { secret.isArmed })
+
+        if how == "exit" {
+            launcher.finishLaunch(at: 0, exitCode: EngineSupervisor.storeDamagedExitCode)
+        } else {
+            await supervisor.stop()
+        }
+
+        #expect(await waitUntil { !secret.isArmed })
+    }
+
+    @Test("fail clears whatever secret is held")
+    func failClearsTheSecret() async throws {
+        let secret = LocalStatusSecret(randomBytes: CountingRandomBytesGenerator())
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: FakeProcessLauncher(), clock: FakeVirtualClock(), statusSecret: secret)
+        secret.arm(try secret.renew())
+        #expect(secret.isArmed)
+
+        await supervisor.fail(.configurationUnreadable)
+
+        #expect(!secret.isArmed)
+    }
 }

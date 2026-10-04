@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,6 +144,81 @@ func TestConfigStdinLifelineShutsDownRelay(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("relay.Run did not return within 5s of the stdin pipe closing")
+	}
+}
+
+// lockedBuffer is a writer the relay's ready callback can write to while the
+// test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestServeReadyLine proves --config-stdin writes exactly one "ready" line
+// to stdout, only once both listeners are bound, and that a plain serve
+// writes nothing to stdout at all.
+func TestServeReadyLine(t *testing.T) {
+	t.Parallel()
+	if opts := serveReadyOptions(false, io.Discard); len(opts) != 0 {
+		t.Fatalf("plain serve got %d ready options, want none: its stdout stays empty", len(opts))
+	}
+
+	fake := llufake.New(t)
+	fake.SetGraph(&llufake.Measurement{
+		FactoryTimestamp: time.Now().UTC().Format("1/2/2006 3:04:05 PM"),
+		ValueInMgPerDl:   133,
+		TrendArrow:       3,
+	}, nil)
+	cfg := config.Config{
+		LibreLinkUpEmail:    "person@example.test",
+		LibreLinkUpPassword: "leak-check-password-should-never-log",
+		Token:               "leak-check-token-should-never-log",
+		ListenAddr:          "127.0.0.1:0",
+		StatusAddr:          "127.0.0.1:0",
+		DatabasePath:        filepath.Join(t.TempDir(), "readings.db"),
+		RetentionDays:       15,
+		Key:                 bytes.Repeat([]byte{'Y'}, 32),
+	}
+	source := librelinkup.New(cfg.LibreLinkUpEmail, cfg.LibreLinkUpPassword, librelinkup.WithBaseURL(fake.URL))
+
+	var stdout lockedBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opts := append(serveReadyOptions(true, &stdout), relay.WithSource(source), relay.WithLogOutput(io.Discard))
+	runErr := make(chan error, 1)
+	go func() { runErr <- relay.Run(ctx, cfg, opts...) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for stdout.String() == "" {
+		select {
+		case err := <-runErr:
+			t.Fatalf("relay.Run returned before writing the ready line: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no ready line within 5s of starting")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("relay.Run returned %v, want context.Canceled", err)
+	}
+	if got := stdout.String(); got != "ready\n" {
+		t.Errorf("stdout = %q, want exactly one ready line", got)
 	}
 }
 

@@ -118,8 +118,8 @@ struct StatusPollerTests {
         #expect(fetcher.callCount == 1, "the loop must not keep polling after stop")
     }
 
-    @Test("the URLSession fetcher presents the launch secret on /status, and sends none before one exists")
-    func fetcherSendsTheSecretHeader() async throws {
+    @Test("the URLSession fetcher sends nothing until the secret is armed, then presents it on /status")
+    func fetcherSendsTheSecretHeaderOnlyOnceArmed() async throws {
         let url = URL(string: "http://127.0.0.1:1/status-\(UUID().uuidString)")!
         let seen = LockedBox<[String?]>([])
         StubURLProtocol.register(url: url) { request in
@@ -133,15 +133,19 @@ struct StatusPollerTests {
             session: LoopbackURLSession.make(protocolClasses: [StubURLProtocol.self])
         )
 
-        _ = try await fetcher.fetchStatus()
+        await #expect(throws: StatusFetchError.notReady) { try await fetcher.fetchStatus() }
         let launchSecret = try secret.renew()
+        await #expect(throws: StatusFetchError.notReady) { try await fetcher.fetchStatus() }
+        #expect(seen.value.isEmpty, "no request may leave while the secret is not armed")
+
+        secret.arm(launchSecret)
         _ = try await fetcher.fetchStatus()
 
-        #expect(seen.value == [nil, launchSecret])
+        #expect(seen.value == [launchSecret])
     }
 
-    @Test("the URLSession pairing minter presents the launch secret when minting")
-    func minterSendsTheSecretHeader() async throws {
+    @Test("the URLSession pairing minter sends nothing until the secret is armed, then presents it when minting")
+    func minterSendsTheSecretHeaderOnlyOnceArmed() async throws {
         let url = URL(string: "http://127.0.0.1:1/pairing-\(UUID().uuidString)")!
         let seen = LockedBox<[String?]>([])
         StubURLProtocol.register(url: url) { request in
@@ -156,10 +160,38 @@ struct StatusPollerTests {
             session: LoopbackURLSession.make(protocolClasses: [StubURLProtocol.self])
         )
 
+        await #expect(throws: PairingCodeMintingError.notReady) { try await minter.mint(apps: []) }
+        #expect(seen.value.isEmpty, "no request may leave while the secret is not armed")
+
+        secret.arm(launchSecret)
         let code = try await minter.mint(apps: [])
 
         #expect(code.code == "abc")
         #expect(seen.value == [launchSecret])
+    }
+
+    @Test("a redirect is never followed, so the secret never reaches a second endpoint")
+    func redirectsAreNotFollowed() async throws {
+        let start = URL(string: "http://127.0.0.1:1/status-\(UUID().uuidString)")!
+        let target = URL(string: "http://127.0.0.1:2/elsewhere-\(UUID().uuidString)")!
+        let targetRequests = LockedBox<Int>(0)
+        StubURLProtocol.registerRedirect(from: start, to: target)
+        StubURLProtocol.register(url: target) { _ in
+            targetRequests.update { $0 += 1 }
+            return (200, Data(#"{"running":true,"sign_in_failing":false}"#.utf8))
+        }
+        let secret = LocalStatusSecret(randomBytes: FakeRandomBytesGenerator())
+        secret.arm(try secret.renew())
+        let fetcher = URLSessionStatusFetcher(
+            statusURL: start,
+            secret: secret,
+            session: LoopbackURLSession.make(protocolClasses: [StubURLProtocol.self])
+        )
+
+        await #expect(throws: StatusFetchError.unexpectedResponse) { try await fetcher.fetchStatus() }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(targetRequests.value == 0, "the redirect target must never be requested")
     }
 
     @Test("the loopback session bypasses every system proxy")

@@ -100,6 +100,10 @@ public actor EngineSupervisor {
     private let clock: any VirtualClock
     private let backoffSchedule: [Duration]
     private let stableRunThreshold: Duration
+    /// statusSecret, when set, is renewed for every spawn and armed only
+    /// once that spawn's engine reports it is listening, so it is never
+    /// presented to whatever else might hold the status port before then.
+    private let statusSecret: LocalStatusSecret?
     /// onStateChange is called every time state changes, so a caller (the
     /// menu bar UI) can react immediately -- for example to show red the
     /// moment the engine crashes -- rather than only finding out at the
@@ -126,6 +130,7 @@ public actor EngineSupervisor {
         clock: any VirtualClock = SystemVirtualClock(),
         backoffSchedule: [Duration] = EngineSupervisor.defaultBackoffSchedule,
         stableRunThreshold: Duration = EngineSupervisor.defaultStableRunThreshold,
+        statusSecret: LocalStatusSecret? = nil,
         onStateChange: @escaping @Sendable (RunState) -> Void = { _ in }
     ) {
         self.engineURL = engineURL
@@ -133,6 +138,7 @@ public actor EngineSupervisor {
         self.clock = clock
         self.backoffSchedule = backoffSchedule
         self.stableRunThreshold = stableRunThreshold
+        self.statusSecret = statusSecret
         self.onStateChange = onStateChange
     }
 
@@ -160,6 +166,7 @@ public actor EngineSupervisor {
     /// process will be started.
     public func stop() {
         generation += 1
+        statusSecret?.clear()
         setState(.stopped)
         current?.terminate()
         current = nil
@@ -179,14 +186,21 @@ public actor EngineSupervisor {
 
     private func spawn(configuration: EngineConfiguration, generation: Int) async {
         guard generation == self.generation else { return }
+        statusSecret?.clear()
         setState(.starting)
 
         let startedAt = await clock.now()
         guard generation == self.generation else { return }
+        // No suspension point separates the renewal below from the launch,
+        // so the secret handed to this process is still the pending one when
+        // it reports ready.
+        let spawnSecret: String?
         let data: Data
         do {
-            data = try configuration.encodedForStandardInput()
+            spawnSecret = try statusSecret?.renew()
+            data = try (spawnSecret.map { configuration.withStatusSecret($0) } ?? configuration).encodedForStandardInput()
         } catch {
+            statusSecret?.clear()
             await scheduleRestart(configuration: configuration, generation: generation)
             return
         }
@@ -195,7 +209,11 @@ public actor EngineSupervisor {
             let process = try launcher.launch(
                 executableURL: engineURL,
                 arguments: ["serve", "--config-stdin"],
-                standardInputData: data
+                standardInputData: data,
+                onReady: { [weak self] in
+                    guard let self, let spawnSecret else { return }
+                    Task { await self.handleReady(generation: generation, secret: spawnSecret) }
+                }
             ) { [weak self] exitCode in
                 guard let self else { return }
                 Task { await self.handleExit(generation: generation, configuration: configuration, startedAt: startedAt, exitCode: exitCode) }
@@ -209,8 +227,16 @@ public actor EngineSupervisor {
             current = process
             setState(.running)
         } catch {
+            statusSecret?.clear()
             await scheduleRestart(configuration: configuration, generation: generation)
         }
+    }
+
+    /// handleReady arms the secret of the spawn that reported ready, unless
+    /// that spawn has since been superseded or stopped.
+    private func handleReady(generation: Int, secret: String) {
+        guard generation == self.generation else { return }
+        statusSecret?.arm(secret)
     }
 
     /// handleExit reacts to the child process ending on its own. Three
@@ -229,6 +255,7 @@ public actor EngineSupervisor {
     ) async {
         guard generation == self.generation else { return }
         current = nil
+        statusSecret?.clear()
 
         switch exitCode {
         case EngineSupervisor.storeKeyMismatchExitCode:
@@ -262,6 +289,7 @@ public actor EngineSupervisor {
     public func fail(_ reason: FailureReason) {
         guard state == .stopped else { return }
         generation += 1
+        statusSecret?.clear()
         setState(.failed(reason))
     }
 

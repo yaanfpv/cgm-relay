@@ -12,8 +12,7 @@ public enum SettingsEngineConfigurationBuilder {
         interfaces: [NetworkInterfaceAddress],
         statusAddr: String,
         databasePath: String,
-        librelinkupBaseURL: String? = nil,
-        statusSecret: String? = nil
+        librelinkupBaseURL: String? = nil
     ) throws -> EngineConfiguration? {
         let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         return try EngineConfigurationBuilder.build(
@@ -22,8 +21,7 @@ public enum SettingsEngineConfigurationBuilder {
             statusAddr: statusAddr,
             databasePath: databasePath,
             retentionDays: settings.retentionDays,
-            librelinkupBaseURL: librelinkupBaseURL,
-            statusSecret: statusSecret
+            librelinkupBaseURL: librelinkupBaseURL
         )
     }
 }

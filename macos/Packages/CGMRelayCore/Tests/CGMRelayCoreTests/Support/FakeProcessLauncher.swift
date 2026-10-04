@@ -28,8 +28,9 @@ final class FakeRunningProcess: RunningProcess, @unchecked Sendable {
 }
 
 /// FakeProcessLauncher records every launch and hands the test full
-/// control over when and how each spawned "process" exits, via
-/// finishLaunch(at:exitCode:). It never actually runs anything.
+/// control over when each spawned "process" reports ready and when and how
+/// it exits, via reportReady(at:) and finishLaunch(at:exitCode:). It never
+/// actually runs anything.
 final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
     struct Launch: Sendable {
         let arguments: [String]
@@ -40,6 +41,7 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
     private var launches: [Launch] = []
     private var terminatedFlags: [Bool] = []
     private var onExitHandlers: [(Int32) -> Void] = []
+    private var onReadyHandlers: [() -> Void] = []
     private var nextPID: Int32 = 1000
     private var killedFlags: [Bool] = []
 
@@ -59,6 +61,7 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
         executableURL: URL,
         arguments: [String],
         standardInputData: Data,
+        onReady: @escaping @Sendable () -> Void,
         onExit: @escaping @Sendable (Int32) -> Void
     ) throws -> any RunningProcess {
         lock.withLock {
@@ -66,6 +69,7 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
             terminatedFlags.append(false)
             killedFlags.append(false)
             onExitHandlers.append(onExit)
+            onReadyHandlers.append(onReady)
         }
         let index = lock.withLock { launches.count - 1 }
         let pid = lock.withLock {
@@ -96,6 +100,13 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
 
     func wasTerminated(at index: Int) -> Bool {
         lock.withLock { terminatedFlags.indices.contains(index) && terminatedFlags[index] }
+    }
+
+    /// reportReady simulates the process at `index` writing its ready line,
+    /// invoking the onReady handler EngineSupervisor registered for it.
+    func reportReady(at index: Int) {
+        let handler = lock.withLock { onReadyHandlers.indices.contains(index) ? onReadyHandlers[index] : nil }
+        handler?()
     }
 
     /// finishLaunch simulates the process at `index` exiting on its own,
