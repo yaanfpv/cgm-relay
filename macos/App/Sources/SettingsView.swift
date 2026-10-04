@@ -69,6 +69,7 @@ struct SettingsView: View {
         // already reserves the standard distance from the tab bar and
         // from the window's own edge.
         .frame(width: Self.paneWidth, height: paneHeights[navigation.tab])
+        .cgmWindowBackground()
     }
 }
 

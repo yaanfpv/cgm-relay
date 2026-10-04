@@ -2,9 +2,6 @@ import AppKit
 import CGMRelayCore
 import SwiftUI
 
-/// qrPixelsPerModule is the scale every QR code is drawn at.
-private let qrPixelsPerModule: CGFloat = 10
-
 /// ConnectPaneView shows a follower app everything it needs to connect:
 /// the address, the bearer token, and a QR code for the follower app chosen
 /// above it. Where an app can import settings from a QR code, the code sets
@@ -310,11 +307,11 @@ struct ConnectPaneView<Extra: View>: View {
     /// stays scannable in dark mode, where a transparent or dark surround
     /// would fight its own black-on-white contrast. The tile is the one
     /// deliberate exception to the system doing the chrome -- a QR code's
-    /// own contrast is a functional requirement, not a decoration. A code
-    /// that holds the token stays hidden until the token is shown.
+    /// own contrast is a functional requirement, not a decoration. Its side
+    /// is fixed for each layout, whichever follower app is chosen.
     private var qrTile: some View {
         let image = qrImage
-        let side = qrSide(for: image)
+        let side = isCompact ? QRCodeGenerator.compactTileSide : QRCodeGenerator.standardTileSide
         return HStack {
             if !isCompact { Spacer() }
             qrContent(image: image)
@@ -322,47 +319,24 @@ struct ConnectPaneView<Extra: View>: View {
                 .padding(12)
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(qrIsHidden || image == nil ? Color(nsColor: .quaternarySystemFill) : Color.white)
+                        .fill(image == nil ? Color(nsColor: .quaternarySystemFill) : Color.white)
                 )
             if !isCompact { Spacer() }
         }
         .padding(.vertical, 4)
     }
 
-    /// qrImage is drawn at one scale for every payload, so a denser code
-    /// (a settings import holds more than a link does) gets a larger tile
-    /// rather than smaller modules; a scanner needs the modules, not the
-    /// tile, to be big enough.
     private var qrImage: NSImage? {
         guard let qr = currentQR else { return nil }
-        return try? QRCodeGenerator.nsImage(for: qr.payload, scale: qrPixelsPerModule, correctionLevel: "L")
-    }
-
-    private func qrSide(for image: NSImage?) -> CGFloat {
-        let base: CGFloat = isCompact ? 116 : 140
-        guard let image else { return base }
-        let modules = image.size.width / qrPixelsPerModule
-        return max(base, modules * (isCompact ? 2.8 : 3.6))
-    }
-
-    private var qrIsHidden: Bool {
-        (currentQR?.carriesToken ?? false) && !tokenRevealed
+        let side = isCompact ? QRCodeGenerator.compactTileSide : QRCodeGenerator.standardTileSide
+        return try? QRCodeGenerator.nsImage(for: qr.payload, tileSide: side)
     }
 
     @ViewBuilder
     private func qrContent(image: NSImage?) -> some View {
-        if qrIsHidden {
-            VStack(spacing: 8) {
-                Image(systemName: "lock")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                AccessibleButton("Show Code", accessibleName: "Show \(followerApp.displayName) Code") { tokenRevealed = true }
-            }
-            .accessibilityElement(children: .contain)
-        } else if let image {
+        if let image {
             Image(nsImage: image)
-                .interpolation(.none)
+                .interpolation(.high)
                 .resizable()
                 .accessibleImageName("QR code for \(followerApp.displayName): \(currentQR?.carriesToken == true ? "scan it inside the app to set it up" : "scan it with the iPhone camera to open a page of values to copy")")
         } else {

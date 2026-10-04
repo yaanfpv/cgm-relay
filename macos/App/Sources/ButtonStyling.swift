@@ -4,8 +4,12 @@ import SwiftUI
 /// panel and the Settings window: the system glass button styles on
 /// macOS 26 and later, the plain bordered ones on the macOS 15 floor --
 /// chosen by an availability check, never a second look. Both styles pick
-/// up the app's own AccentColor asset automatically, so this carries no
-/// tint of its own.
+/// up the app's own AccentColor asset (a deep teal in the light appearance,
+/// so the text the system draws in or on it reads). The primary style
+/// instead names ActionFill, the bright mint, as its tint: a prominent
+/// button otherwise falls back to the system blue in the light appearance,
+/// and its AccentLabel ink reads on the mint fill where it could not on the
+/// deep teal.
 extension View {
     /// cgmPrimaryActionStyle marks a pane or panel's one primary action
     /// (Sign In, Start, Try Again, Copy Diagnostics): glass-prominent on
@@ -13,9 +17,9 @@ extension View {
     @ViewBuilder
     func cgmPrimaryActionStyle() -> some View {
         if #available(macOS 26, *) {
-            self.buttonStyle(.glassProminent)
+            self.buttonStyle(.glassProminent).tint(Color("ActionFill"))
         } else {
-            self.buttonStyle(.borderedProminent)
+            self.buttonStyle(.borderedProminent).tint(Color("ActionFill"))
         }
     }
 

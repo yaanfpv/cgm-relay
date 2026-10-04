@@ -71,6 +71,9 @@ public struct AppSettings: Equatable, Sendable {
     /// connectFollowerApp is the follower app last chosen in the Connect
     /// pane, so its QR code is the one shown the next time.
     public var connectFollowerApp: FollowerApp
+    /// safetyNoticeAcceptance is the safety notice wording the person last
+    /// accepted, nil until they have; see SafetyNotice.needsAcceptance.
+    public var safetyNoticeAcceptance: SafetyNoticeAcceptance?
 
     /// effectiveReach is the reach the relay is actually bound to: this
     /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
@@ -99,7 +102,8 @@ public struct AppSettings: Equatable, Sendable {
         tailscaleHTTPSEnabled: false,
         setupFinished: false,
         showReadingInMenuBar: false,
-        connectFollowerApp: .xDrip4iOS
+        connectFollowerApp: .xDrip4iOS,
+        safetyNoticeAcceptance: nil
     )
 
     public init(
@@ -113,7 +117,8 @@ public struct AppSettings: Equatable, Sendable {
         tailscaleHTTPSEnabled: Bool = false,
         setupFinished: Bool = false,
         showReadingInMenuBar: Bool = false,
-        connectFollowerApp: FollowerApp = .xDrip4iOS
+        connectFollowerApp: FollowerApp = .xDrip4iOS,
+        safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil
     ) {
         self.port = port
         self.reach = reach
@@ -126,6 +131,7 @@ public struct AppSettings: Equatable, Sendable {
         self.setupFinished = setupFinished
         self.showReadingInMenuBar = showReadingInMenuBar
         self.connectFollowerApp = connectFollowerApp
+        self.safetyNoticeAcceptance = safetyNoticeAcceptance
     }
 }
 
@@ -139,7 +145,7 @@ public struct AppSettings: Equatable, Sendable {
 extension AppSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
-        case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp
+        case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
     }
 
     public init(from decoder: Decoder) throws {
@@ -158,6 +164,7 @@ extension AppSettings: Codable {
         // A value this version does not know (a newer version's app) falls
         // back to the default rather than failing the whole decode.
         connectFollowerApp = ((try? container.decodeIfPresent(FollowerApp.self, forKey: .connectFollowerApp)) ?? nil) ?? fallback.connectFollowerApp
+        safetyNoticeAcceptance = ((try? container.decodeIfPresent(SafetyNoticeAcceptance.self, forKey: .safetyNoticeAcceptance)) ?? nil)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -173,6 +180,7 @@ extension AppSettings: Codable {
         try container.encode(setupFinished, forKey: .setupFinished)
         try container.encode(showReadingInMenuBar, forKey: .showReadingInMenuBar)
         try container.encode(connectFollowerApp, forKey: .connectFollowerApp)
+        try container.encodeIfPresent(safetyNoticeAcceptance, forKey: .safetyNoticeAcceptance)
     }
 }
 
@@ -272,6 +280,34 @@ public enum RetentionCommitDecision: Sendable, Equatable {
 
     public static func decide(current: Int, new: Int) -> RetentionCommitDecision {
         new < current ? .needsConfirmation : .commitsImmediately
+    }
+}
+
+/// RetentionLeaveDecision is what happens to a retention entry the person
+/// has typed or clicked but not yet committed when the General pane goes
+/// away: a raise is saved as Return would have saved it, an unchanged value
+/// leaves nothing behind, and anything that cannot be saved silently is
+/// held with the message the pane shows when it next appears. A lowering is
+/// never applied from a pane that is leaving, since it deletes readings and
+/// needs the person's confirmation.
+public enum RetentionLeaveDecision: Sendable, Equatable {
+    case nothing
+    case save(Int)
+    case held(message: String)
+
+    public static func decide(current: Int, text: String) -> RetentionLeaveDecision {
+        switch RetentionCommitValidation.validate(text) {
+        case .invalid(let message):
+            return .held(message: "Not saved. \(message)")
+        case .valid(let value):
+            guard value != current else { return .nothing }
+            switch RetentionCommitDecision.decide(current: current, new: value) {
+            case .commitsImmediately:
+                return .save(value)
+            case .needsConfirmation:
+                return .held(message: "\(value) days was not saved. Lowering deletes older readings and needs confirming, so enter it again.")
+            }
+        }
     }
 }
 
