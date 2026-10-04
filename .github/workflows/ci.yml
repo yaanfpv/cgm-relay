@@ -172,11 +172,13 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
-          total="$(jq 'length' <<< "$NEEDS")" || total=0
-          if [ "$total" -eq 0 ]; then
-            echo "::error::gate received no results to check"
-            exit 1
-          fi
+          total="$(jq -e 'if type == "object" and length > 0 then length else empty end' <<< "$NEEDS" 2>/dev/null)" || total=0
+          case "$total" in
+            '' | *[!0-9]* | 0)
+              echo "::error::gate received no results to check"
+              exit 1
+              ;;
+          esac
           bad="$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key) \(.value.result)"' <<< "$NEEDS")"
           {
             echo "| Check | Result |"
