@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Fix the README to say there is no download yet: it now points to building the app from source until the first release, and notes that the daily update check applies to released builds.
 - Add a README with setup steps for each follower app, a technical page on how the relay works and how to run it on a server, contributing and security guides, and the GNU AGPL-3.0 license text, for anyone visiting the repository.
 - Fix the Nightguard setup steps: the address and the access token now go in Nightguard's own two fields, since current Nightguard loses a token given inside the address.
 - Fix the setup and Settings windows looking different from each other: both now paint the same plain window background, title bar included, instead of the system's wallpaper-tinted one, so setup no longer reads warmer or cooler than Settings depending on where it sits on the desktop.

@@ -4,7 +4,7 @@
 
 CGM Relay is a small Mac menu bar app that follows your LibreLinkUp account every minute, keeps each reading encrypted on your Mac, and hands them to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any Nightscout follower app, so the gaps your phone leaves overnight fill themselves in.
 
-**[Download for Mac](https://github.com/yaanfpv/cgm-relay/releases/latest)** · [Supported apps](#supported) · [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server) · [How it works](docs/TECHNICAL.md)
+**The first release is coming soon. Until then, [build it from source](docs/TECHNICAL.md#building-from-source).** · [Supported apps](#supported) · [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server) · [How it works](docs/TECHNICAL.md)
 
 Free and open source · macOS 15 or later · No account, no cloud of ours
 
@@ -32,7 +32,7 @@ Readings are stored encrypted on your Mac, and only apps holding your access tok
 
 ## Get started
 
-1. [Download CGM Relay](https://github.com/yaanfpv/cgm-relay/releases/latest), open the disk image and drag CGM Relay to Applications.
+1. There is no download yet: the first release is coming. Until then, [build the Mac app from source](docs/TECHNICAL.md#building-from-source) and drag it to Applications, or [run it on a server](docs/TECHNICAL.md#run-it-on-a-server).
 2. Follow the setup steps, and turn on Open at Login at the end so it survives a restart.
 3. Point your app at the address and token setup shows you (details for each app are below).
 
@@ -63,12 +63,12 @@ Only one thing should follow your LibreLinkUp account. Once your app reads from 
 
 - macOS 15 Sequoia or later, on Apple silicon and Intel.
 - FreeStyle Libre sensors that share through LibreLinkUp.
-- xDrip4iOS, xDrip+, LoopFollow and Nightguard as follower apps. Each was tested against CGM Relay with the settings above, and xDrip4iOS is the one the author uses day to day.
+- xDrip4iOS, xDrip+, LoopFollow and Nightguard as follower apps. Each was tested against CGM Relay with the settings above.
 - A Linux server instead of a Mac: see [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server).
 
 ## Privacy
 
-CGM Relay talks to LibreLinkUp, with your own account, to fetch your readings, and once a day to GitHub to check for a newer version. That update check carries the app's name and version and your internet address, and nothing about you, your account or your readings; turn it off in Settings > Updates. Your follower apps talk to your Mac, not to us. The Tailscale step runs Tailscale's own command on your Mac only when you click it. Report a Bug opens a GitHub page in your browser with only the app version and build, your macOS version and your chip filled in, and nothing is sent unless you submit it.
+CGM Relay talks to LibreLinkUp, with your own account, to fetch your readings, and, in released builds, once a day to GitHub to check for a newer version. That update check carries the app's name and version and your internet address, and nothing about you, your account or your readings; turn it off in Settings > Updates. Your follower apps talk to your Mac, not to us. The Tailscale step runs Tailscale's own command on your Mac only when you click it. Report a Bug opens a GitHub page in your browser with only the app version and build, your macOS version and your chip filled in, and nothing is sent unless you submit it.
 
 ## Good to know
 
