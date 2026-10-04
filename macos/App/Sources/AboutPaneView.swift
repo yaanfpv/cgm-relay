@@ -61,6 +61,11 @@ struct AboutPaneView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
             }
+            Section {
+                SafetyNoticeText(font: .callout)
+            } header: {
+                Text("Safety Notice")
+            }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)

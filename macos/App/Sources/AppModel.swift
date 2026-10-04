@@ -21,6 +21,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var settings: AppSettings
     @Published private(set) var loginItemStatus: LoginItemStatus = .disabled
     @Published private(set) var loginItemErrorMessage: String?
+    /// retentionNotice carries why a retention entry was not saved when the
+    /// General pane went away, for the pane to show the next time it appears.
+    var retentionNotice: String?
     /// loginItemUnavailableReason is the system's own reason a registration
     /// failed, shown where Open at Login is unavailable. It lasts until the
     /// status is next read afresh, so a later visit offers Turn On again.
@@ -105,6 +108,13 @@ final class AppModel: ObservableObject {
     /// the Keychain, so nothing flashes before the real answer is known.
     var needsSetup: Bool {
         launchChecked && !(settings.setupFinished && credentialsConfigured)
+    }
+
+    /// needsSafetyNotice is true until the current wording of the safety
+    /// notice has been accepted; like needsSetup it waits for launch to have
+    /// read the saved settings.
+    var needsSafetyNotice: Bool {
+        launchChecked && SafetyNotice.needsAcceptance(settings.safetyNoticeAcceptance)
     }
 
     /// httpsState is where Tailscale HTTPS stands for the relay's current
@@ -241,7 +251,7 @@ final class AppModel: ObservableObject {
         try? CredentialsBootstrapper(store: credentialStore).ensureBootstrapped()
         refreshCredentialsConfigured()
         launchChecked = true
-        if needsSetup {
+        if needsSetup || needsSafetyNotice {
             setupPresentationRequest += 1
         }
         await alertEngine.setNoReadingAlert(enabled: settings.noReadingAlertEnabled, minutes: settings.noReadingAlertMinutes)
@@ -613,6 +623,13 @@ final class AppModel: ObservableObject {
     private func reportFailure(_ outcome: TailscaleServeOutcome, turningOn: Bool) {
         guard let message = outcome.message(turningOn: turningOn) else { return }
         tailscaleFailure = TailscaleFailure(message: message, helpURL: outcome.helpURL)
+    }
+
+    /// acceptSafetyNotice records that the person accepted the notice as
+    /// worded now.
+    func acceptSafetyNotice() {
+        settings.safetyNoticeAcceptance = SafetyNotice.acceptance(appVersion: AppVersion.short)
+        persistSettings()
     }
 
     /// completeSetup is setup's Done. It marks setup finished only while a

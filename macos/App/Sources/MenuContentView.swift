@@ -10,6 +10,7 @@ struct MenuContentView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var updates: UpdatesModel
     let actions: MenuPanelActions
+    @ObservedObject var focusRing: PanelFocusRing
     @State private var isConfirmingStartFresh = false
 
     var body: some View {
@@ -53,6 +54,7 @@ struct MenuContentView: View {
         }
         .padding(12)
         .frame(width: 280, alignment: .leading)
+        .focusEffectDisabled(focusRing.isHidden)
     }
 
     /// heroReading is the panel's one hero: the current reading, large,
