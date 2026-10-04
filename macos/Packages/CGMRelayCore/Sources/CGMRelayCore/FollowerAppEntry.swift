@@ -25,12 +25,6 @@ public enum FollowerAppEntry {
         return address.replacingCharacters(in: separator.upperBound..<separator.upperBound, with: "\(token)@")
     }
 
-    /// nightguardURL is the single address Nightguard takes, which reads
-    /// the token from its `token` query item.
-    public static func nightguardURL(address: String, token: String) -> String {
-        "\(address)/?token=\(token)"
-    }
-
     /// tokenPlaceholder stands for the access token in a field's value. The
     /// Mac pane replaces it with the real token; the engine's pairing page
     /// does, so the token never travels in a mint request.
@@ -106,8 +100,8 @@ public enum FollowerAppEntry {
         case .nightguard:
             return Instructions(
                 name: app.displayName,
-                steps: ["In Preferences, enter the address with ?token= and the token after it in the Nightscout URL field."],
-                fields: [Field(label: "Nightscout URL", value: nightguardURL(address: address, token: token))],
+                steps: ["When Nightguard first opens, enter the address in Nightscout URL and the token in API Token."],
+                fields: [Field(label: "Nightscout URL", value: address), Field(label: "API Token", value: token)],
                 links: [Link(label: "Get Nightguard on the App Store", url: "https://apps.apple.com/us/app/nightguard/id1116430352")]
             )
         }
