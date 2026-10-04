@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Add a final gate check to CI that passes only when every other check has passed, so a pull request needs one required check; the Changelog entry check now runs in the same workflow and always reports a result.
 - Fix the setup and Settings windows looking different from each other: both now paint the same plain window background, title bar included, instead of the system's wallpaper-tinted one, so setup no longer reads warmer or cooler than Settings depending on where it sits on the desktop.
 - Fix primary buttons showing the system blue in the light appearance: they now use a bright mint with one dark label in both appearances. Everything else the system tints in light (toggles, the selected tab, the selected segment) uses a cleaner deep teal that keeps the text drawn in or on it readable, with a darker teal under Increase Contrast.
 - Add a safety notice: setup now opens with a short, plain statement that CGM Relay is not a medical device, that readings and alerts can be late, missing or wrong, and that it shouldn't be used for treatment decisions, with one "I Understand" to continue. It is asked again only if its wording changes, it stays readable in Settings under About, and the Alerts pane now says alerts can be late or missed and don't replace the official app's alarms.
