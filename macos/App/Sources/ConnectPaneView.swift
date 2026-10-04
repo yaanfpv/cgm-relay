@@ -413,8 +413,17 @@ struct ConnectPaneView<Extra: View>: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(value, forType: .string)
+        if !token.isEmpty, value.contains(token) {
+            pasteboard.setString("", forType: concealedPasteboardType)
+        }
     }
 }
+
+/// concealedPasteboardType is the community convention (nspasteboard.org)
+/// clipboard managers and history tools honour by not recording the item.
+/// It lives outside ConnectPaneView because a generic type cannot hold a
+/// static stored property.
+private let concealedPasteboardType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
 extension ConnectPaneView where Extra == EmptyView {
     /// The Settings window's Connect pane: the blocked state points at

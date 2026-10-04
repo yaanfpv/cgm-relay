@@ -30,6 +30,10 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
     /// itself refuses anything but https, or plain http to a loopback
     /// address, at load time.
     public var librelinkupBaseURL: String?
+    /// statusSecret is this launch's LocalStatusSecret value, which the
+    /// engine requires of every caller of its local status listener. nil
+    /// leaves the engine without one, so it refuses to mint pairing codes.
+    public var statusSecret: String?
 
     private enum CodingKeys: String, CodingKey {
         case librelinkupEmail = "librelinkup_email"
@@ -41,6 +45,7 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         case retentionDays = "retention_days"
         case key
         case librelinkupBaseURL = "librelinkup_base_url"
+        case statusSecret = "status_secret"
     }
 
     public init(
@@ -52,7 +57,8 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         databasePath: String,
         retentionDays: Int,
         key: String,
-        librelinkupBaseURL: String? = nil
+        librelinkupBaseURL: String? = nil,
+        statusSecret: String? = nil
     ) {
         self.librelinkupEmail = librelinkupEmail
         self.librelinkupPassword = librelinkupPassword
@@ -63,6 +69,7 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         self.retentionDays = retentionDays
         self.key = key
         self.librelinkupBaseURL = librelinkupBaseURL
+        self.statusSecret = statusSecret
     }
 
     /// encodedForStandardInput renders the configuration as the single
@@ -85,7 +92,8 @@ public enum EngineConfigurationBuilder {
         statusAddr: String,
         databasePath: String,
         retentionDays: Int,
-        librelinkupBaseURL: String? = nil
+        librelinkupBaseURL: String? = nil,
+        statusSecret: String? = nil
     ) throws -> EngineConfiguration? {
         guard
             let email = try store.string(for: .librelinkupEmail), !email.isEmpty,
@@ -104,7 +112,8 @@ public enum EngineConfigurationBuilder {
             databasePath: databasePath,
             retentionDays: retentionDays,
             key: key,
-            librelinkupBaseURL: librelinkupBaseURL
+            librelinkupBaseURL: librelinkupBaseURL,
+            statusSecret: statusSecret
         )
     }
 }

@@ -85,6 +85,7 @@ final class AppModel: ObservableObject {
     private let notificationDelivering: any NotificationDelivering
     private let loginItemManager: any LoginItemManaging
     private let statusAddr: String
+    private let localStatusSecret: LocalStatusSecret
     private let pairingMinter: any PairingCodeMinting
     private let databasePath: String
     private let librelinkupBaseURL: String?
@@ -210,7 +211,9 @@ final class AppModel: ObservableObject {
         notificationDelivering = UserNotificationCenterDelivering()
         self.loginItemManager = loginItemManager
         self.statusAddr = statusAddr
-        pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr))
+        let statusSecret = LocalStatusSecret()
+        localStatusSecret = statusSecret
+        pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         settings = settingsStore.load()
@@ -228,7 +231,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in ref.value?.handleEngineStateChange(state) }
         }
         statusPoller = StatusPoller(
-            fetcher: URLSessionStatusFetcher(statusURL: AppModel.statusURL(for: statusAddr))
+            fetcher: URLSessionStatusFetcher(statusURL: AppModel.statusURL(for: statusAddr), secret: statusSecret)
         ) { status in
             Task { @MainActor in ref.value?.handleStatusUpdate(status) }
         }
@@ -844,14 +847,19 @@ final class AppModel: ObservableObject {
             return
         }
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+        // A new secret for every launch, set before the engine exists so the
+        // status poller and the pairing minter never present an old one to
+        // the new process.
         guard
+            let statusSecret = try? localStatusSecret.renew(),
             let config = try? SettingsEngineConfigurationBuilder.build(
                 settings: settings,
                 from: credentialStore,
                 interfaces: interfaces,
                 statusAddr: statusAddr,
                 databasePath: databasePath,
-                librelinkupBaseURL: librelinkupBaseURL
+                librelinkupBaseURL: librelinkupBaseURL,
+                statusSecret: statusSecret
             )
         else {
             boundHost = nil

@@ -27,14 +27,17 @@ public protocol PairingCodeMinting: Sendable {
 }
 
 /// URLSessionPairingCodeMinter posts to the engine's local status
-/// endpoint, the one listener a phone cannot reach.
+/// endpoint, the one listener a phone cannot reach, presenting the app's
+/// LocalStatusSecret, which the engine requires to mint.
 public struct URLSessionPairingCodeMinter: PairingCodeMinting {
     private let pairingURL: URL
+    private let secret: LocalStatusSecret
     private let session: URLSession
 
-    public init(pairingURL: URL, session: URLSession = .shared) {
+    public init(pairingURL: URL, secret: LocalStatusSecret, session: URLSession? = nil) {
         self.pairingURL = pairingURL
-        self.session = session
+        self.secret = secret
+        self.session = session ?? LoopbackURLSession.make()
     }
 
     private struct MintRequest: Encodable {
@@ -56,6 +59,7 @@ public struct URLSessionPairingCodeMinter: PairingCodeMinting {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(MintRequest(apps: apps))
+        secret.authorize(&request)
 
         let (data, response) = try await session.data(for: request)
         guard

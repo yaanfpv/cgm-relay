@@ -606,3 +606,75 @@ func TestErrorsNeverExposeCredentialsOrToken(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchDoesNotFollowHTTPRedirects checks that the default client treats
+// an HTTP redirect from sign-in as an unexpected status rather than sending
+// the credentials on to the host the redirect names.
+func TestFetchDoesNotFollowHTTPRedirects(t *testing.T) {
+	elsewhere := llufake.New(t)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer front.Close()
+
+	src := New("user@example.com", "correct-password", WithBaseURL(front.URL))
+	_, _, err := src.Fetch(context.Background())
+
+	var transientErr *cgm.TransientError
+	if !errors.As(err, &transientErr) {
+		t.Fatalf("Fetch() error = %v, want a *cgm.TransientError for the unfollowed redirect", err)
+	}
+	if got := elsewhere.Requests(); len(got) != 0 {
+		t.Fatalf("the redirect target received %d requests, want 0: %+v", len(got), got)
+	}
+}
+
+// TestFetchRefusesAnOverlargeResponse checks that a body past
+// maxResponseBytes fails clearly instead of being read whole.
+func TestFetchRefusesAnOverlargeResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":0,"data":{"pad":"`))
+		w.Write([]byte(strings.Repeat("a", maxResponseBytes)))
+		w.Write([]byte(`"}}`))
+	}))
+	defer srv.Close()
+
+	src := New("user@example.com", "correct-password", WithBaseURL(srv.URL))
+	_, _, err := src.Fetch(context.Background())
+
+	var transientErr *cgm.TransientError
+	if !errors.As(err, &transientErr) {
+		t.Fatalf("Fetch() error = %v, want a *cgm.TransientError", err)
+	}
+	if !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("error = %q, want it to say the response was too large", err)
+	}
+}
+
+// TestFetchEscapesThePatientIDInThePath checks that a patient id carrying
+// path or query characters stays one path segment of the graph request.
+func TestFetchEscapesThePatientIDInThePath(t *testing.T) {
+	var graphURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/llu/auth/login":
+			w.Write([]byte(`{"status":0,"data":{"user":{"id":"u"},"authTicket":{"token":"t"}}}`))
+		case r.URL.Path == "/llu/connections":
+			w.Write([]byte(`{"status":0,"data":[{"patientId":"a/../b?x=1"}]}`))
+		default:
+			graphURI = r.RequestURI
+			w.Write([]byte(`{"status":0,"data":{"connection":null,"graphData":[]}}`))
+		}
+	}))
+	defer srv.Close()
+
+	src := New("user@example.com", "correct-password", WithBaseURL(srv.URL))
+	if _, _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch() error = %v, want nil", err)
+	}
+	if want := "/llu/connections/a%2F..%2Fb%3Fx=1/graph"; graphURI != want {
+		t.Errorf("graph request URI = %q, want %q", graphURI, want)
+	}
+}

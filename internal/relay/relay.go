@@ -140,7 +140,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 	defer nsServer.shutdown()
 
-	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings))
+	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings, cfg.StatusSecret))
 	if err != nil {
 		return fmt.Errorf("relay: listen on %s: %w", cfg.StatusAddr, err)
 	}

@@ -117,4 +117,69 @@ struct StatusPollerTests {
         try await Task.sleep(for: .milliseconds(30))
         #expect(fetcher.callCount == 1, "the loop must not keep polling after stop")
     }
+
+    @Test("the URLSession fetcher presents the launch secret on /status, and sends none before one exists")
+    func fetcherSendsTheSecretHeader() async throws {
+        let url = URL(string: "http://127.0.0.1:1/status-\(UUID().uuidString)")!
+        let seen = LockedBox<[String?]>([])
+        StubURLProtocol.register(url: url) { request in
+            seen.update { $0.append(request.value(forHTTPHeaderField: LocalStatusSecret.headerName)) }
+            return (200, Data(#"{"running":true,"sign_in_failing":false}"#.utf8))
+        }
+        let secret = LocalStatusSecret(randomBytes: FakeRandomBytesGenerator())
+        let fetcher = URLSessionStatusFetcher(
+            statusURL: url,
+            secret: secret,
+            session: LoopbackURLSession.make(protocolClasses: [StubURLProtocol.self])
+        )
+
+        _ = try await fetcher.fetchStatus()
+        let launchSecret = try secret.renew()
+        _ = try await fetcher.fetchStatus()
+
+        #expect(seen.value == [nil, launchSecret])
+    }
+
+    @Test("the URLSession pairing minter presents the launch secret when minting")
+    func minterSendsTheSecretHeader() async throws {
+        let url = URL(string: "http://127.0.0.1:1/pairing-\(UUID().uuidString)")!
+        let seen = LockedBox<[String?]>([])
+        StubURLProtocol.register(url: url) { request in
+            seen.update { $0.append(request.value(forHTTPHeaderField: LocalStatusSecret.headerName)) }
+            return (200, Data(#"{"code":"abc","expires_at":"2026-06-01T12:10:00Z"}"#.utf8))
+        }
+        let secret = LocalStatusSecret(randomBytes: FakeRandomBytesGenerator())
+        let launchSecret = try secret.renew()
+        let minter = URLSessionPairingCodeMinter(
+            pairingURL: url,
+            secret: secret,
+            session: LoopbackURLSession.make(protocolClasses: [StubURLProtocol.self])
+        )
+
+        let code = try await minter.mint(apps: [])
+
+        #expect(code.code == "abc")
+        #expect(seen.value == [launchSecret])
+    }
+
+    @Test("the loopback session bypasses every system proxy")
+    func loopbackSessionHasNoProxy() {
+        let configuration = LoopbackURLSession.make().configuration
+        #expect(configuration.connectionProxyDictionary?.isEmpty == true)
+    }
+}
+
+/// LockedBox is a value a stubbed request handler, which runs off the test's
+/// own task, can append to safely.
+private final class LockedBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+
+    init(_ value: Value) { stored = value }
+
+    var value: Value { lock.withLock { stored } }
+
+    func update(_ change: (inout Value) -> Void) {
+        lock.withLock { change(&stored) }
+    }
 }
