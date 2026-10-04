@@ -230,11 +230,11 @@ struct ConnectPaneView<Extra: View>: View {
     }
 
     /// singleValueField is the one address an app takes its address and
-    /// token in together (xDrip+ and Nightguard), which gets its own Copy.
+    /// token in together (xDrip+), which gets its own Copy.
     private func singleValueField(_ instructions: FollowerAppEntry.Instructions) -> FollowerAppEntry.Field? {
         switch followerApp {
-        case .xDripPlus, .nightguard: instructions.fields.first
-        case .xDrip4iOS, .loopFollow: nil
+        case .xDripPlus: instructions.fields.first
+        case .xDrip4iOS, .loopFollow, .nightguard: nil
         }
     }
 
