@@ -277,17 +277,23 @@ struct FollowerAddressTests {
         #expect(noPort.fields.map(\.label) == ["URL", "Token"])
     }
 
+    @Test("Nightguard's token is its own API Token field and its Nightscout URL is the bare address")
+    func nightguardInstructions() {
+        let entry = FollowerAppEntry.instructions(for: .nightguard, address: "http://192.168.1.42:1337")
+        #expect(entry.fields == [
+            .init(label: "Nightscout URL", value: "http://192.168.1.42:1337"),
+            .init(label: "API Token", value: FollowerAppEntry.tokenPlaceholder),
+        ])
+        #expect(!entry.fields[0].value.contains("?token="))
+        #expect(!entry.fields[0].value.hasSuffix("/"))
+    }
+
     @Test("every app's instructions carry the token only as the placeholder, never a real value")
     func instructionsHoldOnlyThePlaceholder() {
         for entry in FollowerAppEntry.pairingApps(address: "http://192.168.1.42:1337") {
             #expect(entry.fields.contains { $0.value.contains(FollowerAppEntry.tokenPlaceholder) }, Comment(rawValue: entry.name))
         }
         #expect(FollowerAppEntry.pairingApps(address: "https://h.example").map(\.name) == FollowerApp.allCases.map(\.displayName))
-    }
-
-    @Test("Nightguard takes one address carrying the token as a query item")
-    func nightguardURL() {
-        #expect(FollowerAppEntry.nightguardURL(address: "http://192.168.1.42:1337", token: "abc-_9") == "http://192.168.1.42:1337/?token=abc-_9")
     }
 }
 

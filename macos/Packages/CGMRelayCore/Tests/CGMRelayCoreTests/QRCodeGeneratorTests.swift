@@ -134,4 +134,46 @@ struct FollowerQRPlannerTests {
             #expect(FollowerQRPlanner.qr(for: app, address: Self.address, token: "", pairingCode: "CODE") == nil)
         }
     }
+
+    /// darkBoxSide is the side of the bounding box of the image's dark pixels.
+    private func darkBoxSide(_ image: CGImage) -> Int? {
+        guard
+            let context = CGContext(
+                data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ),
+            let data = context.data
+        else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let pixels = data.bindMemory(to: UInt8.self, capacity: image.width * image.height * 4)
+        var minX = Int.max, maxX = -1, minY = Int.max, maxY = -1
+        for y in 0..<image.height {
+            for x in 0..<image.width where pixels[(y * image.width + x) * 4] < 128 {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        return max(maxX - minX, maxY - minY) + 1
+    }
+
+    @Test("every follower app's code fills the same tile at the same drawn size and decodes back to its exact payload")
+    func everyAppsCodeFillsTheTileAndDecodes() throws {
+        let addresses = [Self.address, "http://192.168.100.200:10000", "http://10.0.0.5:1337"]
+        let sides = [QRCodeGenerator.standardTileSide, QRCodeGenerator.compactTileSide]
+        for side in sides {
+            let pixels = Int(side) * QRCodeGenerator.renderScale
+            var boxes: [String: Int] = [:]
+            for app in FollowerApp.allCases {
+                for address in addresses {
+                    let qr = try #require(FollowerQRPlanner.qr(for: app, address: address, token: Self.token, pairingCode: "CODE_abc-123"))
+                    let image = try QRCodeGenerator.cgImage(for: qr.payload, sidePixels: pixels)
+                    #expect(image.width == pixels && image.height == pixels, "\(app) at \(side) is not the tile's size")
+                    #expect(QRCodeGenerator.decode(image) == qr.payload, "\(app) at \(side) did not decode back to its payload")
+                    boxes["\(app) \(address)"] = try #require(darkBoxSide(image))
+                }
+            }
+            let largest = Double(boxes.values.max()!), smallest = Double(boxes.values.min()!)
+            #expect(smallest / largest >= 0.98, "drawn code sides at \(side) differ by more than 2%: \(boxes)")
+        }
+    }
 }

@@ -7,8 +7,8 @@ public struct FollowerQR: Equatable, Sendable {
     /// payload is the exact string the QR code carries.
     public let payload: String
     /// carriesToken is whether the payload itself holds the access token,
-    /// in which case it is shown only while the pane is open and scanned
-    /// from inside the app rather than with the camera.
+    /// in which case it is scanned from inside the app rather than with the
+    /// camera.
     public let carriesToken: Bool
     /// caption says which app scans it and where.
     public let caption: String

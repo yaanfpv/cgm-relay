@@ -116,4 +116,21 @@ struct AppSettingsTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
         #expect(decoded.connectFollowerApp == .loopFollow)
     }
+
+    @Test("the safety notice is asked until its current wording is accepted, then asked again only if the wording changes")
+    func safetyNoticeAcceptance() throws {
+        #expect(AppSettings.default.safetyNoticeAcceptance == nil)
+        #expect(SafetyNotice.needsAcceptance(nil))
+        var settings = AppSettings.default
+        settings.safetyNoticeAcceptance = SafetyNotice.acceptance(appVersion: "1.0.0")
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded.safetyNoticeAcceptance?.appVersion == "1.0.0")
+        #expect(!SafetyNotice.needsAcceptance(decoded.safetyNoticeAcceptance))
+        let otherVersionOfApp = SafetyNoticeAcceptance(noticeVersion: SafetyNotice.version, appVersion: "2.0.0")
+        #expect(!SafetyNotice.needsAcceptance(otherVersionOfApp), "a new app version alone does not ask again")
+        let oldWording = SafetyNoticeAcceptance(noticeVersion: "an older wording", appVersion: "1.0.0")
+        #expect(SafetyNotice.needsAcceptance(oldWording))
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000}"#.utf8))
+        #expect(older.safetyNoticeAcceptance == nil)
+    }
 }

@@ -29,7 +29,7 @@ struct AlertsPaneView: View {
             } header: {
                 Text("Sign-in")
             } footer: {
-                Text("Turning either of these on will ask permission to send notifications.")
+                Text("Turning either of these on will ask permission to send notifications. \(SafetyNotice.alertsCaveat)")
             }
 
             if model.notificationPermissionDenied {

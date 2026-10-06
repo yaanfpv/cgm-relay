@@ -59,14 +59,21 @@ struct SetupView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            content
-                .fixedSize(horizontal: false, vertical: true)
-            footer
+        Group {
+            if model.needsSafetyNotice {
+                noticeScreen
+            } else {
+                VStack(spacing: 0) {
+                    header
+                    content
+                        .fixedSize(horizontal: false, vertical: true)
+                    footer
+                }
+            }
         }
         .frame(width: SettingsView.paneWidth)
         .background(WindowFronting())
+        .cgmWindowBackground()
         .onAppear {
             // The window scene keeps this view's state across a close and
             // reopen, so each opening starts over rather than resuming.
@@ -75,6 +82,31 @@ struct SetupView: View {
         }
         .onChange(of: step) { _, newStep in
             if newStep == .reach { refreshNetworkState() }
+        }
+    }
+
+    /// noticeScreen is what comes before the first step, and the only thing
+    /// shown when its wording changes after setup is done: the safety notice
+    /// and the one action that accepts it.
+    private var noticeScreen: some View {
+        VStack(spacing: 16) {
+            Text("Before You Start")
+                .font(.title2.bold())
+            SafetyNoticeText(font: .body)
+                .multilineTextAlignment(.center)
+            AccessibleButton("I Understand", style: .primary, action: acceptSafetyNotice)
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 32)
+        .padding(.vertical, 28)
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func acceptSafetyNotice() {
+        model.acceptSafetyNotice()
+        if !model.needsSetup {
+            dismissWindow(id: SetupWindow.id)
         }
     }
 

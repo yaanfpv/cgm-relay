@@ -11,7 +11,12 @@ struct GeneralPaneView: View {
     @State private var retentionErrorMessage: String?
     @State private var pendingRetentionValue: Int?
     @State private var isConfirmingLowerRetention = false
-    @FocusState private var retentionFieldFocused: Bool
+    @State private var retentionSettler = RetentionChangeSettler()
+    @FocusState private var retentionFocus: RetentionFocus?
+
+    private enum RetentionFocus: Hashable {
+        case field, stepper
+    }
 
     var body: some View {
         Form {
@@ -69,8 +74,13 @@ struct GeneralPaneView: View {
                         .accessibilityLabel("Days")
                         .frame(width: 40)
                         .multilineTextAlignment(.trailing)
-                        .focused($retentionFieldFocused)
+                        .focused($retentionFocus, equals: .field)
                         .onSubmit { commitRetention() }
+                    Stepper("Days", value: retentionStepperBinding, in: AppSettings.retentionDaysRange)
+                        .labelsHidden()
+                        .accessibilityLabel("Days")
+                        .accessibilityValue("\(retentionStepperBinding.wrappedValue)")
+                        .focused($retentionFocus, equals: .stepper)
                     Text("days")
                 }
                 if let retentionErrorMessage {
@@ -89,10 +99,32 @@ struct GeneralPaneView: View {
         .onAppear {
             model.refreshLoginItemStatus()
             retentionText = String(model.settings.retentionDays)
+            retentionErrorMessage = model.retentionNotice
+            model.retentionNotice = nil
+            retentionSettler.onSettled = { applyRetention($0) }
         }
-        .onChange(of: retentionFieldFocused) { _, isFocused in
-            if !isFocused {
+        .onDisappear {
+            // Whatever is typed or clicked but uncommitted is decided here,
+            // since switching tabs removes the pane before focus moves.
+            retentionSettler.cancel()
+            switch RetentionLeaveDecision.decide(current: model.settings.retentionDays, text: retentionText) {
+            case .nothing:
+                break
+            case .save(let value):
+                model.updateRetentionDays(value)
+            case .held(let message):
+                model.retentionNotice = message
+            }
+        }
+        .onChange(of: retentionText) { _, _ in
+            if retentionFocus == .field { retentionErrorMessage = nil }
+        }
+        .onChange(of: retentionFocus) { old, new in
+            if old == .field, new != .field {
                 commitRetention()
+            }
+            if old == .stepper, new != .stepper {
+                retentionSettler.flush()
             }
         }
         .confirmationDialog(
@@ -126,30 +158,54 @@ struct GeneralPaneView: View {
         Binding(get: { model.settings.units }, set: { model.updateUnits($0) })
     }
 
+    /// retentionStepperBinding shows the typed value while it is valid and
+    /// the saved one otherwise; a click only proposes a value, which the
+    /// settler hands on once the clicks stop.
+    private var retentionStepperBinding: Binding<Int> {
+        Binding(
+            get: {
+                if case .valid(let value) = RetentionCommitValidation.validate(retentionText) { return value }
+                return model.settings.retentionDays
+            },
+            set: { value in
+                retentionErrorMessage = nil
+                retentionText = String(value)
+                retentionSettler.propose(value)
+            }
+        )
+    }
+
     /// commitRetention runs once, on Return or focus loss, never on every
-    /// keystroke: a value already equal to the saved one is left alone
-    /// (no restart, no confirmation), a lower value asks first since it
-    /// deletes readings at the engine's next prune, a raised value
-    /// commits at once, and an invalid value is refused with an inline
-    /// message rather than saved or silently clamped.
+    /// keystroke, and takes over from any stepper clicks still waiting: an
+    /// invalid value is refused with an inline message rather than saved or
+    /// silently clamped.
     private func commitRetention() {
+        retentionSettler.cancel()
         switch RetentionCommitValidation.validate(retentionText) {
         case .invalid(let message):
             retentionErrorMessage = message
         case .valid(let value):
             retentionErrorMessage = nil
-            guard value != model.settings.retentionDays else {
-                retentionText = String(value)
-                return
-            }
-            switch RetentionCommitDecision.decide(current: model.settings.retentionDays, new: value) {
-            case .needsConfirmation:
-                pendingRetentionValue = value
-                isConfirmingLowerRetention = true
-            case .commitsImmediately:
-                model.updateRetentionDays(value)
-                retentionText = String(value)
-            }
+            applyRetention(value)
+        }
+    }
+
+    /// applyRetention saves a valid value: one already equal to the saved
+    /// value is left alone (no restart, no confirmation), a lower value asks
+    /// first since it deletes readings at the engine's next prune, and a
+    /// raised value commits at once.
+    private func applyRetention(_ value: Int) {
+        guard value != model.settings.retentionDays else {
+            retentionText = String(value)
+            return
+        }
+        switch RetentionCommitDecision.decide(current: model.settings.retentionDays, new: value) {
+        case .needsConfirmation:
+            pendingRetentionValue = value
+            isConfirmingLowerRetention = true
+        case .commitsImmediately:
+            model.updateRetentionDays(value)
+            retentionText = String(value)
         }
     }
 

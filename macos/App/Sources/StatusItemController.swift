@@ -13,7 +13,7 @@ import SwiftUI
 /// all invoke, so the panel opens for every one of them; the SwiftUI
 /// scene's item exposed a press that opened nothing.
 @MainActor
-final class StatusItemController: NSObject {
+final class StatusItemController: NSObject, NSPopoverDelegate {
     private let model: AppModel
     private let updates: UpdatesModel
     private let sceneActions: SceneActions
@@ -22,6 +22,8 @@ final class StatusItemController: NSObject {
     private var rendered: MenuBarItemState?
     private let pressOpensContextMenu: Bool
     private var observations: Set<AnyCancellable> = []
+    private let focusRing = PanelFocusRing()
+    private var keyDownMonitor: Any?
 
     /// pressOpensContextMenu makes a plain press open the right-click menu,
     /// so a development walk with no pointer can reach it. It is only ever
@@ -47,10 +49,11 @@ final class StatusItemController: NSObject {
             openSetup: { [weak self] in self?.openSetup() },
             performUpdate: { [weak self] in self?.performUpdate() }
         )
-        let hosting = NSHostingController(rootView: MenuContentView(model: model, updates: updates, actions: panelActions))
+        let hosting = NSHostingController(rootView: MenuContentView(model: model, updates: updates, actions: panelActions, focusRing: focusRing))
         hosting.sizingOptions = [.preferredContentSize]
         popover.contentViewController = hosting
         popover.behavior = .transient
+        popover.delegate = self
 
         // The item redraws only when what it displays changes, so an
         // unrelated model change costs a comparison and nothing more.
@@ -65,7 +68,7 @@ final class StatusItemController: NSObject {
         model.$menuPanelRequest
             .dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.showPanel() }
+            .sink { [weak self] _ in self?.showPanel(restsUntilKeyboard: true) }
             .store(in: &observations)
         refreshItem()
     }
@@ -121,8 +124,16 @@ final class StatusItemController: NSObject {
         } else if popover.isShown {
             popover.performClose(sender)
         } else {
-            showPanel()
+            showPanel(restsUntilKeyboard: Self.isPointerClick(NSApp.currentEvent))
         }
+    }
+
+    /// isPointerClick is true for a plain left click. A press from
+    /// VoiceOver, accessibility or the keyboard arrives with no mouse event
+    /// behind it, and those openings keep landing focus on a control.
+    private static func isPointerClick(_ event: NSEvent?) -> Bool {
+        guard let event, event.type == .leftMouseUp else { return false }
+        return !event.modifierFlags.contains(.control)
     }
 
     /// isSecondaryClick is true for a right click and for a control-click,
@@ -141,11 +152,35 @@ final class StatusItemController: NSObject {
         }
     }
 
-    private func showPanel() {
+    /// showPanel opens the panel. restsUntilKeyboard is for an opening nobody
+    /// made with the keyboard: no control holds focus and none draws a focus
+    /// ring until the first key press, after which Tab starts from the first
+    /// control as usual.
+    private func showPanel(restsUntilKeyboard: Bool) {
         guard let button = statusItem.button, !popover.isShown else { return }
         model.onMenuOpened()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+        let window = popover.contentViewController?.view.window
+        window?.makeKey()
+        guard restsUntilKeyboard else { return }
+        focusRing.isHidden = true
+        window?.makeFirstResponder(nil)
+        // The hosted view can take focus again a turn after it appears.
+        DispatchQueue.main.async { [weak window] in window?.makeFirstResponder(nil) }
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.endRest()
+            return event
+        }
+    }
+
+    private func endRest() {
+        focusRing.isHidden = false
+        if let keyDownMonitor { NSEvent.removeMonitor(keyDownMonitor) }
+        keyDownMonitor = nil
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        endRest()
     }
 
     private func showContextMenu() {
@@ -197,6 +232,14 @@ final class StatusItemController: NSObject {
     @objc private func quit() {
         model.quit()
     }
+}
+
+/// PanelFocusRing says whether the panel hides its keyboard focus ring: it
+/// does while the panel is at rest after an opening nobody made with the
+/// keyboard.
+@MainActor
+final class PanelFocusRing: ObservableObject {
+    @Published var isHidden = false
 }
 
 /// MenuPanelActions are the panel's ways out into the rest of the app,
