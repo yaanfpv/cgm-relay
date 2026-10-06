@@ -216,9 +216,17 @@ struct RealProcessLauncherTests {
 
     /// ScannerCase feeds ReadyLineScanner a stream in the given chunks and
     /// names how many times append must return true across all of them.
-    struct ScannerCase: Sendable {
+    struct ScannerCase: Sendable, CustomTestStringConvertible {
         let chunks: [String]
         let wantReady: Int
+
+        /// A short label for the test report. Without it every result line
+        /// prints each chunk whole, and the half-megabyte flood chunk alone
+        /// makes the report megabytes long and the run minutes slower.
+        var testDescription: String {
+            let shown = chunks.map { $0.count > 40 ? "<\($0.count) characters>" : $0.debugDescription }
+            return "\(shown.joined(separator: " + ")) -> \(wantReady)"
+        }
     }
 
     /// The launcher calls onReady only when append returns true, so the
