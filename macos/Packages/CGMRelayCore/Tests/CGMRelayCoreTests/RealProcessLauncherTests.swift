@@ -167,12 +167,16 @@ struct RealProcessLauncherTests {
         func increment() { lock.withLock { stored += 1 } }
     }
 
-    /// readyCount runs shellCommand, waits for it to exit and for onReady to
-    /// have fired `expected` times (up to five seconds, since the stdout
-    /// reader can trail the exit callback on a busy machine), then a short
-    /// settle so a second, wrong call would still be counted, and returns how
-    /// many times onReady fired.
-    private func readyCount(forShellCommand shellCommand: String, expected: Int) async throws -> Int {
+    /// readyWindow is how long after the child exits onReady calls are still
+    /// counted. The stdout reader can trail the exit callback on a busy
+    /// machine, so a late right call must still count; the same window
+    /// applies to every case, so a wrong call (a second one, or one for
+    /// output that holds no ready line) arriving within it is counted too.
+    private static let readyWindow: Duration = .seconds(3)
+
+    /// readyCount runs shellCommand, waits for it to exit, keeps counting
+    /// onReady calls for readyWindow, and returns how many there were.
+    private func readyCount(forShellCommand shellCommand: String) async throws -> Int {
         let counter = ReadyCounter()
         let launcher = RealProcessLauncher()
         let exit = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int32, Error>) in
@@ -188,10 +192,7 @@ struct RealProcessLauncherTests {
             }
         }
         #expect(exit == 0)
-        for _ in 0..<200 where counter.count < expected {
-            try await Task.sleep(for: .milliseconds(25))
-        }
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: Self.readyWindow)
         return counter.count
     }
 
@@ -205,7 +206,7 @@ struct RealProcessLauncherTests {
         ]
     )
     func readyLineFiresOnReady(_ testCase: ReadyCase) async throws {
-        #expect(try await readyCount(forShellCommand: testCase.shellCommand, expected: testCase.wantCount) == testCase.wantCount, "\(testCase.shellCommand)")
+        #expect(try await readyCount(forShellCommand: testCase.shellCommand) == testCase.wantCount, "\(testCase.shellCommand)")
     }
 
     struct ReadyCase: Sendable {
@@ -220,12 +221,11 @@ struct RealProcessLauncherTests {
         let wantReady: Int
     }
 
-    /// The scanner owns "exactly once, and never for anything else": the
-    /// launcher calls onReady only when append returns true, so this is the
-    /// count contract, checked with no process and no clock. The table above
-    /// checks that the real stdout pipe reaches it; a finite wait there can
-    /// never rule out a callback arriving arbitrarily late, and this one has
-    /// no wait to outlast.
+    /// The launcher calls onReady only when append returns true, so the
+    /// scanner's own count is checked here directly, with no process and no
+    /// clock, on the same streams and on splits and near misses the process
+    /// table cannot produce reliably. The process table above checks the
+    /// calls that actually reach onReady through a real pipe.
     @Test(
         "the ready-line scanner reports the ready line exactly once and never for other output",
         arguments: [
