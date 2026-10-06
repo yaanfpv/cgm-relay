@@ -167,8 +167,15 @@ struct RealProcessLauncherTests {
         func increment() { lock.withLock { stored += 1 } }
     }
 
-    /// readyCount runs shellCommand, waits for it to exit and its stdout to
-    /// drain, and returns how many times onReady fired.
+    /// readyWindow is how long after the child exits onReady calls are still
+    /// counted. The stdout reader can trail the exit callback on a busy
+    /// machine, so a late right call must still count; the same window
+    /// applies to every case, so a wrong call (a second one, or one for
+    /// output that holds no ready line) arriving within it is counted too.
+    private static let readyWindow: Duration = .seconds(3)
+
+    /// readyCount runs shellCommand, waits for it to exit, keeps counting
+    /// onReady calls for readyWindow, and returns how many there were.
     private func readyCount(forShellCommand shellCommand: String) async throws -> Int {
         let counter = ReadyCounter()
         let launcher = RealProcessLauncher()
@@ -185,7 +192,7 @@ struct RealProcessLauncherTests {
             }
         }
         #expect(exit == 0)
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: Self.readyWindow)
         return counter.count
     }
 
@@ -205,5 +212,35 @@ struct RealProcessLauncherTests {
     struct ReadyCase: Sendable {
         let shellCommand: String
         let wantCount: Int
+    }
+
+    /// ScannerCase feeds ReadyLineScanner a stream in the given chunks and
+    /// names how many times append must return true across all of them.
+    struct ScannerCase: Sendable {
+        let chunks: [String]
+        let wantReady: Int
+    }
+
+    /// The launcher calls onReady only when append returns true, so the
+    /// scanner's own count is checked here directly, with no process and no
+    /// clock, on the same streams and on splits and near misses the process
+    /// table cannot produce reliably. The process table above checks the
+    /// calls that actually reach onReady through a real pipe.
+    @Test(
+        "the ready-line scanner reports the ready line exactly once and never for other output",
+        arguments: [
+            ScannerCase(chunks: ["ready\n"], wantReady: 1),
+            ScannerCase(chunks: ["rea", "dy\nready\n"], wantReady: 1),
+            ScannerCase(chunks: ["ready\nready\nready\n"], wantReady: 1),
+            ScannerCase(chunks: ["ready\n", "ready\n", "ready\n"], wantReady: 1),
+            ScannerCase(chunks: ["not ready\nreadyx\nready"], wantReady: 0),
+            ScannerCase(chunks: ["xready\n", " ready\n", "ready \n", "READY\n"], wantReady: 0),
+            ScannerCase(chunks: [String(repeating: "x", count: 500_000), "\nready\n"], wantReady: 1),
+        ]
+    )
+    func scannerReportsTheReadyLineExactlyOnce(_ testCase: ScannerCase) {
+        var scanner = ReadyLineScanner()
+        let got = testCase.chunks.reduce(0) { count, chunk in count + (scanner.append(Data(chunk.utf8)) ? 1 : 0) }
+        #expect(got == testCase.wantReady, "\(testCase.chunks.map { String($0.prefix(40)) })")
     }
 }
