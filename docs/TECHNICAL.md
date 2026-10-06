@@ -24,7 +24,7 @@ By default the relay listens only on the machine it runs on, so something has to
 
 ## Run it on a server
 
-CGM Relay is built from source. You need Go (the version in `go.mod`). Once the repository is public, one command installs the engine:
+CGM Relay is built from source. You need Go (the version in `go.mod`). One command installs the engine:
 
 ```bash
 go install github.com/yaanfpv/cgm-relay/cmd/cgm-relay@latest

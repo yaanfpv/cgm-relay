@@ -63,7 +63,7 @@ Only one thing should follow your LibreLinkUp account. Once your app reads from 
 
 - macOS 15 Sequoia or later, on Apple silicon and Intel.
 - FreeStyle Libre sensors that share through LibreLinkUp.
-- xDrip4iOS, xDrip+, LoopFollow and Nightguard as follower apps. Each was tested against CGM Relay with the settings above, and xDrip4iOS is the one the author uses day to day.
+- xDrip4iOS, xDrip+, LoopFollow and Nightguard as follower apps. Each was tested against CGM Relay with the settings above.
 - A Linux server instead of a Mac: see [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server).
 
 ## Privacy
