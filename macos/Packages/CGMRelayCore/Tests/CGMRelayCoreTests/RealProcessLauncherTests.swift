@@ -212,4 +212,35 @@ struct RealProcessLauncherTests {
         let shellCommand: String
         let wantCount: Int
     }
+
+    /// ScannerCase feeds ReadyLineScanner a stream in the given chunks and
+    /// names how many times append must return true across all of them.
+    struct ScannerCase: Sendable {
+        let chunks: [String]
+        let wantReady: Int
+    }
+
+    /// The scanner owns "exactly once, and never for anything else": the
+    /// launcher calls onReady only when append returns true, so this is the
+    /// count contract, checked with no process and no clock. The table above
+    /// checks that the real stdout pipe reaches it; a finite wait there can
+    /// never rule out a callback arriving arbitrarily late, and this one has
+    /// no wait to outlast.
+    @Test(
+        "the ready-line scanner reports the ready line exactly once and never for other output",
+        arguments: [
+            ScannerCase(chunks: ["ready\n"], wantReady: 1),
+            ScannerCase(chunks: ["rea", "dy\nready\n"], wantReady: 1),
+            ScannerCase(chunks: ["ready\nready\nready\n"], wantReady: 1),
+            ScannerCase(chunks: ["ready\n", "ready\n", "ready\n"], wantReady: 1),
+            ScannerCase(chunks: ["not ready\nreadyx\nready"], wantReady: 0),
+            ScannerCase(chunks: ["xready\n", " ready\n", "ready \n", "READY\n"], wantReady: 0),
+            ScannerCase(chunks: [String(repeating: "x", count: 500_000), "\nready\n"], wantReady: 1),
+        ]
+    )
+    func scannerReportsTheReadyLineExactlyOnce(_ testCase: ScannerCase) {
+        var scanner = ReadyLineScanner()
+        let got = testCase.chunks.reduce(0) { count, chunk in count + (scanner.append(Data(chunk.utf8)) ? 1 : 0) }
+        #expect(got == testCase.wantReady, "\(testCase.chunks.map { String($0.prefix(40)) })")
+    }
 }
