@@ -167,9 +167,12 @@ struct RealProcessLauncherTests {
         func increment() { lock.withLock { stored += 1 } }
     }
 
-    /// readyCount runs shellCommand, waits for it to exit and its stdout to
-    /// drain, and returns how many times onReady fired.
-    private func readyCount(forShellCommand shellCommand: String) async throws -> Int {
+    /// readyCount runs shellCommand, waits for it to exit and for onReady to
+    /// have fired `expected` times (up to five seconds, since the stdout
+    /// reader can trail the exit callback on a busy machine), then a short
+    /// settle so a second, wrong call would still be counted, and returns how
+    /// many times onReady fired.
+    private func readyCount(forShellCommand shellCommand: String, expected: Int) async throws -> Int {
         let counter = ReadyCounter()
         let launcher = RealProcessLauncher()
         let exit = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int32, Error>) in
@@ -185,6 +188,9 @@ struct RealProcessLauncherTests {
             }
         }
         #expect(exit == 0)
+        for _ in 0..<200 where counter.count < expected {
+            try await Task.sleep(for: .milliseconds(25))
+        }
         try await Task.sleep(for: .milliseconds(200))
         return counter.count
     }
@@ -199,7 +205,7 @@ struct RealProcessLauncherTests {
         ]
     )
     func readyLineFiresOnReady(_ testCase: ReadyCase) async throws {
-        #expect(try await readyCount(forShellCommand: testCase.shellCommand) == testCase.wantCount, "\(testCase.shellCommand)")
+        #expect(try await readyCount(forShellCommand: testCase.shellCommand, expected: testCase.wantCount) == testCase.wantCount, "\(testCase.shellCommand)")
     }
 
     struct ReadyCase: Sendable {
