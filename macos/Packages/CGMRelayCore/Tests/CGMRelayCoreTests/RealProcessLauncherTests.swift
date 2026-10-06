@@ -24,7 +24,8 @@ struct RealProcessLauncherTests {
                 _ = try launcher.launch(
                     executableURL: URL(fileURLWithPath: "/bin/sh"),
                     arguments: ["-c", shellCommand],
-                    standardInputData: standardInputData
+                    standardInputData: standardInputData,
+                    onReady: {}
                 ) { exitCode in
                     continuation.resume(returning: exitCode)
                 }
@@ -107,7 +108,8 @@ struct RealProcessLauncherTests {
                 _ = try launcher.launch(
                     executableURL: URL(fileURLWithPath: "/bin/sh"),
                     arguments: ["-c", shellCommand],
-                    standardInputData: standardInputData
+                    standardInputData: standardInputData,
+                    onReady: {}
                 ) { continuation.resume(returning: $0) }
             } catch {
                 continuation.resume(throwing: error)
@@ -136,7 +138,8 @@ struct RealProcessLauncherTests {
         let process = try launcher.launch(
             executableURL: URL(fileURLWithPath: "/bin/sh"),
             arguments: ["-c", "printf 'poller: alive\\n' >&2; exec sleep 30"],
-            standardInputData: Data()
+            standardInputData: Data(),
+            onReady: {}
         ) { _ in }
         defer { process.terminate() }
 
@@ -154,5 +157,53 @@ struct RealProcessLauncherTests {
         #expect(got.count == 3)
         #expect(got.first?.utf8.count == EngineLineSplitter.maxLineBytes)
         #expect(Array(got.dropFirst()) == ["poller: after", "poller: last"])
+    }
+
+    /// ReadyCounter counts onReady calls from the launcher's background queue.
+    private final class ReadyCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = 0
+        var count: Int { lock.withLock { stored } }
+        func increment() { lock.withLock { stored += 1 } }
+    }
+
+    /// readyCount runs shellCommand, waits for it to exit and its stdout to
+    /// drain, and returns how many times onReady fired.
+    private func readyCount(forShellCommand shellCommand: String) async throws -> Int {
+        let counter = ReadyCounter()
+        let launcher = RealProcessLauncher()
+        let exit = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int32, Error>) in
+            do {
+                _ = try launcher.launch(
+                    executableURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: ["-c", shellCommand],
+                    standardInputData: Data(),
+                    onReady: { counter.increment() }
+                ) { continuation.resume(returning: $0) }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+        #expect(exit == 0)
+        try await Task.sleep(for: .milliseconds(200))
+        return counter.count
+    }
+
+    @Test(
+        "onReady fires once for the engine's ready line, never for other stdout, and a flood of stdout never blocks the child",
+        arguments: [
+            ReadyCase(shellCommand: "printf 'ready\\n'", wantCount: 1),
+            ReadyCase(shellCommand: "printf 'rea'; sleep 0.1; printf 'dy\\nready\\n'", wantCount: 1),
+            ReadyCase(shellCommand: "printf 'not ready\\nreadyx\\nready'", wantCount: 0),
+            ReadyCase(shellCommand: "head -c 500000 /dev/zero | tr '\\0' 'x'; printf '\\nready\\n'", wantCount: 1),
+        ]
+    )
+    func readyLineFiresOnReady(_ testCase: ReadyCase) async throws {
+        #expect(try await readyCount(forShellCommand: testCase.shellCommand) == testCase.wantCount, "\(testCase.shellCommand)")
+    }
+
+    struct ReadyCase: Sendable {
+        let shellCommand: String
+        let wantCount: Int
     }
 }

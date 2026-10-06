@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/config"
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 )
@@ -168,7 +169,7 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 	tracker.record("xDrip4iOS/1.0", seenAt)
 	tracker.record("LoopFollow/1.0", seenAt.Add(time.Minute))
 
-	h := newStatusHandler(fake, tracker, pairing.NewStore(nil))
+	h := newStatusHandler(fake, tracker, pairing.NewStore(nil), "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Host = "127.0.0.1:1338" // this test is about the response shape, not the Host gate
@@ -219,7 +220,7 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 // rather than the zero time formatted as if it meant something.
 func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 	t.Parallel()
-	h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil))
+	h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Host = "127.0.0.1:1338" // this test is about the response shape, not the Host gate
@@ -254,7 +255,7 @@ func TestStatusHandlerOmitsTrendTheDeviceDidNotCompute(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/status", nil)
 		req.Host = "127.0.0.1:1338"
-		newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil)).ServeHTTP(rec, req)
+		newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil), "").ServeHTTP(rec, req)
 
 		var raw map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
@@ -278,7 +279,7 @@ func TestStatusHandlerOmitsTrendTheDeviceDidNotCompute(t *testing.T) {
 func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 	t.Parallel()
 	fake := fakePollerStatus{status: poller.Status{LastReadingMgDl: 145}}
-	h := newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil))
+	h := newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil), "")
 
 	cases := []struct {
 		host       string
@@ -313,6 +314,124 @@ func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+const (
+	testStatusSecret = "per-launch-secret-0123456789abcdef"
+	testMintBody     = `{"apps":[{"name":"A","steps":["s"],"fields":[{"label":"URL","value":"{token}"}],"links":[]}]}`
+)
+
+// statusRequest sends one request through h as a loopback caller carrying
+// the given secret header value ("" sends no header at all).
+func statusRequest(h http.Handler, method, path, secret string) *httptest.ResponseRecorder {
+	var body *strings.Reader
+	if method == http.MethodPost {
+		body = strings.NewReader(testMintBody)
+	} else {
+		body = strings.NewReader("")
+	}
+	req := httptest.NewRequest(method, path, body)
+	req.Host = "127.0.0.1:1338"
+	req.RemoteAddr = "127.0.0.1:50000"
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if secret != "" {
+		req.Header.Set(config.StatusSecretHeader, secret)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestStatusHandlerSecret checks the caller authentication the loopback,
+// Host and peer checks cannot give: with a secret configured, /status and
+// /pairing both refuse a missing or wrong secret with the same fixed body
+// and hand back no code; without one, /status stays open and /pairing is
+// absent even for a caller that sends a secret header.
+func TestStatusHandlerSecret(t *testing.T) {
+	t.Parallel()
+	fake := fakePollerStatus{status: poller.Status{LastReadingMgDl: 145}}
+
+	cases := []struct {
+		name       string
+		configured string
+		method     string
+		path       string
+		sent       string
+		wantStatus int
+		wantMint   bool
+	}{
+		{name: "mint with the right secret", configured: testStatusSecret, method: http.MethodPost, path: "/pairing", sent: testStatusSecret, wantStatus: http.StatusOK, wantMint: true},
+		{name: "mint with no secret", configured: testStatusSecret, method: http.MethodPost, path: "/pairing", wantStatus: http.StatusUnauthorized},
+		{name: "mint with a wrong secret", configured: testStatusSecret, method: http.MethodPost, path: "/pairing", sent: "wrong-secret-0123456789abcdef", wantStatus: http.StatusUnauthorized},
+		{name: "mint with a prefix of the secret", configured: testStatusSecret, method: http.MethodPost, path: "/pairing", sent: testStatusSecret[:len(testStatusSecret)-1], wantStatus: http.StatusUnauthorized},
+		{name: "mint with no secret configured", method: http.MethodPost, path: "/pairing", wantStatus: http.StatusNotFound},
+		{name: "mint with no secret configured, a secret sent", method: http.MethodPost, path: "/pairing", sent: testStatusSecret, wantStatus: http.StatusNotFound},
+		{name: "status with the right secret", configured: testStatusSecret, method: http.MethodGet, path: "/status", sent: testStatusSecret, wantStatus: http.StatusOK},
+		{name: "status with no secret", configured: testStatusSecret, method: http.MethodGet, path: "/status", wantStatus: http.StatusUnauthorized},
+		{name: "status with a wrong secret", configured: testStatusSecret, method: http.MethodGet, path: "/status", sent: "wrong-secret-0123456789abcdef", wantStatus: http.StatusUnauthorized},
+		{name: "status with no secret configured", method: http.MethodGet, path: "/status", wantStatus: http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			pairings := pairing.NewStore(nil)
+			h := newStatusHandler(fake, newClientTracker(), pairings, c.configured)
+			rec := statusRequest(h, c.method, c.path, c.sent)
+
+			if rec.Code != c.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, c.wantStatus, rec.Body.String())
+			}
+			if c.wantStatus == http.StatusUnauthorized {
+				if want := "relay: status endpoint needs the app's secret\n"; rec.Body.String() != want {
+					t.Errorf("body = %q, want the fixed %q", rec.Body.String(), want)
+				}
+			}
+			if c.wantMint {
+				var resp struct {
+					Code string `json:"code"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("decode mint response: %v", err)
+				}
+				if _, ok := pairings.Lookup(resp.Code); !ok {
+					t.Error("the minted code does not resolve")
+				}
+			} else if c.path == "/pairing" {
+				var resp struct {
+					Code string `json:"code"`
+				}
+				if json.Unmarshal(rec.Body.Bytes(), &resp) == nil && resp.Code != "" {
+					t.Errorf("a refused mint still answered with a code: %s", rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// TestClientTrackerTruncatesLongUserAgents checks that the key the tracker
+// stores is cut at maxTrackedUserAgentBytes, so a client sending a huge
+// User-Agent cannot make 256 tracked clients hold huge keys.
+func TestClientTrackerTruncatesLongUserAgents(t *testing.T) {
+	t.Parallel()
+	tracker := newClientTracker()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	wrapped := trackClients(inner, tracker, fixedNow(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entries.json", nil)
+	req.Header.Set("User-Agent", strings.Repeat("a", 5000))
+	wrapped.ServeHTTP(httptest.NewRecorder(), req)
+
+	seen := tracker.snapshot()
+	if len(seen) != 1 {
+		t.Fatalf("len(seen) = %d, want 1", len(seen))
+	}
+	for key := range seen {
+		if len(key) != maxTrackedUserAgentBytes {
+			t.Errorf("stored key is %d bytes, want %d", len(key), maxTrackedUserAgentBytes)
+		}
 	}
 }
 

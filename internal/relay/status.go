@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,11 @@ const unknownUserAgent = "unknown"
 // exceed this cap evicts whichever entry has the oldest last-seen time
 // first.
 const maxTrackedClients = 256
+
+// maxTrackedUserAgentBytes bounds each key the tracker stores, so the
+// maxTrackedClients entries together never hold more than a few tens of
+// kilobytes whatever headers a client sends.
+const maxTrackedUserAgentBytes = 128
 
 // clientTracker records the last time each follower client, identified by
 // its User-Agent header, made an authenticated request to the Nightscout
@@ -112,6 +119,9 @@ func trackClients(next http.Handler, tracker *clientTracker, now func() time.Tim
 		if userAgent == "" {
 			userAgent = unknownUserAgent
 		}
+		if len(userAgent) > maxTrackedUserAgentBytes {
+			userAgent = strings.ToValidUTF8(userAgent[:maxTrackedUserAgentBytes], "")
+		}
 		tracker.record(userAgent, now())
 	})
 }
@@ -145,16 +155,23 @@ type pollerStatus interface {
 
 // newStatusHandler builds the local status endpoint: GET /status
 // reporting the poller's health and the clients tracker has seen, and
-// POST /pairing minting a pairing code for the Mac app. Binding the
-// listener to loopback is not enough on its own: a page open in the
-// user's browser can retarget its own domain to 127.0.0.1 (DNS
+// POST /pairing minting a pairing code for the Mac app.
+//
+// Binding the listener to loopback is not enough on its own. A page open in
+// the user's browser can retarget its own domain to 127.0.0.1 (DNS
 // rebinding) and issue a same-origin fetch that still reaches a loopback
-// listener, carrying that domain as the request's Host.
-// requireLoopbackHost closes that gap by checking Host on every request,
-// in addition to the listener's own bind address.
-func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.Store) http.Handler {
+// listener, carrying that domain as the request's Host; requireLoopbackHost
+// closes that gap by checking Host on every request.
+//
+// Neither check authenticates the caller: any other process or user on this
+// Mac passes both. statusSecret does. With one configured, both routes
+// require it in the config.StatusSecretHeader header. Without one (a
+// headless install reading its config from a file or the environment, which
+// has no Mac app), /status stays open on loopback as documented and
+// /pairing does not exist, since only the Mac app mints pairing codes.
+func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.Store, statusSecret string) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+	statusRoute := func(w http.ResponseWriter, r *http.Request) {
 		s := p.Status()
 		resp := statusResponse{
 			Running:         true,
@@ -174,9 +191,31 @@ func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.Handle("POST /pairing", pairing.MintHandler(pairings))
+	}
+	if statusSecret == "" {
+		mux.HandleFunc("GET /status", statusRoute)
+		mux.Handle("POST /pairing", http.NotFoundHandler())
+	} else {
+		mux.Handle("GET /status", requireStatusSecret(statusSecret, http.HandlerFunc(statusRoute)))
+		mux.Handle("POST /pairing", requireStatusSecret(statusSecret, pairing.MintHandler(pairings)))
+	}
 	return requireLoopbackHost(mux)
+}
+
+// requireStatusSecret answers 401 with a fixed body, and no detail about
+// which part was wrong, to any request whose config.StatusSecretHeader does
+// not carry secret. The comparison takes the same time wherever the values
+// first differ.
+func requireStatusSecret(secret string, next http.Handler) http.Handler {
+	want := []byte(secret)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get(config.StatusSecretHeader))
+		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+			http.Error(w, "relay: status endpoint needs the app's secret", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withPairingPage serves the pairing page under /connect/ and everything

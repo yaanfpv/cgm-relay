@@ -28,7 +28,9 @@ public protocol ProcessLauncher: Sendable {
     /// the process runs: it is a lifeline the engine watches for EOF, so
     /// this process's own end -- however it happens -- reaches the engine
     /// even with no signal involved. terminate() on the returned
-    /// RunningProcess closes it. onExit is called exactly once, whenever
+    /// RunningProcess closes it. onReady is called at most once, when the
+    /// process has written its one "ready" line to stdout, which it does
+    /// only after its listeners are bound. onExit is called exactly once, whenever
     /// the process terminates for any reason, with its exit code -- or,
     /// if it was killed by a signal rather than exiting on its own, the
     /// negative of that signal number, so a signal number can never be
@@ -40,6 +42,7 @@ public protocol ProcessLauncher: Sendable {
         executableURL: URL,
         arguments: [String],
         standardInputData: Data,
+        onReady: @escaping @Sendable () -> Void,
         onExit: @escaping @Sendable (Int32) -> Void
     ) throws -> any RunningProcess
 }

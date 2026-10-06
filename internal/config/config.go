@@ -46,10 +46,18 @@ const DefaultListenAddr = "127.0.0.1:1337"
 
 // DefaultStatusAddr is the address the relay's local status endpoint
 // listens on when nothing else sets one. Unlike ListenAddr, this one can
-// never be widened: the status endpoint carries no authentication of its
-// own, so IsLoopbackAddr enforces loopback-only regardless of what a
-// caller configures.
+// never be widened: IsLoopbackAddr enforces loopback-only regardless of what
+// a caller configures, whether or not a StatusSecret guards it.
 const DefaultStatusAddr = "127.0.0.1:1338"
+
+// StatusSecretHeader is the request header carrying Config.StatusSecret to
+// the status listener. The macOS app's StatusFetcher and PairingCodeMinter
+// must always agree with this name.
+const StatusSecretHeader = "X-CGM-Relay-Status-Secret"
+
+// minStatusSecretLength is the shortest status_secret the stdin loader
+// accepts, so a caller cannot configure a guessable one by mistake.
+const minStatusSecretLength = 16
 
 // DefaultRetentionDays is how many days of readings the relay keeps when
 // nothing else sets a value. It is derived from store.DefaultRetention,
@@ -83,8 +91,7 @@ type Config struct {
 	ListenAddr string `json:"listen_addr"`
 	// StatusAddr is the host:port the relay's local status endpoint
 	// listens on. It must always resolve to a loopback address; Load
-	// refuses any other value, from either the file or the environment,
-	// since the status endpoint carries no credential of its own.
+	// refuses any other value, from either the file or the environment.
 	StatusAddr string `json:"status_addr"`
 	// DatabasePath is where the encrypted reading database lives.
 	DatabasePath string `json:"database_path"`
@@ -99,6 +106,13 @@ type Config struct {
 	// file at KeyPath. Load and Setup populate it; it is never written
 	// to the config file.
 	Key []byte `json:"-"`
+	// StatusSecret, when set, is the per-launch secret the status listener
+	// requires in the StatusSecretHeader request header on /status and
+	// /pairing. Only `serve --config-stdin` sets it (the Mac app generates
+	// one per engine launch); the file and environment never carry one, so a
+	// headless install has none and the relay refuses to mint pairing codes.
+	// It is never written to the config file and never logged.
+	StatusSecret string `json:"-"`
 }
 
 // Paths are the on-disk locations Setup writes to and Load reads from.

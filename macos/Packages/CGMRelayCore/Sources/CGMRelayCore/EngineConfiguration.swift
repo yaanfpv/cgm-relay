@@ -30,6 +30,11 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
     /// itself refuses anything but https, or plain http to a loopback
     /// address, at load time.
     public var librelinkupBaseURL: String?
+    /// statusSecret is the LocalStatusSecret value of the engine process
+    /// this configuration is written to, which the engine requires of every
+    /// caller of its local status listener. nil leaves the engine without
+    /// one, so it refuses to mint pairing codes.
+    public var statusSecret: String?
 
     private enum CodingKeys: String, CodingKey {
         case librelinkupEmail = "librelinkup_email"
@@ -41,6 +46,7 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         case retentionDays = "retention_days"
         case key
         case librelinkupBaseURL = "librelinkup_base_url"
+        case statusSecret = "status_secret"
     }
 
     public init(
@@ -52,7 +58,8 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         databasePath: String,
         retentionDays: Int,
         key: String,
-        librelinkupBaseURL: String? = nil
+        librelinkupBaseURL: String? = nil,
+        statusSecret: String? = nil
     ) {
         self.librelinkupEmail = librelinkupEmail
         self.librelinkupPassword = librelinkupPassword
@@ -63,6 +70,15 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         self.retentionDays = retentionDays
         self.key = key
         self.librelinkupBaseURL = librelinkupBaseURL
+        self.statusSecret = statusSecret
+    }
+
+    /// withStatusSecret returns this configuration carrying secret as its
+    /// status secret, so every engine process can be given its own.
+    public func withStatusSecret(_ secret: String?) -> EngineConfiguration {
+        var copy = self
+        copy.statusSecret = secret
+        return copy
     }
 
     /// encodedForStandardInput renders the configuration as the single
