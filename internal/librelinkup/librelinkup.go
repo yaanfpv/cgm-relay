@@ -19,6 +19,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,11 @@ const (
 	// the poller's own once-a-minute cycle, so a hung request cannot
 	// silently stall reading collection until the next process restart.
 	defaultRequestTimeout = 30 * time.Second
+
+	// maxResponseBytes bounds how much of any one LibreLinkUp response is
+	// read, so a misbehaving or hostile endpoint cannot make the relay hold
+	// an unbounded body in memory. Real responses are far smaller.
+	maxResponseBytes = 8 << 20
 
 	// maxRegionRedirects bounds the sign-in redirect loop so a
 	// misconfigured or looping server cannot hang a Fetch call forever.
@@ -121,9 +127,9 @@ func WithBaseURL(baseURL string) Option {
 }
 
 // WithHTTPClient overrides the http.Client used for every request. The
-// default client already carries defaultRequestTimeout; an override that
-// carries no timeout of its own can let a hung request block Fetch
-// forever.
+// default client already carries defaultRequestTimeout and refuses HTTP
+// redirects; an override carries neither unless it sets them itself, and one
+// with no timeout can let a hung request block Fetch forever.
 func WithHTTPClient(c *http.Client) Option {
 	return func(s *Source) { s.client = c }
 }
@@ -140,7 +146,7 @@ func New(email, password string, opts ...Option) *Source {
 	s := &Source{
 		email:         email,
 		password:      password,
-		client:        &http.Client{Timeout: defaultRequestTimeout},
+		client:        &http.Client{Timeout: defaultRequestTimeout, CheckRedirect: refuseHTTPRedirects},
 		baseURL:       defaultBaseURL,
 		regionBaseURL: defaultRegionBaseURL,
 	}
@@ -148,6 +154,15 @@ func New(email, password string, opts ...Option) *Source {
 		opt(s)
 	}
 	return s
+}
+
+// refuseHTTPRedirects stops the default client following an HTTP redirect:
+// LibreLinkUp announces a region change in its JSON body, never with a
+// redirect, and following one would carry the sign-in password and bearer
+// token to whatever host a redirect named. The redirect response itself is
+// returned and reported as an unexpected status.
+func refuseHTTPRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 func defaultRegionBaseURL(region string) string {
@@ -334,7 +349,7 @@ func (s *Source) CheckAccount(ctx context.Context) error {
 
 // fetchGraph fetches the current measurement and history for patientID.
 func (s *Source) fetchGraph(ctx context.Context, token, accountID, patientID string) (*graphResponse, error) {
-	body, err := s.doAuthenticated(ctx, http.MethodGet, "/llu/connections/"+patientID+"/graph", token, accountID)
+	body, err := s.doAuthenticated(ctx, http.MethodGet, "/llu/connections/"+url.PathEscape(patientID)+"/graph", token, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -386,9 +401,12 @@ func (s *Source) send(req *http.Request) (*http.Response, []byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, nil, &cgm.TransientError{Err: fmt.Errorf("librelinkup: read response body: %w", err)}
+	}
+	if len(body) > maxResponseBytes {
+		return nil, nil, &cgm.TransientError{Err: fmt.Errorf("librelinkup: %s %s: response is larger than %d bytes", req.Method, req.URL.Path, maxResponseBytes)}
 	}
 	return resp, body, nil
 }

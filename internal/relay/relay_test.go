@@ -558,6 +558,7 @@ func TestRunLogsNoSecrets(t *testing.T) {
 
 		logs := &syncBuffer{}
 		cfg := testConfig(t)
+		cfg.StatusSecret = "leak-check-status-secret-should-never-log"
 		_, stop := runRelay(t, cfg, relay.WithSource(source), relay.WithLogOutput(logs))
 		stop()
 
@@ -583,6 +584,9 @@ func assertNoSecrets(t *testing.T, output string, cfg config.Config) {
 	}
 	if strings.Contains(output, string(cfg.Key)) {
 		t.Error("log output carries the store encryption key")
+	}
+	if cfg.StatusSecret != "" && strings.Contains(output, cfg.StatusSecret) {
+		t.Error("log output carries the status secret")
 	}
 }
 
@@ -614,24 +618,29 @@ func mustReadAndClose(t *testing.T, body io.ReadCloser) []byte {
 
 // TestRunPairingPageIsReachableButItsMintRouteIsNot drives the real
 // listeners: a code is minted over the loopback status endpoint (and only
-// there), the phone-facing listener serves the pairing page for it without
-// a credential, and that listener has no route that mints a code, so a
-// phone or tailnet peer cannot make one.
+// there, and only by a caller holding the status secret), the phone-facing
+// listener serves the pairing page for it without a credential, and that
+// listener has no route that mints a code, so a phone or tailnet peer
+// cannot make one.
 func TestRunPairingPageIsReachableButItsMintRouteIsNot(t *testing.T) {
 	t.Parallel()
 	fake := llufake.New(t)
 	source := librelinkup.New("person@example.test", "some-password", librelinkup.WithBaseURL(fake.URL))
 	cfg := testConfig(t)
+	cfg.StatusSecret = "pairing-test-status-secret-0123456789"
 	addrs, stop := runRelay(t, cfg, relay.WithSource(source))
 	defer stop()
 
 	mintBody := `{"apps":[{"name":"A","steps":["s"],"fields":[{"label":"Token","value":"{token}"}],"links":[]}]}`
-	post := func(url, host string) (int, []byte) {
+	post := func(url, host, secret string) (int, []byte) {
 		req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(mintBody))
 		if err != nil {
 			t.Fatalf("build request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if secret != "" {
+			req.Header.Set(config.StatusSecretHeader, secret)
+		}
 		if host != "" {
 			req.Host = host
 		}
@@ -642,14 +651,18 @@ func TestRunPairingPageIsReachableButItsMintRouteIsNot(t *testing.T) {
 		return resp.StatusCode, mustReadAndClose(t, resp.Body)
 	}
 
-	if status, _ := post(fmt.Sprintf("http://%s/pairing", addrs.Nightscout), ""); status == http.StatusOK {
+	if status, _ := post(fmt.Sprintf("http://%s/pairing", addrs.Nightscout), "", cfg.StatusSecret); status == http.StatusOK {
 		t.Fatal("the phone-facing listener minted a code")
 	}
-	if status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "relay.example.test"); status != http.StatusForbidden {
+	if status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "relay.example.test", cfg.StatusSecret); status != http.StatusForbidden {
 		t.Fatalf("mint with a spoofed Host: status = %d, want 403 (body %s)", status, body)
 	}
 
-	status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "")
+	if status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "", ""); status != http.StatusUnauthorized {
+		t.Fatalf("mint over loopback with no secret: status = %d, want 401 (body %s)", status, body)
+	}
+
+	status, body := post(fmt.Sprintf("http://%s/pairing", addrs.Status), "", cfg.StatusSecret)
 	if status != http.StatusOK {
 		t.Fatalf("mint over loopback: status = %d, body %s", status, body)
 	}

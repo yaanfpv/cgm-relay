@@ -13,9 +13,11 @@ public struct PairingCode: Equatable, Sendable {
 }
 
 /// PairingCodeMintingError is raised when the engine does not answer a mint
-/// request with a code.
+/// request with a code, or when no request was made because the engine has
+/// not yet reported that it is listening.
 public enum PairingCodeMintingError: Error, Sendable, Equatable {
     case unexpectedResponse
+    case notReady
 }
 
 /// PairingCodeMinting asks the running engine for a new pairing code, which
@@ -27,14 +29,18 @@ public protocol PairingCodeMinting: Sendable {
 }
 
 /// URLSessionPairingCodeMinter posts to the engine's local status
-/// endpoint, the one listener a phone cannot reach.
+/// endpoint, the one listener a phone cannot reach, presenting the app's
+/// LocalStatusSecret, which the engine requires to mint. Nothing is sent
+/// until the secret is armed.
 public struct URLSessionPairingCodeMinter: PairingCodeMinting {
     private let pairingURL: URL
+    private let secret: LocalStatusSecret
     private let session: URLSession
 
-    public init(pairingURL: URL, session: URLSession = .shared) {
+    public init(pairingURL: URL, secret: LocalStatusSecret, session: URLSession? = nil) {
         self.pairingURL = pairingURL
-        self.session = session
+        self.secret = secret
+        self.session = session ?? LoopbackURLSession.make()
     }
 
     private struct MintRequest: Encodable {
@@ -56,6 +62,7 @@ public struct URLSessionPairingCodeMinter: PairingCodeMinting {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(MintRequest(apps: apps))
+        guard secret.authorize(&request) else { throw PairingCodeMintingError.notReady }
 
         let (data, response) = try await session.data(for: request)
         guard

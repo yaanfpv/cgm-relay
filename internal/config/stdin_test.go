@@ -77,6 +77,38 @@ func TestLoadFromReader(t *testing.T) {
 		assertConfigEqual(t, got, want)
 	})
 
+	t.Run("status_secret is optional and carried through when present", func(t *testing.T) {
+		const secret = "per-launch-secret-0123456789abcdef"
+		withSecret := fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "status_secret": %q,
+  "key": %q
+}`, secret, testKeyBase64('K'))
+		got, err := config.LoadFromReader(strings.NewReader(withSecret))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.StatusSecret != secret {
+			t.Errorf("StatusSecret = %q, want %q", got.StatusSecret, secret)
+		}
+
+		without := fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "key": %q
+}`, testKeyBase64('K'))
+		got, err = config.LoadFromReader(strings.NewReader(without))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.StatusSecret != "" {
+			t.Errorf("StatusSecret = %q, want empty when stdin names none", got.StatusSecret)
+		}
+	})
+
 	t.Run("librelinkup_base_url is optional, absent means the official service", func(t *testing.T) {
 		input := fmt.Sprintf(`{
   "librelinkup_email": "person@example.test",
@@ -266,6 +298,7 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 	const password = "s3cr3t-should-never-appear-in-any-error"
 	goodKey := testKeyBase64('K')
 	shortKey := base64.StdEncoding.EncodeToString([]byte("too-short"))
+	const shortSecret = "guessable"
 
 	cases := []struct {
 		name    string
@@ -313,6 +346,11 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 			wantErr: "status_addr",
 		},
 		{
+			name:    "status_secret too short to be a secret",
+			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "status_secret": %q, "key": %q}`, email, password, shortSecret, goodKey),
+			wantErr: "status_secret",
+		},
+		{
 			name:    "retention zero",
 			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "retention_days": 0, "key": %q}`, email, password, goodKey),
 			wantErr: "retention_days",
@@ -351,6 +389,9 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), goodKey) {
 				t.Errorf("error leaks the encryption key: %v", err)
+			}
+			if strings.Contains(err.Error(), shortSecret) {
+				t.Errorf("error leaks the status secret: %v", err)
 			}
 		})
 	}

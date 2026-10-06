@@ -118,7 +118,8 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "                 --config-stdin  read the configuration as one JSON object")
 	fmt.Fprintln(w, "                                 from stdin, in place of the config file and")
 	fmt.Fprintln(w, "                                 environment, and keep running only until")
-	fmt.Fprintln(w, "                                 stdin closes")
+	fmt.Fprintln(w, "                                 stdin closes, and print a line reading ready")
+	fmt.Fprintln(w, "                                 on stdout once it is listening")
 	fmt.Fprintln(w, "  check-account  read one JSON object on stdin (librelinkup_email,")
 	fmt.Fprintln(w, "                 librelinkup_password, and optionally librelinkup_base_url)")
 	fmt.Fprintln(w, "                 and confirm the account signs in and follows someone,")
@@ -145,7 +146,8 @@ func runSetup(args []string) {
 // --config-stdin, stdin itself is a second way to be told to stop: the
 // caller (a menu bar app, say) holds it open for as long as it means the
 // engine to keep running, so its own end reaches the engine even when
-// nothing sends it a signal.
+// nothing sends it a signal, and its stdout carries a single "ready" line
+// once it is listening.
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configStdin := fs.Bool("config-stdin", false, "read the configuration as one JSON object from stdin, in place of the config file and environment, and keep running only until stdin closes")
@@ -169,9 +171,26 @@ func runServe(args []string) {
 		os.Exit(1)
 	}
 
-	if err := relay.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+	if err := relay.Run(ctx, cfg, serveReadyOptions(*configStdin, os.Stdout)...); err != nil && !errors.Is(err, context.Canceled) {
 		os.Exit(exitCodeForServeError(os.Stderr, err))
 	}
+}
+
+// readyLine is the one line --config-stdin writes to stdout, once both
+// listeners are bound. A supervising app waits for it before it presents
+// the status secret, so the secret only ever reaches this process.
+const readyLine = "ready\n"
+
+// serveReadyOptions returns the option that writes readyLine to stdout once
+// the relay is listening, and nothing for a plain serve, whose stdout stays
+// empty.
+func serveReadyOptions(configStdin bool, stdout io.Writer) []relay.Option {
+	if !configStdin {
+		return nil
+	}
+	return []relay.Option{relay.WithReady(func(relay.Addresses) {
+		_, _ = io.WriteString(stdout, readyLine)
+	})}
 }
 
 // exitCodeForServeError writes the line a person running `serve` should

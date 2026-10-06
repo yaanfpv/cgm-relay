@@ -35,6 +35,38 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
     }
 }
 
+/// ReadyLineScanner finds the engine's one "ready" line in its stdout. Any
+/// other line, and any line too long to be it, is ignored, and it reports
+/// the line at most once.
+struct ReadyLineScanner {
+    static let readyLine = Data("ready".utf8)
+
+    private var pending = Data()
+    private var overflowed = false
+    private var found = false
+
+    /// append returns true exactly once: when the chunk completes the ready
+    /// line.
+    mutating func append(_ chunk: Data) -> Bool {
+        for byte in chunk {
+            if byte == UInt8(ascii: "\n") {
+                let isReady = !overflowed && pending == Self.readyLine
+                pending.removeAll(keepingCapacity: true)
+                overflowed = false
+                if isReady && !found {
+                    found = true
+                    return true
+                }
+            } else if pending.count < Self.readyLine.count {
+                pending.append(byte)
+            } else {
+                overflowed = true
+            }
+        }
+        return false
+    }
+}
+
 /// RealProcessLauncher starts the engine binary as an ordinary child
 /// process, writing its configuration to stdin exactly as the `serve
 /// --config-stdin` contract requires (no secret ever goes in an argument
@@ -44,7 +76,9 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
 /// no signal delivered at all, since the OS closes every pipe a dead
 /// process still held open. The engine's stderr, where it writes its log
 /// lines, is read line by line and handed to engineLog, by default the
-/// system log (subsystem com.yaanfpv.cgmrelay, category engine).
+/// system log (subsystem com.yaanfpv.cgmrelay, category engine). Its stdout
+/// carries only the "ready" line, which is passed to onReady; the rest is
+/// read and dropped so the pipe can never fill and block the engine.
 public struct RealProcessLauncher: ProcessLauncher {
     private let engineLog: EngineLogSink
 
@@ -56,6 +90,7 @@ public struct RealProcessLauncher: ProcessLauncher {
         executableURL: URL,
         arguments: [String],
         standardInputData: Data,
+        onReady: @escaping @Sendable () -> Void,
         onExit: @escaping @Sendable (Int32) -> Void
     ) throws -> any RunningProcess {
         let process = Process()
@@ -67,6 +102,8 @@ public struct RealProcessLauncher: ProcessLauncher {
         process.standardInput = inputPipe
         let errorPipe = Pipe()
         process.standardError = errorPipe
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
         disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
         process.terminationHandler = { finished in
             // terminationStatus is the SIGNAL number, not an exit code,
@@ -87,6 +124,8 @@ public struct RealProcessLauncher: ProcessLauncher {
         // the engine exits, since the parent would still hold a writer.
         try? errorPipe.fileHandleForWriting.close()
         EngineLogForwarder.forward(from: errorPipe.fileHandleForReading, to: engineLog)
+        try? outputPipe.fileHandleForWriting.close()
+        Self.watchForReady(on: outputPipe.fileHandleForReading, onReady: onReady)
 
         // The write happens off the calling thread so a stalled or slow
         // child (never expected for a small JSON handshake, but not ruled
@@ -108,6 +147,22 @@ public struct RealProcessLauncher: ProcessLauncher {
         }
 
         return RealProcess(process: process, stdinHandle: writeHandle)
+    }
+
+    /// watchForReady reads handle until its writer closes it, calling onReady
+    /// when the ready line arrives, and always drains the pipe.
+    private static func watchForReady(on handle: FileHandle, onReady: @escaping @Sendable () -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            var scanner = ReadyLineScanner()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = read(handle.fileDescriptor, &buffer, buffer.count)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { break }
+                if scanner.append(Data(buffer[..<count])) { onReady() }
+            }
+            try? handle.close()
+        }
     }
 
     /// passthroughVariableNames names every variable childEnvironment
