@@ -210,7 +210,8 @@ final class AppModel: ObservableObject {
         notificationDelivering = UserNotificationCenterDelivering()
         self.loginItemManager = loginItemManager
         self.statusAddr = statusAddr
-        pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr))
+        let statusSecret = LocalStatusSecret()
+        pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         settings = settingsStore.load()
@@ -224,11 +225,11 @@ final class AppModel: ObservableObject {
         // stored properties (via supervisor/statusPoller) that must be
         // built before that point.
         let ref = AppModelRef()
-        supervisor = EngineSupervisor(engineURL: engineURL, launcher: RealProcessLauncher()) { state in
+        supervisor = EngineSupervisor(engineURL: engineURL, launcher: RealProcessLauncher(), statusSecret: statusSecret) { state in
             Task { @MainActor in ref.value?.handleEngineStateChange(state) }
         }
         statusPoller = StatusPoller(
-            fetcher: URLSessionStatusFetcher(statusURL: AppModel.statusURL(for: statusAddr))
+            fetcher: URLSessionStatusFetcher(statusURL: AppModel.statusURL(for: statusAddr), secret: statusSecret)
         ) { status in
             Task { @MainActor in ref.value?.handleStatusUpdate(status) }
         }

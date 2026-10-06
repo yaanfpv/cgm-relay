@@ -682,4 +682,7 @@ func assertConfigEqual(t *testing.T, got, want config.Config) {
 	if string(got.Key) != string(want.Key) {
 		t.Errorf("Key = %x, want %x", got.Key, want.Key)
 	}
+	if got.StatusSecret != want.StatusSecret {
+		t.Errorf("StatusSecret does not match the expected value (lengths %d and %d)", len(got.StatusSecret), len(want.StatusSecret))
+	}
 }

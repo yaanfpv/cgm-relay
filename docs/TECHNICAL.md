@@ -65,7 +65,7 @@ It listens on `127.0.0.1:1337` by default, so nothing outside the machine can re
 | `CGM_RELAY_KEY_PATH` or `CGM_RELAY_KEY` | the encryption key file, or the key itself |
 | `CGM_RELAY_RETENTION_DAYS` | how many days of readings to keep (default 15) |
 
-The local status page answers only on the machine itself and refuses requests carrying any other host name. Passwords, tokens and keys never appear in logs or error messages.
+The local status page answers only on the machine itself and refuses requests carrying any other host name. When the Mac app runs the relay, it also needs a secret the app makes fresh for every relay start and sends only once that relay is listening, so no other program on the Mac can read the status or make a pairing code; a relay started from a config file or the environment, as above, keeps the status page open on the machine and makes no pairing codes. Passwords, tokens and keys never appear in logs or error messages.
 
 ## Building from source
 
