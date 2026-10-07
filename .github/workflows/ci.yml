@@ -17,17 +17,19 @@ defaults:
   run:
     shell: bash
 
-# One job per check, each named for what it checks. The work lives in .github/checks, which is what
-# the local gate and a contributor run too. The last job, gate, passes only when every check passed,
-# so branch protection requires that one job.
+# Every check is a step named for what it checks, and the work lives in .github/checks, which is what
+# the local gate and a contributor run too. The last job, gate, passes only when every other job
+# passed, so branch protection requires that one job.
 jobs:
-  go-format:
-    name: Go formatting
+  go-checks:
+    name: Go checks
     runs-on: ubuntu-latest
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The changelog entry compares the pull request's base and head.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: setup-go
@@ -35,59 +37,36 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: check formatting
-        run: bash .github/checks/go-format.sh
+      # The checks share one checkout and one Go setup and run side by side; each reports under its
+      # own name, and a red one fails the job.
+      - parallel:
+          - name: Go formatting
+            run: bash .github/checks/go-format.sh
 
-  go-vet:
-    name: Go vet
-    runs-on: ubuntu-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+          - name: Go vet
+            run: bash .github/checks/go-vet.sh
 
-      - name: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
+          - name: Go tests
+            run: bash .github/checks/go-test.sh
 
-      - name: vet
-        run: bash .github/checks/go-vet.sh
+          - name: Go build
+            run: bash .github/checks/go-build.sh
 
-  go-test:
-    name: Go tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
-      - name: test
-        run: bash .github/checks/go-test.sh
-
-  go-build:
-    name: Go build
-    runs-on: ubuntu-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
-      - name: build
-        run: bash .github/checks/go-build.sh
+          # Never skipped: the step itself decides whether an entry is owed and always says which.
+          - name: Changelog entry
+            env:
+              EVENT_NAME: ${{ github.event_name }}
+              WAIVED: ${{ contains(github.event.pull_request.labels.*.name, 'no changelog') }}
+              BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+            run: |
+              if [ "$EVENT_NAME" != pull_request ]; then
+                echo "The changelog entry applies to pull requests only; nothing to check on this ${EVENT_NAME}."
+              elif [ "$WAIVED" = true ]; then
+                echo "The \`no changelog\` label waives the changelog entry for this pull request."
+              else
+                bash .github/checks/changelog-entry.sh
+              fi
 
   swift-test:
     name: Swift tests
@@ -133,43 +112,13 @@ jobs:
       - name: build app (unsigned)
         run: bash .github/checks/mac-app-build.sh
 
-  changelog-entry:
-    name: Changelog entry
-    runs-on: ubuntu-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Never skipped, because a skipped job fails the gate: the step decides and always reports.
-      - name: changelog entry
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          WAIVED: ${{ contains(github.event.pull_request.labels.*.name, 'no changelog') }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ "$EVENT_NAME" != pull_request ]; then
-            echo "The changelog entry applies to pull requests only; nothing to check on this ${EVENT_NAME}."
-          elif [ "$WAIVED" = true ]; then
-            echo "The \`no changelog\` label waives the changelog entry for this pull request."
-          else
-            bash .github/checks/changelog-entry.sh
-          fi
-
   gate:
     name: gate
     if: always()
     needs:
-      - go-format
-      - go-vet
-      - go-test
-      - go-build
+      - go-checks
       - swift-test
       - mac-app-build
-      - changelog-entry
     runs-on: ubuntu-latest
     permissions: {}
     steps:
