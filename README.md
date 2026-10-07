@@ -2,66 +2,67 @@
 
 **Every minute of your FreeStyle Libre glucose, kept, even while your phone sleeps.**
 
-CGM Relay is a small Mac menu bar app that follows your LibreLinkUp account every minute, keeps each reading encrypted on your Mac, and hands them to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any Nightscout follower app, so the gaps your phone leaves overnight fill themselves in.
+CGM Relay is a small Mac menu bar app. It follows your LibreLinkUp account every minute and hands every reading to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any other Nightscout follower app, so the gaps your phone leaves overnight fill themselves in.
 
 **[Download for Mac](https://github.com/yaanfpv/cgm-relay/releases/latest)** · [Supported apps](#supported) · [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server) · [How it works](docs/TECHNICAL.md)
 
 Free and open source · macOS 15 or later · No account, no cloud of ours
 
-**Please read this first.** CGM Relay is not a medical device. Readings and alerts can arrive late, go missing or be wrong. Don't make treatment decisions from it, and keep the official Libre app and its alarms on for lows. It isn't made by or affiliated with Abbott, and it comes with no warranty.
+**Please read this first.** CGM Relay is not a medical device. Readings and alerts can be late, missing or wrong. Don't make treatment decisions from it, and keep the official Libre app and its alarms on for lows. It isn't made by or affiliated with Abbott, and it comes with no warranty.
 
 ![The CGM Relay menu open under the menu bar icon, showing a reading of 100 mg/dL, Current, just now, with Stop, Settings and Quit buttons](docs/images/panel.png)
 
 ## Your phone forgets. CGM Relay doesn't.
 
-Apps like xDrip4iOS only get a reading when your phone lets them run, and phones are stingy about that, especially at night. LibreLinkUp keeps history only every 15 minutes, so every minute nobody asked for is gone for good. CGM Relay asks every minute from a Mac that stays awake, keeps every reading, and your app catches up on all of them the moment it wakes.
+Follower apps only get a reading when your phone lets them run, and phones are stingy about that, especially at night. LibreLinkUp only keeps a point every 15 minutes, so any minute nobody fetched is gone for good. CGM Relay fetches every minute from a Mac that stays awake, and your app catches up on all of it the moment it wakes.
 
 ## Get started
 
-1. [Download CGM Relay](https://github.com/yaanfpv/cgm-relay/releases/latest), open the disk image and drag CGM Relay to Applications.
-2. Follow setup: sign in to LibreLinkUp, choose how your phone reaches your Mac (with Tailscale, one click gives it a private HTTPS address that works at home and away), connect your app with a QR code, and turn on Open at Login.
-3. Once your app reads from CGM Relay, switch its own LibreLinkUp follower off. Only one thing should follow your account.
+1. [Download CGM Relay](https://github.com/yaanfpv/cgm-relay/releases/latest), open the disk image and drag it to Applications.
+2. Open it and follow setup. It signs you in to LibreLinkUp, sets up how your phone reaches your Mac (one click if you use Tailscale) and connects your app with a QR code.
+3. Turn off your app's own LibreLinkUp follower. Only one thing should follow your account.
 
 ## Connect your app
 
-**xDrip4iOS.** In Settings, set **Master or Follower** to **Follower** and **Data Source** to **Nightscout**. Then under **Sharing and Services**, open **Nightscout** and fill in **URL** with the relay's address and **Token** with your access token. If the address has a port (`http://192.168.1.5:1337`), the URL takes it without the port and the port goes in **Port**. Leave **API_SECRET** blank.
+Setup shows a QR code for each of these. To set one up by hand:
 
-**xDrip+ (Android).** In Settings, choose **Nightscout Follower** as the hardware data source, and put `https://YOUR-TOKEN@your-relay-address` in **Nightscout Follow URL**.
+**xDrip4iOS.** In Settings, set **Master or Follower** to **Follower** and **Data Source** to **Nightscout**. Under **Sharing and Services**, open **Nightscout**, put the relay's address in **URL** and your access token in **Token**. If the address has a port, like `:1337`, put that in **Port** and leave it out of **URL**. Leave **API_SECRET** blank.
 
-**LoopFollow.** In Settings, open **Nightscout**. Put the relay's address in **URL** and your access token in **Token**.
+**xDrip+ (Android).** In Settings, choose **Nightscout Follower** as the data source and set **Nightscout Follow URL** to `https://YOUR-TOKEN@your-relay-address`.
 
-**Nightguard.** Put the relay's address in **Nightscout URL**, with no slash at the end, and your access token in **API Token**.
+**LoopFollow.** In Settings, open **Nightscout** and fill in **URL** and **Token**.
+
+**Nightguard.** Put the address in **Nightscout URL**, with no slash at the end, and the token in **API Token**.
 
 ## Features
 
-- **Gaps filled after a restart** from LibreLinkUp's 15-minute history.
-- **Encrypted at rest,** with the key in your Keychain: a copied database file shows timestamps but no glucose values. Readings are kept 15 days by default, adjustable.
-- **Calm menu bar.** Monochrome while readings are fresh, amber when late, red when something stops; the reading can sit in the menu bar too.
-- **Recovers on its own** from LibreLinkUp rate limits and outages.
-- **Works without a mouse.** The menu opens from the keyboard and VoiceOver.
+- Readings are encrypted on your Mac and kept for 15 days, or as long as you like.
+- The menu bar icon turns amber when readings are late and red when something stops, and can show the number too.
+- It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
+- Keyboard and VoiceOver work.
 
 ## Supported
 
-- macOS 15 Sequoia or later, on Apple silicon and Intel.
+- macOS 15 Sequoia or later, Apple silicon and Intel.
 - FreeStyle Libre sensors that share through LibreLinkUp.
-- xDrip4iOS, xDrip+, LoopFollow and Nightguard with the settings above, and anything that reads a Nightscout site.
-- A Linux server instead of a Mac: see [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server).
+- xDrip4iOS, xDrip+, LoopFollow, Nightguard, and anything that reads a Nightscout site.
+- Linux, if you'd rather [run it on a server](docs/TECHNICAL.md#run-it-on-a-server).
 
 ## Privacy
 
-CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and once a day to GitHub to check for a newer version (that check carries the app's name and version, and you can turn it off in Settings > Updates). Your follower apps talk to your Mac, not to us. Report a Bug fills in only your app version and build, macOS version and chip, and sends nothing unless you submit it.
+CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and to GitHub once a day to check for updates, which you can turn off in Settings > Updates. Your follower apps talk to your Mac, not to us. Report a Bug opens a prefilled GitHub issue, and nothing is sent until you submit it.
 
 ## Good to know
 
-- LibreLinkUp has no official public API. CGM Relay uses the same endpoints the LibreLinkUp app and other open-source followers use, and those can change.
-- It sees only what LibreLinkUp has: if the phone running LibreLink loses its connection, those minutes arrive later as 15-minute history.
+- LibreLinkUp has no official API. CGM Relay uses the same endpoints the LibreLinkUp app and other open-source followers use, and those can change.
+- It only sees what LibreLinkUp has. If the phone running LibreLink drops off, those minutes come back later as 15-minute history.
 
 ## Contributing
 
-Use Report a Bug in the app or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). [CONTRIBUTING.md](CONTRIBUTING.md) covers building and testing, and [SECURITY.md](SECURITY.md) covers reporting a vulnerability.
+Use Report a Bug in the app (right-click the menu bar icon) or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). [CONTRIBUTING.md](CONTRIBUTING.md) covers building and testing, and [SECURITY.md](SECURITY.md) covers reporting a vulnerability.
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE). For a commercial license to build it into a closed product, [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new) or reach [@YaanFPV](https://github.com/YaanFPV).
+[GNU AGPL-3.0](LICENSE). If you want to build it into a closed product, [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new) and ask about a commercial license.
 
 Built by [@YaanFPV](https://github.com/YaanFPV).

@@ -1,68 +1,49 @@
 # How CGM Relay works
 
-The detail behind the README: how CGM Relay reads LibreLinkUp, stores readings and serves them, and how to run it on a server. [CONTRIBUTING.md](../CONTRIBUTING.md) covers building the Mac app and running the tests.
-
 ## Reading LibreLinkUp
 
-CGM Relay signs in to your LibreLinkUp follower account and asks for the latest reading once a minute. LibreLinkUp's own history, 15-minute points going back about 12 hours, fills any gap after a restart or an outage. If LibreLinkUp rate-limits it, it backs off and recovers on its own. If sign-in fails, it says so in the menu bar (or on the local status page on a server) and keeps retrying at a gentle pace.
+CGM Relay signs in to your LibreLinkUp follower account and fetches the latest reading about once a minute, timed so it lands just after your phone uploads one. After a restart or an outage, LibreLinkUp's own history (a point every 15 minutes, about 12 hours back) fills the gap. Rate limits and sign-in failures back off and retry on their own, and the menu bar says when sign-in is failing.
 
-## Storage and encryption
+## Storage
 
-Readings go into a small SQLite database on disk. Each value and trend is encrypted with AES-256-GCM, and the key is kept apart from the data (in the Keychain on a Mac, in its own file on a server), so a copied or stolen database file shows timestamps but no glucose values. On a server the key file sits beside the database in the same folder, so a backup or disk copy that holds both is not protected by the encryption. Encryption cannot protect you from someone who can already use your account on that machine, because they can reach the key too. Every commit is synced to disk in full, so a power cut never loses a reading that was already stored. Readings older than the retention you choose (15 days by default) are deleted.
+Readings live in a small SQLite database. Each glucose value and trend is encrypted with AES-256-GCM, so the database file alone shows timestamps and nothing else. On a Mac the key is in your Keychain. On a server it's a file next to the database, so a backup that holds both isn't protected. Readings older than your retention setting (15 days by default) are deleted.
 
 ## What it serves
 
-CGM Relay serves the part of the Nightscout API that follower apps use: `entries.json`, `entries/sgv.json` and `entries/current.json` with `count` and date filtering, `status.json` (which answers without a token, and only with whether the relay is up, its clock and its unit), and the checks xDrip4iOS, LoopFollow and Nightguard make during setup (`treatments`, `devicestatus`, `profile`, answered empty). Every other API request needs your access token, either as `?token=` or as the `api-secret` header these apps already send (raw or SHA-1, as Nightscout accepts). Responses of 1 KB or more are gzip-compressed when the app asks for it; smaller ones, like a single reading or the status, are sent plain. Two plain pages need no token: the one at `/` that names CGM Relay, and the short-lived page a Connect QR code opens, which takes its own code instead.
+The part of the Nightscout API follower apps use: `entries.json`, `entries/sgv.json` and `entries/current.json` with `count` and date filters, `status.json`, and empty answers for `treatments`, `devicestatus` and `profile`, because some apps check for them during setup.
+
+Everything needs your access token, as `?token=` or the `api-secret` header (raw or SHA-1, like Nightscout), except `status.json`, which only says the relay is up, its clock and its unit. The plain page at `/` and the page a setup QR code opens (it carries its own short-lived code) need no token either. Large responses are gzipped for apps that ask.
 
 ## Reaching it from your phone
 
-By default the relay listens only on the machine it runs on, so something has to carry your phone's requests to it, or you choose to let your local network reach it:
+The relay only listens on the machine it runs on until you choose a way in:
 
-- **Tailscale HTTPS** (the Mac app does this in one click): `tailscale serve --bg --https=443 http://127.0.0.1:1337` gives your Mac a private HTTPS address on your tailnet that your phone reaches at home and away. If 443 is taken, the app uses 8443 or 10000.
-- **Your local network**: the relay listens on your Mac's network address, unencrypted, for a phone on the same Wi-Fi.
-- **A reverse proxy with a certificate, or a tunnel**, on a server.
+- **Tailscale HTTPS.** The Mac app sets this up in one click. It runs `tailscale serve --bg --https=443 http://127.0.0.1:1337`, which gives your Mac a private HTTPS address your phone can reach anywhere. If 443 is taken it uses 8443 or 10000.
+- **Your local network.** Plain HTTP on your Mac's network address, for a phone on the same Wi-Fi.
+- **A reverse proxy or a tunnel,** on a server.
 
 ## Run it on a server
 
-CGM Relay is built from source. You need Go (the version in `go.mod`). One command installs the engine:
-
-```bash
-go install github.com/yaanfpv/cgm-relay/cmd/cgm-relay@latest
-```
-
-Or clone the repository and build it:
-
-```bash
-git clone https://github.com/yaanfpv/cgm-relay.git
-cd cgm-relay
-go build ./cmd/cgm-relay
-```
-
-That leaves a `cgm-relay` program in the current folder; the commands below call it by name, so put it somewhere on your `PATH` (or run it as `./cgm-relay`).
-
-Set it up once. It asks for your LibreLinkUp email and password, generates an access token and an encryption key, and writes both files readable only by you:
+You need Go (the version in `go.mod`). Install the relay with `go install github.com/yaanfpv/cgm-relay/cmd/cgm-relay@latest`, or build it from a clone with `go build ./cmd/cgm-relay`. Then run setup once. It asks for your LibreLinkUp email and password and writes a config file and an encryption key, both readable only by you:
 
 ```bash
 cgm-relay setup
-```
-
-Then run it:
-
-```bash
 cgm-relay serve
 ```
 
-It listens on `127.0.0.1:1337` by default, so nothing outside the machine can reach it until you choose to expose it. Every setting can also come from the environment, which suits a container:
+It listens on `127.0.0.1:1337`, so nothing outside the machine reaches it until you expose it. Every setting can also come from the environment, which suits a container:
 
 | Variable | What it sets |
 | --- | --- |
-| `CGM_RELAY_EMAIL` | LibreLinkUp account email |
-| `CGM_RELAY_PASSWORD` | LibreLinkUp account password |
-| `CGM_RELAY_TOKEN` | the access token your follower apps use |
+| `CGM_RELAY_EMAIL` | LibreLinkUp email |
+| `CGM_RELAY_PASSWORD` | LibreLinkUp password |
+| `CGM_RELAY_TOKEN` | the access token your apps use |
 | `CGM_RELAY_LISTEN_ADDR` | where the Nightscout API listens |
-| `CGM_RELAY_STATUS_ADDR` | where the local status page listens (always loopback) |
+| `CGM_RELAY_STATUS_ADDR` | where the status page listens (always loopback) |
 | `CGM_RELAY_DATABASE_PATH` | where readings are stored |
-| `CGM_RELAY_KEY_PATH` or `CGM_RELAY_KEY` | the encryption key file, or the key itself |
-| `CGM_RELAY_RETENTION_DAYS` | how many days of readings to keep (default 15) |
+| `CGM_RELAY_KEY_PATH` or `CGM_RELAY_KEY` | the key file, or the key itself |
+| `CGM_RELAY_RETENTION_DAYS` | days of readings to keep (default 15) |
 
-The local status page answers only on the machine itself and refuses requests carrying any other host name. When the Mac app runs the relay, it also needs a secret the app makes fresh for every relay start and sends only once that relay is listening, so no other program on the Mac can read the status or make a pairing code; a relay started from a config file or the environment, as above, keeps the status page open on the machine and makes no pairing codes. Passwords, tokens and keys never appear in logs or error messages.
+The status page reports whether the relay is fetching and which apps are reading from it. On a server it's open on loopback; when the Mac app runs the relay, it needs a secret only the app has. Passwords, tokens and keys never show up in logs.
+
+To build the Mac app or run the tests, see [CONTRIBUTING.md](../CONTRIBUTING.md).
