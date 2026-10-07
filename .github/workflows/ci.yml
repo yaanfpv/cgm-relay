@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # A pull request is checked once, through its pull_request run; a push run of the same commit would
+  # repeat every job. Pushes to main still run, so main's own state is always checked.
   push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
