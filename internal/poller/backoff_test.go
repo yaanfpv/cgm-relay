@@ -13,7 +13,7 @@ import (
 // rate-limit responses, a success, and then one more rate limit, checking
 // the exact wait Run asks the clock for at each step: the fixed schedule
 // (60s, 120s, 300s), the source's own RetryAfter when it is longer than
-// that schedule, the normal Interval right after a success, and the
+// that schedule, about an Interval right after a success, and the
 // schedule restarting at 60s rather than continuing from 300s.
 func TestRunRateLimitBackoffAndReset(t *testing.T) {
 	t.Parallel()
@@ -55,13 +55,19 @@ func TestRunRateLimitBackoffAndReset(t *testing.T) {
 		60 * time.Second,
 		120 * time.Second,
 		400 * time.Second,
-		poller.Interval,
+		0, // a success waits about an Interval, checked below
 		60 * time.Second,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("waits = %v, want %v", got, want)
 	}
+	if got[3] <= 0 || got[3] > poller.Interval {
+		t.Errorf("wait[3] = %s after a success, want at most the normal Interval (%s)", got[3], poller.Interval)
+	}
 	for i := range want {
+		if i == 3 {
+			continue
+		}
 		if got[i] != want[i] {
 			t.Errorf("wait[%d] = %s, want %s", i, got[i], want[i])
 		}

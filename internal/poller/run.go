@@ -18,8 +18,8 @@ const authRetryInterval = 5 * time.Minute
 // success (capped at the last entry once that count runs out).
 var rateLimitBackoff = []time.Duration{60 * time.Second, 120 * time.Second, 300 * time.Second}
 
-// Run fetches a reading about once an Interval, timed from the readings
-// themselves so none the source publishes is skipped, storing it and filling
+// Run fetches a reading about once an Interval, timed from what each fetch
+// returns so none the source publishes is skipped, storing it and filling
 // any history gaps, until ctx is done. It prunes on its first cycle and every
 // PruneInterval after that, so retention is enforced even across frequent
 // restarts. It backs off after a rate limit or an authentication failure
@@ -106,7 +106,11 @@ func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int, pace 
 	}
 
 	now := p.clock.Now()
+	previous := pace.last
 	wait, fresh := pace.observe(now, current)
+	if fresh {
+		gaps.checkSkipped(previous, current.Time)
+	}
 	gaps.check(now, fresh, "")
 	return wait, nil
 }
