@@ -119,6 +119,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # A self-hosted Mac keeps its own warm module cache; restoring the Actions cache over it
+          # only downloads and re-uploads hundreds of megabytes.
+          cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: show toolchain
         run: |
@@ -126,7 +129,7 @@ jobs:
           xcrun --show-sdk-version
 
       - name: install xcodegen
-        run: brew install xcodegen
+        run: command -v xcodegen >/dev/null || brew install xcodegen
 
       - name: build app (unsigned)
         run: bash .github/checks/mac-app-build.sh
