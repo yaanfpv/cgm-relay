@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- A Mac menu bar app that follows your LibreLinkUp account every minute and keeps every reading, so a follower app on your phone catches up on all of them when it opens, even after a night asleep.
+- A Mac menu bar app that checks your LibreLinkUp account about once a minute and keeps every reading LibreLinkUp shows for at least 20 seconds, so a follower app on your phone catches up on them when it opens, even after a night asleep. If your phone stops uploading for a while, that stretch fills in later from LibreLinkUp's 15-minute history.
 - Works with xDrip4iOS, xDrip+, LoopFollow, Nightguard and any app that follows a Nightscout site: CGM Relay serves the part of the Nightscout API those apps use, accepts every token form they send, and compresses large responses for apps that ask.
 - First-launch setup: a short safety notice, then sign in to LibreLinkUp (checked before anything is saved), choose how your phone reaches your Mac, connect your app, and turn on Open at Login. Setup finishes only once a phone can actually reach the Mac.
 - Connect your app without typing the token: pick your app and scan its QR code. xDrip+ and LoopFollow import their settings straight from it; xDrip4iOS and Nightguard open a short-lived page served by the relay with each value and its own Copy button, and the token is never in the code.
@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Settings for your account, connecting apps, units (mg/dL or mmol/L), retention, port and who can reach the relay, alerts, updates, and an About page with Copy Diagnostics, Report a Bug and Suggest a Feature.
 - The menu opens from the keyboard and from VoiceOver as well as a click, and the right-click menu offers Settings, Report a Bug and Quit.
 - Run it on a Linux server instead of a Mac: a single `cgm-relay` program with `setup` and `serve`, configured by a file or environment variables, with a loopback-only status page.
+- If the saved readings can't be opened (after a Keychain reset, a restored backup or a move to a new Mac), the menu says what happened and offers Start Fresh, which moves the old file aside rather than deleting it. A second copy opened by mistake says the first one is running and offers to try again once it quits.
 - Its own app icon.
 - For contributors: a fake LibreLinkUp server (`go run ./cmd/llufake`) and development launch arguments, so the engine and the app run end to end without a real account and never touch an installed copy.
 - For contributors: pull request checks for Go formatting, vet, tests and build, Swift tests, the Mac app build and the changelog entry, each naming the failing file and line where there is one and the command to run it, and one final `gate` check that passes only when all of them have.
