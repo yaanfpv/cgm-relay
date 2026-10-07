@@ -1,6 +1,7 @@
 package poller
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -50,10 +51,14 @@ const (
 // finds the same reading again retries soon, so each reading is caught
 // whichever side of its upload the fetch falls.
 type pacer struct {
-	last time.Time
+	// started is when the first fetch finished, bounding how long a source
+	// that has returned no reading at all is asked again soon.
+	started time.Time
+	last    time.Time
 	// seeking is true while the last fetch returned a reading, so a repeat
 	// of it, however young it was when first seen, means the next upload is
-	// merely late rather than absent.
+	// merely late rather than absent. A fetch with no current reading leaves
+	// it alone, so an interruption does not cancel a retry a repeat earns.
 	seeking bool
 }
 
@@ -61,8 +66,20 @@ type pacer struct {
 // returns how long to wait before the next one, and whether the reading is
 // newer than any seen before.
 func (c *pacer) observe(now time.Time, cur *cgm.Reading) (time.Duration, bool) {
+	if c.started.IsZero() {
+		c.started = now
+	}
 	if cur == nil {
-		c.seeking = false
+		// Nothing current: a reading may be published any moment, so ask
+		// again soon, from the last reading's timestamp or, before any, from
+		// the start, until it is implausible and then fall back to an Interval.
+		since := c.last
+		if since.IsZero() {
+			since = c.started
+		}
+		if now.Sub(since) <= staleAfter {
+			return uploadRetry, false
+		}
 		return Interval, false
 	}
 	age := now.Sub(cur.Time)
@@ -88,19 +105,31 @@ type gapWatch struct {
 	lastNew time.Time
 	inGap   bool
 	logger  *log.Logger
+	// skipFrom and skipTo hold the timestamps of a jump that ends a gap, for
+	// the resume line to name.
+	skipFrom, skipTo time.Time
+}
+
+// skippedText names the two timestamps of a jump, and nothing else.
+func skippedText(previous, current time.Time) string {
+	return fmt.Sprintf("LibreLinkUp's current reading went from %s to %s, so the readings between were never fetched",
+		previous.UTC().Format(time.RFC3339), current.UTC().Format(time.RFC3339))
 }
 
 // checkSkipped is called for every new current reading with the timestamp of
-// the previous new one, and logs one line when the new one is so much later
-// that the readings between were never current in any fetch. It names
-// timestamps only. A jump that ends a reported gap says nothing more than
-// the resume line that follows it, so it logs nothing.
+// the previous new one. When the new one is so much later that the readings
+// between were never current in any fetch, it logs one line naming both
+// timestamps, never a glucose value. A jump that ends a reported gap is not
+// logged here: the resume line carries it.
 func (g *gapWatch) checkSkipped(previous, current time.Time) {
-	if g.inGap || previous.IsZero() || current.Sub(previous) <= skipThreshold {
+	if previous.IsZero() || current.Sub(previous) <= skipThreshold {
 		return
 	}
-	g.logger.Printf("poller: LibreLinkUp's current reading went from %s to %s, so the readings between were never fetched",
-		previous.UTC().Format(time.RFC3339), current.UTC().Format(time.RFC3339))
+	if g.inGap {
+		g.skipFrom, g.skipTo = previous, current
+		return
+	}
+	g.logger.Printf("poller: %s", skippedText(previous, current))
 }
 
 // check is called after every fetch. fresh says a new current reading
@@ -109,8 +138,13 @@ func (g *gapWatch) checkSkipped(previous, current time.Time) {
 func (g *gapWatch) check(now time.Time, fresh bool, failure string) {
 	if fresh {
 		if g.inGap {
-			g.logger.Printf("poller: readings resumed after a gap of %s", now.Sub(g.lastNew).Round(time.Second))
+			resumed := "poller: readings resumed after a gap of " + now.Sub(g.lastNew).Round(time.Second).String()
+			if !g.skipTo.IsZero() {
+				resumed += ": " + skippedText(g.skipFrom, g.skipTo)
+			}
+			g.logger.Print(resumed)
 			g.inGap = false
+			g.skipFrom, g.skipTo = time.Time{}, time.Time{}
 		}
 		g.lastNew = now
 		return

@@ -201,9 +201,7 @@ func TestRunStoresEveryPublishedReadingOverADay(t *testing.T) {
 			last := requests[len(requests)-1]
 			published, missed := 0, 0
 			for k, pub := range pubs {
-				// Polling starts at the first upload's nominal moment, so the
-				// first fetch can land just before the upload and see nothing.
-				if pub.at.Before(start.Add(30*time.Second)) || pub.at.After(last.Add(-2*time.Minute)) {
+				if pub.at.Before(start) || pub.at.After(last.Add(-2*time.Minute)) {
 					continue
 				}
 				// A reading is only owed a store if it stays current at the
