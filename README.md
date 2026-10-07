@@ -1,26 +1,48 @@
-# CGM Relay
+<p align="center">
+  <img src="docs/images/icon.png" width="128" height="128" alt="CGM Relay app icon">
+</p>
 
-**Every minute of your FreeStyle Libre glucose, kept, even while your phone sleeps.**
+<h1 align="center">CGM Relay</h1>
 
-CGM Relay is a small Mac menu bar app. It follows your LibreLinkUp account every minute and hands every reading to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any other Nightscout follower app, so the gaps your phone leaves overnight fill themselves in.
+<p align="center">
+  <b>Every minute of your Libre glucose. Even while your phone sleeps.</b>
+</p>
 
-**[Download for Mac](https://github.com/yaanfpv/cgm-relay/releases/latest)** · [Supported apps](#supported) · [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server) · [How it works](docs/TECHNICAL.md)
+<p align="center">
+  <a href="https://github.com/yaanfpv/cgm-relay/actions/workflows/ci.yml"><img src="https://github.com/yaanfpv/cgm-relay/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/yaanfpv/cgm-relay/releases/latest"><img src="https://img.shields.io/github/v/release/yaanfpv/cgm-relay?label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-15%2B-black?logo=apple" alt="macOS 15 or later">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
+  <a href="https://github.com/yaanfpv/cgm-relay/stargazers"><img src="https://img.shields.io/github/stars/yaanfpv/cgm-relay?style=social" alt="GitHub stars"></a>
+</p>
 
-Free and open source · macOS 15 or later · No account, no cloud of ours
+<p align="center">
+  <a href="https://github.com/yaanfpv/cgm-relay/releases/latest"><b>Download for Mac</b></a> · <a href="#connect-your-app">Connect your app</a> · <a href="docs/TECHNICAL.md">How it works</a>
+</p>
 
-**Please read this first.** CGM Relay is not a medical device. Readings and alerts can be late, missing or wrong. Don't make treatment decisions from it, and keep the official Libre app and its alarms on for lows. It isn't made by or affiliated with Abbott, and it comes with no warranty.
+Your phone lets xDrip run for a moment, then puts it back to sleep, and the minutes in between are gone. LibreLinkUp only keeps a point every 15 minutes. So you wake up to a graph full of holes.
 
-![The CGM Relay menu open under the menu bar icon, showing a reading of 100 mg/dL, Current, just now, with Stop, Settings and Quit buttons](docs/images/panel.png)
+CGM Relay fixes that from your Mac. It follows your LibreLinkUp account every single minute, keeps every reading, and hands them all to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any Nightscout follower app the moment it wakes up. No gaps, no account, no cloud in between.
 
-## Your phone forgets. CGM Relay doesn't.
+<p align="center">
+  <img src="docs/images/panel.png" width="320" alt="The CGM Relay menu open under the menu bar icon, showing a reading of 100 mg/dL, Current, just now, with Stop, Settings and Quit buttons">
+</p>
 
-Follower apps only get a reading when your phone lets them run, and phones are stingy about that, especially at night. LibreLinkUp only keeps a point every 15 minutes, so any minute nobody fetched is gone for good. CGM Relay fetches every minute from a Mac that stays awake, and your app catches up on all of it the moment it wakes.
-
-## Get started
+## Get started in two minutes
 
 1. [Download CGM Relay](https://github.com/yaanfpv/cgm-relay/releases/latest), open the disk image and drag it to Applications.
 2. Open it and follow setup. It signs you in to LibreLinkUp, sets up how your phone reaches your Mac (one click if you use Tailscale) and connects your app with a QR code.
 3. Turn off your app's own LibreLinkUp follower. Only one thing should follow your account.
+
+That's it. Your app now gets every minute.
+
+## What you get
+
+- **Every minute, kept.** Readings are encrypted on your Mac and kept for 15 days, or as long as you like.
+- **A menu bar icon that stays out of your way.** It turns amber when readings are late and red when something stops, and can show your number right there.
+- **Set and forget.** It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
+- **Private.** Your follower apps talk to your Mac, not to us. There's no account and nothing to sign up for.
+- **Free and open source.** Read every line, build it yourself, or run it on a Linux server instead.
 
 ## Connect your app
 
@@ -34,13 +56,6 @@ Setup shows a QR code for each of these. To set one up by hand:
 
 **Nightguard.** Put the address in **Nightscout URL**, with no slash at the end, and the token in **API Token**.
 
-## Features
-
-- Readings are encrypted on your Mac and kept for 15 days, or as long as you like.
-- The menu bar icon turns amber when readings are late and red when something stops, and can show the number too.
-- It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
-- Keyboard and VoiceOver work.
-
 ## Supported
 
 - macOS 15 Sequoia or later, Apple silicon and Intel.
@@ -50,16 +65,20 @@ Setup shows a QR code for each of these. To set one up by hand:
 
 ## Privacy
 
-CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and to GitHub once a day to check for updates, which you can turn off in Settings > Updates. Your follower apps talk to your Mac, not to us. Report a Bug opens a prefilled GitHub issue, and nothing is sent until you submit it.
+CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and to GitHub once a day to check for updates, which you can turn off in Settings > Updates. Report a Bug opens a prefilled GitHub issue, and nothing is sent until you submit it.
 
 ## Good to know
 
+- **CGM Relay is not a medical device.** Readings and alerts can be late, missing or wrong. Don't make treatment decisions from it, and keep the official Libre app and its alarms on for lows. It isn't made by or affiliated with Abbott, and it comes with no warranty.
 - LibreLinkUp has no official API. CGM Relay uses the same endpoints the LibreLinkUp app and other open-source followers use, and those can change.
 - It only sees what LibreLinkUp has. If the phone running LibreLink drops off, those minutes come back later as 15-minute history.
+- It needs a Mac that stays awake, or a small server.
 
 ## Contributing
 
-Use Report a Bug in the app (right-click the menu bar icon) or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). [CONTRIBUTING.md](CONTRIBUTING.md) covers building and testing, and [SECURITY.md](SECURITY.md) covers reporting a vulnerability.
+Found a bug or want something? Use Report a Bug in the app (right-click the menu bar icon) or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). [CONTRIBUTING.md](CONTRIBUTING.md) covers building and testing, and [SECURITY.md](SECURITY.md) covers reporting a vulnerability.
+
+If CGM Relay fills your gaps, give it a star. It helps other Libre users find it.
 
 ## License
 
