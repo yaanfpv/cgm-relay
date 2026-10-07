@@ -10,7 +10,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 )
 
-// TestRunPrunesOncePerDay drives 2880 one-minute ticks (two days) after the
+// TestRunPrunesOncePerDay runs two days of one-minute cycles after the
 // initial fetch and checks Prune is called exactly three times -- once
 // immediately on the first cycle, then once per elapsed day, never zero
 // times and never once per tick.
@@ -31,10 +31,10 @@ func TestRunPrunesOncePerDay(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 
-	const ticksPerDay = 24 * 60
-	for i := 0; i < 2*ticksPerDay; i++ {
-		w := clock.waitForNextWait()
-		clock.tick(w)
+	// A cycle can end a little short of a minute, so run on past two days
+	// by a couple of minutes to be sure of the cycle that is due at 48h.
+	for clock.Now().Before(start.Add(2*24*time.Hour + 2*poller.Interval)) {
+		clock.tick(clock.waitForNextWait())
 	}
 	// The last tick only releases Run to run its final fetchAndStore and
 	// prune check; wait for the timer that follows it, proving that check
@@ -46,7 +46,7 @@ func TestRunPrunesOncePerDay(t *testing.T) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
 	if got := st.pruneCallCount(); got != 3 {
-		t.Fatalf("Prune called %d times over two days of one-minute ticks, want 3 (immediate, +24h, +48h)", got)
+		t.Fatalf("Prune called %d times over two days of cycles, want 3 (immediate, +24h, +48h)", got)
 	}
 }
 
@@ -102,10 +102,8 @@ func TestRunPruneFailureIsReportedNotFatal(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 
-	const ticksPerDay = 24 * 60
-	for i := 0; i < ticksPerDay; i++ {
-		w := clock.waitForNextWait()
-		clock.tick(w)
+	for clock.Now().Before(start.Add(24 * time.Hour)) {
+		clock.tick(clock.waitForNextWait())
 	}
 	clock.waitForNextWait()
 
