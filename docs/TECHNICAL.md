@@ -2,7 +2,7 @@
 
 ## Reading LibreLinkUp
 
-CGM Relay signs in to your LibreLinkUp follower account and fetches the latest reading about once a minute, timed so it lands just after your phone uploads one. After a restart or an outage, LibreLinkUp's own history (a point every 15 minutes, about 12 hours back) fills the gap. Rate limits and sign-in failures back off and retry on their own, and the menu bar says when sign-in is failing.
+CGM Relay signs in to your LibreLinkUp follower account and fetches the latest reading about once a minute. After each new reading it asks again a little before the next one is due, then every 15 seconds until it arrives. A reading that LibreLinkUp replaces quickly can still fall between two checks and be missed. After a restart or an outage, LibreLinkUp's own history (a point every 15 minutes, about 12 hours back) fills the gap at that spacing. Rate limits and sign-in failures back off and retry on their own, and the menu bar says when sign-in is failing.
 
 ## Storage
 
