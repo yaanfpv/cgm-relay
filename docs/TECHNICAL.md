@@ -1,6 +1,6 @@
 # How CGM Relay works
 
-The README covers what CGM Relay does and how to set it up. This page is the detail behind it: how it reads LibreLinkUp, how readings are stored, what it serves, and how to run it on a server instead of a Mac.
+The detail behind the README: how CGM Relay reads LibreLinkUp, stores readings and serves them, and how to run it on a server.
 
 ## Reading LibreLinkUp
 
@@ -69,4 +69,4 @@ The local status page answers only on the machine itself and refuses requests ca
 
 ## Building from source
 
-You need Go (the version in `go.mod`) for the engine, and Xcode 27 or later with XcodeGen for the Mac app. `go build ./cmd/cgm-relay` builds the engine on its own; `bash macos/scripts/build.sh CODE_SIGNING_ALLOWED=NO` builds the app with the engine embedded, for Apple silicon and Intel. [CONTRIBUTING.md](../CONTRIBUTING.md) has the tests, the fake LibreLinkUp server, and the launch arguments for running a development build next to your real one.
+`go build ./cmd/cgm-relay` builds the engine; [CONTRIBUTING.md](../CONTRIBUTING.md) covers the Mac app, the tests and the fake LibreLinkUp server.
