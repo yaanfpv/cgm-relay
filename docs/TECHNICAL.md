@@ -1,6 +1,6 @@
 # How CGM Relay works
 
-The detail behind the README: how CGM Relay reads LibreLinkUp, stores readings and serves them, and how to run it on a server.
+The detail behind the README: how CGM Relay reads LibreLinkUp, stores readings and serves them, and how to run it on a server. [CONTRIBUTING.md](../CONTRIBUTING.md) covers building the Mac app and running the tests.
 
 ## Reading LibreLinkUp
 
@@ -8,11 +8,11 @@ CGM Relay signs in to your LibreLinkUp follower account and asks for the latest 
 
 ## Storage and encryption
 
-Readings go into a small SQLite database on disk. Each value and trend is encrypted with AES-256-GCM, and the key is kept apart from the data (in the Keychain on a Mac, in its own file on a server), so a copied disk, a backup or a stolen database file shows timestamps but no glucose values. Encryption cannot protect you from someone who can already use your account on that machine, because they can reach the key too. Every commit is synced to disk in full, so a power cut never loses a reading that was already stored. Readings older than the retention you choose (15 days by default) are deleted.
+Readings go into a small SQLite database on disk. Each value and trend is encrypted with AES-256-GCM, and the key is kept apart from the data (in the Keychain on a Mac, in its own file on a server), so a copied or stolen database file shows timestamps but no glucose values. On a server the key file sits beside the database in the same folder, so a backup or disk copy that holds both is not protected by the encryption. Encryption cannot protect you from someone who can already use your account on that machine, because they can reach the key too. Every commit is synced to disk in full, so a power cut never loses a reading that was already stored. Readings older than the retention you choose (15 days by default) are deleted.
 
 ## What it serves
 
-CGM Relay serves the part of the Nightscout API that follower apps use: `entries.json`, `entries/sgv.json` and `entries/current.json` with `count` and date filtering, `status.json` (the one endpoint that answers without a token, and only with whether the relay is up, its clock and its unit), and the checks xDrip4iOS, LoopFollow and Nightguard make during setup (`treatments`, `devicestatus`, `profile`, answered empty). Every other request needs your access token, either as `?token=` or as the `api-secret` header these apps already send (raw or SHA-1, as Nightscout accepts). Responses of 1 KB or more are gzip-compressed when the app asks for it; smaller ones, like a single reading or the status, are sent plain.
+CGM Relay serves the part of the Nightscout API that follower apps use: `entries.json`, `entries/sgv.json` and `entries/current.json` with `count` and date filtering, `status.json` (which answers without a token, and only with whether the relay is up, its clock and its unit), and the checks xDrip4iOS, LoopFollow and Nightguard make during setup (`treatments`, `devicestatus`, `profile`, answered empty). Every other API request needs your access token, either as `?token=` or as the `api-secret` header these apps already send (raw or SHA-1, as Nightscout accepts). Responses of 1 KB or more are gzip-compressed when the app asks for it; smaller ones, like a single reading or the status, are sent plain. Two plain pages need no token: the one at `/` that names CGM Relay, and the short-lived page a Connect QR code opens, which takes its own code instead.
 
 ## Reaching it from your phone
 
@@ -66,7 +66,3 @@ It listens on `127.0.0.1:1337` by default, so nothing outside the machine can re
 | `CGM_RELAY_RETENTION_DAYS` | how many days of readings to keep (default 15) |
 
 The local status page answers only on the machine itself and refuses requests carrying any other host name. When the Mac app runs the relay, it also needs a secret the app makes fresh for every relay start and sends only once that relay is listening, so no other program on the Mac can read the status or make a pairing code; a relay started from a config file or the environment, as above, keeps the status page open on the machine and makes no pairing codes. Passwords, tokens and keys never appear in logs or error messages.
-
-## Building from source
-
-`go build ./cmd/cgm-relay` builds the engine; [CONTRIBUTING.md](../CONTRIBUTING.md) covers the Mac app, the tests and the fake LibreLinkUp server.

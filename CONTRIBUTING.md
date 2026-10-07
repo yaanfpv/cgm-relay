@@ -1,6 +1,6 @@
 # Contributing to CGM Relay
 
-Bug reports, ideas and pull requests are all welcome. The quickest way to report a bug is Report a Bug in the app (right-click the menu bar icon), which fills in your app version, macOS version and chip and nothing else, or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). Never paste your LibreLinkUp login, access token, relay address or readings into an issue. For anything bigger than a small fix, open an issue first so we can agree on the approach.
+Bug reports, ideas and pull requests are all welcome. The quickest way to report a bug is Report a Bug in the app (right-click the menu bar icon), which fills in your app version and build, macOS version and chip and nothing else, or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). Never paste your LibreLinkUp login, access token, relay address or readings into an issue. For anything bigger than a small fix, open an issue first so we can agree on the approach.
 
 ## What you need
 
@@ -32,12 +32,7 @@ The ports stay clear of an installed CGM Relay, and a plain `http` LibreLinkUp a
 
 ## The Mac app
 
-```bash
-swift test --package-path macos/Packages/CGMRelayCore
-bash macos/scripts/build.sh CODE_SIGNING_ALLOWED=NO
-```
-
-A debug build never touches your real Keychain item, readings or login items, so it is safe on the Mac you use every day. With the fake server running, this launches it already signed in:
+The checks table below has the commands that test and build it. A debug build never touches your real Keychain item, readings or login items, so it is safe on the Mac you use every day. With the fake server running, this launches it already signed in:
 
 ```bash
 open "macos/.build/DerivedData/Build/Products/Debug/CGM Relay.app" --args \
@@ -48,7 +43,7 @@ open "macos/.build/DerivedData/Build/Products/Debug/CGM Relay.app" --args \
 
 | Argument | What it does |
 | --- | --- |
-| `-CGMRelayKeychainService <name>` | Keeps this run's account, settings and readings under `<name>`; a new name starts from a clean slate. Every argument below needs it. |
+| `-CGMRelayKeychainService <name>` | Keeps this run's account, settings and readings under `<name>`; a new name starts from a clean slate. The made-up account, the two fakes and the update feed need it. |
 | `-CGMRelaySeedSyntheticAccount YES` | Signs in with a made-up account. |
 | `-CGMRelayLibreLinkUpBaseURL <url>` | Points the engine at the fake server. |
 | `-CGMRelayLoginItemFake <file>` | Open at Login reads and writes this file (`disabled`, `enabled`, `requiresApproval` or `notFound`). |

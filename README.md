@@ -34,28 +34,27 @@ Apps like xDrip4iOS only get a reading when your phone lets them run, and phones
 
 ## Features
 
-- **Every minute, kept,** with LibreLinkUp's 15-minute history filling any gap after a restart.
-- **Encrypted at rest.** A copied disk or backup shows timestamps but no glucose values. Readings are kept 15 days by default, adjustable.
+- **Gaps filled after a restart** from LibreLinkUp's 15-minute history.
+- **Encrypted at rest,** with the key in your Keychain: a copied database file shows timestamps but no glucose values. Readings are kept 15 days by default, adjustable.
 - **Calm menu bar.** Monochrome while readings are fresh, amber when late, red when something stops; the reading can sit in the menu bar too.
-- **Opens at login** and recovers on its own from LibreLinkUp rate limits and outages.
+- **Recovers on its own** from LibreLinkUp rate limits and outages.
 - **Works without a mouse.** The menu opens from the keyboard and VoiceOver.
 
 ## Supported
 
 - macOS 15 Sequoia or later, on Apple silicon and Intel.
 - FreeStyle Libre sensors that share through LibreLinkUp.
-- xDrip4iOS, xDrip+, LoopFollow and Nightguard, each tested with the settings above, and anything that reads a Nightscout site.
+- xDrip4iOS, xDrip+, LoopFollow and Nightguard with the settings above, and anything that reads a Nightscout site.
 - A Linux server instead of a Mac: see [Run it on a server](docs/TECHNICAL.md#run-it-on-a-server).
 
 ## Privacy
 
-CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and once a day to GitHub to check for a newer version (that check carries the app's name and version, and you can turn it off in Settings > Updates). Your follower apps talk to your Mac, not to us. Report a Bug fills in only your app version, macOS version and chip, and sends nothing unless you submit it.
+CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and once a day to GitHub to check for a newer version (that check carries the app's name and version, and you can turn it off in Settings > Updates). Your follower apps talk to your Mac, not to us. Report a Bug fills in only your app version and build, macOS version and chip, and sends nothing unless you submit it.
 
 ## Good to know
 
 - LibreLinkUp has no official public API. CGM Relay uses the same endpoints the LibreLinkUp app and other open-source followers use, and those can change.
 - It sees only what LibreLinkUp has: if the phone running LibreLink loses its connection, those minutes arrive later as 15-minute history.
-- It needs a Mac that stays awake, or a small server.
 
 ## Contributing
 
