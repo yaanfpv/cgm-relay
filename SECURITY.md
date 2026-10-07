@@ -2,19 +2,19 @@
 
 ## Reporting a vulnerability
 
-Please report a vulnerability privately, not in a public issue. On the [Security tab](https://github.com/yaanfpv/cgm-relay/security) of this repository, choose **Report a vulnerability**. That opens a private report only the maintainer can read, and we can work out a fix there before anything is public.
+Please report it privately, not in a public issue. On this repo's [Security tab](https://github.com/yaanfpv/cgm-relay/security), choose **Report a vulnerability**. Only I can read it, and we can sort out a fix before anything is public.
 
-Say what you found, how to reproduce it, and which version or build of CGM Relay it affects (About shows both). Please never include a real LibreLinkUp password, access token or someone's readings; made-up values are enough.
+Tell me what you found, how to reproduce it, and the version and build (both are in About). Never include a real LibreLinkUp password, access token or anyone's readings; made-up values are fine.
 
-## What is in scope
+## What counts
 
-- The Mac app: its menu bar panel, Settings, setup and updater.
-- The relay itself: the Go program that follows LibreLinkUp, stores readings and serves the Nightscout API, on a Mac or a server.
+The Mac app (menu, Settings, setup, updater) and the relay itself, on a Mac or a server. Things I especially want to hear about:
 
-Things like a way to read readings without the access token, to read the stored database without its key, to make the relay reach somewhere it should not, or to get the updater to install something that is not a signed release are exactly what we want to hear about.
+- reading someone's data without the access token
+- opening the database without its key
+- making the relay connect somewhere it shouldn't
+- getting the updater to install anything but a signed release
 
-Weaknesses in LibreLinkUp, Tailscale or a follower app belong with their own makers.
+Problems in LibreLinkUp, Tailscale or a follower app belong with their makers.
 
-## Not a medical device
-
-CGM Relay is not a medical device. Readings and alerts can be late, missing or wrong, and nothing here should be used for treatment decisions. A wrong or missing reading is a bug worth an ordinary [issue](https://github.com/yaanfpv/cgm-relay/issues/new); a way for someone else to see or change your data is a vulnerability, so report it privately as above.
+A wrong or missing reading is a normal bug, so [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new) for that.

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting this. The more of the fields below you fill in, the faster it can be reproduced. Please search the existing issues first, open and closed.
+        Thanks for reporting this. Please check the open and closed issues first in case it's already there.
   - type: textarea
     id: what_happened
     attributes:
@@ -71,5 +71,5 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: In CGM Relay, open Settings, then About, then Copy Diagnostics, and paste the result here. Read it first and remove anything you would rather not share.
+      description: In CGM Relay, open Settings > About > Copy Diagnostics and paste it here. Read it first and remove anything you'd rather not share.
       render: text
