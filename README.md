@@ -5,7 +5,7 @@
 <h1 align="center">CGM Relay</h1>
 
 <p align="center">
-  <b>Every minute of your Libre glucose. Even while your phone sleeps.</b>
+  <b>A Mac menu bar app that keeps every minute of your Libre glucose, even while your phone sleeps.</b>
 </p>
 
 <p align="center">
