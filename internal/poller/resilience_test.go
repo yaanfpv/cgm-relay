@@ -79,8 +79,8 @@ func TestRunInvalidReadingIsSkippedNotFatal(t *testing.T) {
 	go func() { done <- p.Run(ctx) }()
 
 	w := clock.waitForNextWait()
-	if w != poller.Interval {
-		t.Fatalf("wait after a rejected store insert = %s, want the normal Interval (%s)", w, poller.Interval)
+	if w <= 0 || w > poller.Interval {
+		t.Fatalf("wait after a rejected store insert = %s, want at most the normal Interval (%s)", w, poller.Interval)
 	}
 	if status := p.Status(); status.LastError == "" {
 		t.Error("Status().LastError empty after a rejected insert, want it set")
@@ -188,5 +188,60 @@ func TestRunLogsEachGapOnceAndSaysWhichKind(t *testing.T) {
 				t.Errorf("gap end line = %q, want it to say readings resumed after a gap of about twelve minutes", got[1])
 			}
 		})
+	}
+}
+
+// TestRunLogsOnceWhenTheCurrentReadingJumps checks that when LibreLinkUp's
+// current reading moves more than 90 s ahead of the previous new one, Run
+// logs exactly one line naming both timestamps and no glucose value, and that
+// ordinary one-minute steps log nothing.
+func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	readings := []time.Time{
+		start.Add(-20 * time.Second),
+		start.Add(40 * time.Second),
+		start.Add(100 * time.Second),
+		start.Add(220 * time.Second), // 120 s after the one before
+		start.Add(280 * time.Second),
+	}
+	const mgDl = 187
+	clock := newFakeClock(start)
+	src := scriptedSource([]sourceResponse{
+		{current: &cgm.Reading{Time: readings[0], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
+		{current: &cgm.Reading{Time: readings[1], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
+		{current: &cgm.Reading{Time: readings[2], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
+		{current: &cgm.Reading{Time: readings[3], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
+		{current: &cgm.Reading{Time: readings[4], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
+	})
+	var out lockedBuffer
+	p := poller.New(src, &fakeStore{}, 15*24*time.Hour, poller.WithClock(clock), poller.WithLogger(log.New(&out, "", 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	for i := 0; i < len(readings)-1; i++ {
+		clock.tick(clock.waitForNextWait())
+	}
+	clock.waitForNextWait()
+	cancel()
+	if err := waitDone(t, done); err != context.Canceled {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+
+	got := out.lines()
+	t.Logf("log lines: %q", got)
+	if len(got) != 1 {
+		t.Fatalf("logged %d lines, want exactly one for the jump:\n%s", len(got), strings.Join(got, "\n"))
+	}
+	for _, want := range []string{readings[2].Format(time.RFC3339), readings[3].Format(time.RFC3339), "never fetched"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("jump line = %q, want it to contain %q", got[0], want)
+		}
+	}
+	if strings.Contains(got[0], "187") {
+		t.Errorf("jump line = %q, must not contain a glucose value", got[0])
 	}
 }

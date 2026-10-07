@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Catch the readings a fast-uploading phone publishes: the relay no longer settles into a plain one-minute poll that can miss a reading when an upload comes a little late, and it logs when LibreLinkUp's current reading jumps ahead by more than a minute and a half.
 - Redraw the drop in the app icon as a rounder, fuller teardrop, so it no longer reads as tall and narrow.
 - Fix another program or user on the same Mac being able to read the follower token through the relay's local status port: the Mac app and the relay now share a secret that is new for every relay start and that the app sends only once that relay is running, pairing codes need it, and the relay no longer follows redirects from LibreLinkUp or reads unbounded responses. A relay started from a config file or environment has no pairing codes and keeps its open loopback status page.
 - Add a final gate check to CI that passes only when every other check has passed, so a pull request needs one required check; the Changelog entry check now runs in the same workflow and always reports a result.
