@@ -263,8 +263,8 @@ func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 // later however young it was; a repeat of it is retried after 15 s while a
 // newer one is still plausible and after 60 s once not; a reading that has
 // outlived its minute is asked about again after 10 s; and a fetch with
-// nothing current is retried after 15 s until two and a half minutes have
-// passed since the last reading, or since the start if there was none.
+// nothing current is retried after 15 s until 145 s have passed since the
+// last reading, or since the start if there was none.
 func TestRunWaitsBetweenFetches(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
