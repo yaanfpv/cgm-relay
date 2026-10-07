@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Run it on a Linux server instead of a Mac: a single `cgm-relay` program with `setup` and `serve`, configured by a file or environment variables, with a loopback-only status page.
 - If the saved readings can't be opened (after a Keychain reset, a restored backup or a move to a new Mac), the menu says what happened and offers Start Fresh, which moves the old file aside rather than deleting it. A second copy opened by mistake says the first one is running and offers to try again once it quits.
 - Its own app icon.
+- When your phone uploads a reading late and the next follows soon after, the relay now fetches in time to catch that one too, so the graph no longer shows a one or two minute hole that LibreLinkUp had briefly filled. The log line for a skipped stretch also says how many fetches saw the earlier reading in between and the longest time between fetches.
 - For contributors: a fake LibreLinkUp server (`go run ./cmd/llufake`) and development launch arguments, so the engine and the app run end to end without a real account and never touch an installed copy.
 - For contributors: pull request checks for Go formatting, vet, tests and build, Swift tests, the Mac app build and the changelog entry, each naming the failing file and line where there is one and the command to run it, and one final `gate` check that passes only when all of them have.
 - For maintainers: release tooling that builds, signs, notarizes, publishes and verifies a release.

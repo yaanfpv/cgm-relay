@@ -107,9 +107,9 @@ func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int, pace 
 
 	now := p.clock.Now()
 	previous := pace.last
-	wait, fresh := pace.observe(now, current)
+	wait, fresh, between := pace.observe(now, current)
 	if fresh {
-		gaps.checkSkipped(previous, current.Time)
+		gaps.checkSkipped(previous, current.Time, between)
 	}
 	gaps.check(now, fresh, "")
 	return wait, nil

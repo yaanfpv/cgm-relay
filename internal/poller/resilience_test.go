@@ -203,8 +203,9 @@ func TestRunLogsEachGapOnceAndSaysWhichKind(t *testing.T) {
 
 // TestRunLogsOnceWhenTheCurrentReadingJumps checks that when LibreLinkUp's
 // current reading moves more than 90 s ahead of the previous new one, Run
-// logs exactly one line naming both timestamps and no glucose value, and that
-// ordinary one-minute steps log nothing.
+// logs exactly one line naming both timestamps, how many fetches returned the
+// previous reading in between and the longest time between fetches, and no
+// glucose value, and that ordinary one-minute steps log nothing.
 func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -215,15 +216,16 @@ func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 		start.Add(220 * time.Second), // 120 s after the one before
 		start.Add(280 * time.Second),
 	}
+	// The third reading is returned by three fetches in a row before the
+	// source moves on, so two fetches see it again.
+	script := []int{0, 1, 2, 2, 2, 3, 4}
 	const mgDl = 187
 	clock := newFakeClock(start)
-	src := scriptedSource([]sourceResponse{
-		{current: &cgm.Reading{Time: readings[0], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
-		{current: &cgm.Reading{Time: readings[1], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
-		{current: &cgm.Reading{Time: readings[2], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
-		{current: &cgm.Reading{Time: readings[3], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
-		{current: &cgm.Reading{Time: readings[4], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}},
-	})
+	responses := make([]sourceResponse, len(script))
+	for i, n := range script {
+		responses[i] = sourceResponse{current: &cgm.Reading{Time: readings[n], MgDl: mgDl, Trend: cgm.TrendFlat, Source: "synthetic"}}
+	}
+	src := scriptedSource(responses)
 	var out lockedBuffer
 	p := poller.New(src, &fakeStore{}, 15*24*time.Hour, poller.WithClock(clock), poller.WithLogger(log.New(&out, "", 0)))
 
@@ -232,7 +234,7 @@ func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 
-	for i := 0; i < len(readings)-1; i++ {
+	for i := 0; i < len(script)-1; i++ {
 		clock.tick(clock.waitForNextWait())
 	}
 	clock.waitForNextWait()
@@ -246,7 +248,7 @@ func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("logged %d lines, want exactly one for the jump:\n%s", len(got), strings.Join(got, "\n"))
 	}
-	for _, want := range []string{readings[2].Format(time.RFC3339), readings[3].Format(time.RFC3339), "never fetched"} {
+	for _, want := range []string{readings[2].Format(time.RFC3339), readings[3].Format(time.RFC3339), "never fetched (2 fetches in between, never more than 55s apart)"} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("jump line = %q, want it to contain %q", got[0], want)
 		}
@@ -260,11 +262,12 @@ func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 // exact wait it asks for after each fetch. Every row serves one reading,
 // stamped firstAge before the first fetch, wherever its script says a reading
 // and nothing where it says nil. A new reading is followed by a fetch 55 s
-// later however young it was; a repeat of it is retried after 15 s while a
-// newer one is still plausible and after 60 s once not; a reading that has
-// outlived its minute is asked about again after 10 s; and a fetch with
-// nothing current is retried after 15 s until 145 s have passed since the
-// last reading, or since the start if there was none.
+// after its first sight, or sooner when it was already older than an Interval;
+// a repeat of it is retried after 15 s while a newer one is still plausible and
+// after 60 s once not; a reading that has outlived its minute is asked about
+// again after 10 s; and a fetch with nothing current is retried after 15 s
+// until 145 s have passed since the last reading, or since the start if there
+// was none.
 func TestRunWaitsBetweenFetches(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
