@@ -78,8 +78,6 @@ CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and t
 
 Found a bug or want something? Use Report a Bug in the app (right-click the menu bar icon) or [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new). [CONTRIBUTING.md](CONTRIBUTING.md) covers building and testing, and [SECURITY.md](SECURITY.md) covers reporting a vulnerability.
 
-If CGM Relay fills your gaps, give it a star. It helps other Libre users find it.
-
 ## License
 
 [GNU AGPL-3.0](LICENSE). If you want to build it into a closed product, [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new) and ask about a commercial license.
