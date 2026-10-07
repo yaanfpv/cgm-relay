@@ -38,7 +38,7 @@ That's it. Your app now gets every minute.
 
 ## What you get
 
-- **Every minute, kept.** Readings are encrypted on your Mac and kept for 15 days, or as long as you like.
+- **Every minute, kept.** Readings are encrypted on your Mac and kept for 15 days, which you can set anywhere from 1 to 90.
 - **A menu bar icon that stays out of your way.** It turns amber when readings are late and red when something stops, and can show your number right there.
 - **Set and forget.** It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
 - **Private.** Your follower apps talk to your Mac, not to us. There's no account and nothing to sign up for.

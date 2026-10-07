@@ -24,7 +24,7 @@ The relay only listens on the machine it runs on until you choose a way in:
 
 ## Run it on a server
 
-You need Go (the version in `go.mod`). Install the relay with `go install github.com/yaanfpv/cgm-relay/cmd/cgm-relay@latest`, or build it from a clone with `go build ./cmd/cgm-relay`. Then run setup once. It asks for your LibreLinkUp email and password and writes a config file and an encryption key, both readable only by you:
+You need Go (the version in `go.mod`). Install the relay with `go install github.com/yaanfpv/cgm-relay/cmd/cgm-relay@latest`, which puts `cgm-relay` in Go's `bin` folder (`$(go env GOPATH)/bin`), so make sure that folder is on your `PATH`. Or build it from a clone with `go build ./cmd/cgm-relay`, which leaves it in the current folder, and run it as `./cgm-relay` below. Then run setup once. It asks for your LibreLinkUp email and password and writes a config file and an encryption key, both readable only by you:
 
 ```bash
 cgm-relay setup
