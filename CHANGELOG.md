@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- README lists what's coming next: Windows, a Docker image and systemd unit, more CGM clouds.
+
 ### Added
 
 - A Mac menu bar app that checks your LibreLinkUp account about once a minute and keeps every reading it fetches, so a follower app on your phone catches up when it opens, even after a night asleep. A minute it didn't fetch, for example while your Mac was off or your phone was offline, is covered only by LibreLinkUp's own history of one reading every 15 minutes.
