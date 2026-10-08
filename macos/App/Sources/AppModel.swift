@@ -526,11 +526,12 @@ final class AppModel: ObservableObject {
     }
 
     /// typedPortInUseMessage is the refusal for a typed port another app
-    /// already holds on the addresses the chosen reach binds, nil when it is
-    /// free. A typed port is never moved to another.
+    /// already holds on the addresses the chosen reach binds, or the one the
+    /// relay's own status listener uses, nil when it is free. A typed port is
+    /// never moved to another.
     func typedPortInUseMessage(_ port: Int) -> String? {
         let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
-        return PortAvailability.isFree(port: port, bindHost: bindHost, binder: portBinder) ? nil : PortAvailability.inUseMessage(port: port)
+        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr))
     }
 
     func updateReach(_ reach: NetworkReach) {
@@ -910,13 +911,14 @@ final class AppModel: ObservableObject {
     /// chose or Tailscale HTTPS is serving: the saved port stays while it is
     /// still free, so an address already given to a phone keeps working, and
     /// only a taken one is replaced by the first free port from the default
-    /// up, which is then saved. It returns false, with the notice
-    /// setup shows, when every candidate is taken. A check reserves nothing,
-    /// so an engine that still cannot listen is reported by its exit code.
+    /// up, which is then saved. The relay's own status port is never chosen.
+    /// It returns false, with the notice setup shows, when every candidate is
+    /// taken. A check reserves nothing, so an engine that still cannot listen
+    /// is reported by its exit code.
     private func choosePortForSetup(interfaces: [NetworkInterfaceAddress]) -> Bool {
         guard !settings.setupFinished, !portIsPersonChosen, !httpsLocked else { return true }
         let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        switch PortAvailability.setupPort(current: settings.port, default: AppSettings.defaultPort, bindHost: bindHost, binder: portBinder) {
+        switch PortAvailability.setupPort(current: settings.port, default: AppSettings.defaultPort, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr)) {
         case .free(let port):
             setupPortNotice = nil
             if port != settings.port {

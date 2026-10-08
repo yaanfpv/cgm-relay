@@ -96,8 +96,26 @@ public enum PortAvailability {
         }
     }
 
-    public static func isFree(port: Int, bindHost: String, binder: any PortBinding) -> Bool {
-        hostsToCheck(bindHost: bindHost).allSatisfy { binder.canBind(host: $0, port: port) }
+    /// isFree is whether the engine could listen on port at bindHost. The
+    /// reserved port, the relay's own status listener, is never free: both
+    /// listeners cannot hold it.
+    public static func isFree(port: Int, bindHost: String, binder: any PortBinding, reserved: Int? = nil) -> Bool {
+        guard port != reserved else { return false }
+        return hostsToCheck(bindHost: bindHost).allSatisfy { binder.canBind(host: $0, port: port) }
+    }
+
+    /// port(inAddress:) is the port of a host:port listen address, nil when
+    /// it has none.
+    public static func port(inAddress address: String) -> Int? {
+        address.split(separator: ":").last.flatMap { Int($0) }
+    }
+
+    /// typedPortRefusal is the sentence refusing a typed follower port, nil
+    /// when it is usable: the relay's own status port is refused as its own,
+    /// and one another app holds as that app's.
+    public static func typedPortRefusal(port: Int, bindHost: String, binder: any PortBinding, reserved: Int?) -> String? {
+        if port == reserved { return reservedMessage(port: port) }
+        return isFree(port: port, bindHost: bindHost, binder: binder) ? nil : inUseMessage(port: port)
     }
 
     /// firstFreePort tries start, then each next port, for candidates ports
@@ -107,11 +125,12 @@ public enum PortAvailability {
         from start: Int,
         bindHost: String,
         binder: any PortBinding,
-        candidates: Int = candidateCount
+        candidates: Int = candidateCount,
+        reserved: Int? = nil
     ) -> SetupPortChoice {
         let last = min(start + candidates - 1, AppSettings.portRange.upperBound)
         if start <= last {
-            for port in start...last where isFree(port: port, bindHost: bindHost, binder: binder) {
+            for port in start...last where isFree(port: port, bindHost: bindHost, binder: binder, reserved: reserved) {
                 return .free(port)
             }
         }
@@ -127,17 +146,24 @@ public enum PortAvailability {
         default defaultPort: Int,
         bindHost: String,
         binder: any PortBinding,
-        candidates: Int = candidateCount
+        candidates: Int = candidateCount,
+        reserved: Int? = nil
     ) -> SetupPortChoice {
-        if AppSettings.portRange.contains(current), isFree(port: current, bindHost: bindHost, binder: binder) {
+        if AppSettings.portRange.contains(current), isFree(port: current, bindHost: bindHost, binder: binder, reserved: reserved) {
             return .free(current)
         }
-        return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates)
+        return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved)
     }
 
     /// inUseMessage is the sentence for a port another app already holds.
     public static func inUseMessage(port: Int) -> String {
         "Port \(port) is in use by another app."
+    }
+
+    /// reservedMessage is the sentence for the port the relay's own status
+    /// listener uses.
+    public static func reservedMessage(port: Int) -> String {
+        "CGM Relay already uses port \(port) for itself. Choose another."
     }
 
     /// exhaustedMessage is the sentence setup shows when no candidate port

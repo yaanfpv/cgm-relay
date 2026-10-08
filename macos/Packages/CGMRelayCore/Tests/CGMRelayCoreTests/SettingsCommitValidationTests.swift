@@ -274,6 +274,22 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true)) == .exhausted(first: 4000, last: 4049))
     }
 
+    @Test("the relay's own status port is never chosen: setup skips it, a typed one is refused as its own")
+    func statusPortIsReserved() {
+        let table = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(PortAvailability.firstFreePort(from: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002), "default taken and the status port next in line is skipped")
+        #expect(PortAvailability.setupPort(current: 4001, default: 4000, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == .free(4000), "a saved port equal to the status port is replaced")
+        #expect(PortAvailability.setupPort(current: 4000, default: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002))
+        for current in 3990...4060 {
+            #expect(PortAvailability.setupPort(current: current, default: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) != .free(4001))
+        }
+        #expect(PortAvailability.typedPortRefusal(port: 4001, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == "CGM Relay already uses port 4001 for itself. Choose another.")
+        #expect(PortAvailability.typedPortRefusal(port: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == "Port 4000 is in use by another app.")
+        #expect(PortAvailability.typedPortRefusal(port: 4002, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil)
+        #expect(PortAvailability.port(inAddress: "127.0.0.1:1338") == 1338)
+        #expect(PortAvailability.port(inAddress: "nonsense") == nil)
+    }
+
     @Test("a port another app holds on either address family is taken, and the refusal names it")
     func ipv4AndIPv6Conflicts() throws {
         let v4 = try #require(HeldListener.run(host: "127.0.0.1", count: 1))
