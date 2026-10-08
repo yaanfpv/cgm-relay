@@ -78,7 +78,9 @@ func (p *Poller) fetchAndStore(ctx context.Context, rateLimitAttempt *int, pace 
 	}
 	if err != nil {
 		wait, failure := p.handleFetchError(err, rateLimitAttempt)
-		gaps.check(p.clock.Now(), false, failure)
+		now := p.clock.Now()
+		pace.fetched(now, true)
+		gaps.check(now, false, failure)
 		return wait, nil
 	}
 

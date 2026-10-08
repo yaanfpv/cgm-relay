@@ -61,12 +61,13 @@ type pacer struct {
 	// merely late rather than absent. A fetch with no current reading leaves
 	// it alone, so an interruption does not cancel a retry a repeat earns.
 	seeking bool
-	// fetchedAt is when the previous successful fetch finished. The two
+	// fetchedAt is when the previous fetch, failed or not, finished. The
 	// fields below describe the fetches since the current reading was first
 	// seen, and are what a skipped stretch is reported from.
 	fetchedAt time.Time
-	// repeats counts fetches that returned the current reading again.
-	repeats int
+	// repeats counts fetches that returned the current reading again, and
+	// failures those that returned an error.
+	repeats, failures int
 	// longestGap is the longest time between two consecutive fetches since
 	// the current reading was first seen.
 	longestGap time.Duration
@@ -74,8 +75,20 @@ type pacer struct {
 
 // stretch describes the fetches between two new readings.
 type stretch struct {
-	repeats    int
-	longestGap time.Duration
+	repeats, failures int
+	longestGap        time.Duration
+}
+
+// fetched records a fetch attempt that finished at now, so the longest time
+// between attempts counts failed ones too.
+func (c *pacer) fetched(now time.Time, failed bool) {
+	if !c.fetchedAt.IsZero() {
+		c.longestGap = max(c.longestGap, now.Sub(c.fetchedAt))
+	}
+	c.fetchedAt = now
+	if failed {
+		c.failures++
+	}
 }
 
 // observe takes the current reading of a successful fetch made at now and
@@ -86,10 +99,7 @@ func (c *pacer) observe(now time.Time, cur *cgm.Reading) (time.Duration, bool, s
 	if c.started.IsZero() {
 		c.started = now
 	}
-	if !c.fetchedAt.IsZero() {
-		c.longestGap = max(c.longestGap, now.Sub(c.fetchedAt))
-	}
-	c.fetchedAt = now
+	c.fetched(now, false)
 	if cur == nil {
 		// Nothing current: a reading may be published any moment, so ask
 		// again soon, from the last reading's timestamp or, before any, from
@@ -105,10 +115,10 @@ func (c *pacer) observe(now time.Time, cur *cgm.Reading) (time.Duration, bool, s
 	}
 	age := now.Sub(cur.Time)
 	if cur.Time.After(c.last) {
-		between := stretch{repeats: c.repeats, longestGap: c.longestGap}
+		between := stretch{repeats: c.repeats, failures: c.failures, longestGap: c.longestGap}
 		c.last = cur.Time
 		c.seeking = true
-		c.repeats, c.longestGap = 0, 0
+		c.repeats, c.failures, c.longestGap = 0, 0, 0
 		if age > Interval+uploadLatency {
 			// The next upload may already be due.
 			return minFetchGap, true, between
@@ -147,15 +157,21 @@ type gapWatch struct {
 // skippedText names the two timestamps of a jump and how closely the fetches
 // in between watched for the readings, and nothing else. Fetches never more
 // than the retry apart mean the source did not show the missing readings that
-// long; a longer gap could have hidden one.
+// long; a longer gap could have hidden one. Failed fetches are counted apart
+// from those that returned the earlier reading again, so an outage can be told
+// from a source with nothing newer.
 func skippedText(previous, current time.Time, during stretch) string {
 	fetches := "fetches"
 	if during.repeats == 1 {
 		fetches = "fetch"
 	}
-	return fmt.Sprintf("LibreLinkUp's current reading went from %s to %s, so the readings between were never fetched (%d %s in between, never more than %s apart)",
+	failed := ""
+	if during.failures > 0 {
+		failed = fmt.Sprintf(", %d failed", during.failures)
+	}
+	return fmt.Sprintf("LibreLinkUp's current reading went from %s to %s, so the readings between were never fetched (%d %s returned the earlier reading again%s, never more than %s apart)",
 		previous.UTC().Format(time.RFC3339), current.UTC().Format(time.RFC3339),
-		during.repeats, fetches, shortSpan(during.longestGap))
+		during.repeats, fetches, failed, shortSpan(during.longestGap))
 }
 
 // shortSpan writes a span under two minutes in whole seconds, so "60s" and

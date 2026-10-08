@@ -130,20 +130,25 @@ func TestRunLogsEachGapOnceAndSaysWhichKind(t *testing.T) {
 		name    string
 		quiet   func() sourceResponse
 		wantGap string
+		// wantWatched is how the resume line describes the fetches made
+		// while no new reading arrived.
+		wantWatched string
 	}{
 		{
 			name: "source has nothing newer",
 			quiet: func() sourceResponse {
 				return sourceResponse{current: &cgm.Reading{Time: start.Add(-45 * time.Second), MgDl: 100, Trend: cgm.TrendFlat, Source: "synthetic"}}
 			},
-			wantGap: "LibreLinkUp has nothing newer",
+			wantGap:     "LibreLinkUp has nothing newer",
+			wantWatched: "(15 fetches returned the earlier reading again, never more than 60s apart)",
 		},
 		{
 			name: "fetches failing",
 			quiet: func() sourceResponse {
 				return sourceResponse{err: &cgm.TransientError{Err: errors.New("network timeout")}}
 			},
-			wantGap: "fetches are failing (temporary fetch failure)",
+			wantGap:     "fetches are failing (temporary fetch failure)",
+			wantWatched: "(0 fetches returned the earlier reading again, 12 failed, never more than 60s apart)",
 		},
 	}
 	for _, tt := range tests {
@@ -193,6 +198,9 @@ func TestRunLogsEachGapOnceAndSaysWhichKind(t *testing.T) {
 				if !strings.Contains(got[1], want) {
 					t.Errorf("gap end line = %q, want it to contain %q", got[1], want)
 				}
+			}
+			if !strings.Contains(got[1], tt.wantWatched) {
+				t.Errorf("gap end line = %q, want it to say %q", got[1], tt.wantWatched)
 			}
 			if strings.Contains(got[1], "101") {
 				t.Errorf("gap end line = %q, must not contain a glucose value", got[1])
@@ -248,10 +256,61 @@ func TestRunLogsOnceWhenTheCurrentReadingJumps(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("logged %d lines, want exactly one for the jump:\n%s", len(got), strings.Join(got, "\n"))
 	}
-	for _, want := range []string{readings[2].Format(time.RFC3339), readings[3].Format(time.RFC3339), "never fetched (2 fetches in between, never more than 55s apart)"} {
+	for _, want := range []string{readings[2].Format(time.RFC3339), readings[3].Format(time.RFC3339), "never fetched (2 fetches returned the earlier reading again, never more than 55s apart)"} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("jump line = %q, want it to contain %q", got[0], want)
 		}
+	}
+	if strings.Contains(got[0], "187") {
+		t.Errorf("jump line = %q, must not contain a glucose value", got[0])
+	}
+}
+
+// TestRunCountsFailedFetchesInASkippedStretch checks that fetches which fail
+// between two readings count in the jump line: the longest time between
+// fetches is measured across failed attempts too, and the line says how many
+// failed, so an outage reads differently from a source with nothing newer.
+// Calls fail until the second reading is published.
+func TestRunCountsFailedFetchesInASkippedStretch(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := newFakeClock(start)
+	published := start.Add(120 * time.Second)
+	src := &fakeSource{respond: func(call int) sourceResponse {
+		switch {
+		case call == 0:
+			return sourceResponse{current: &cgm.Reading{Time: start, MgDl: 187, Trend: cgm.TrendFlat, Source: "synthetic"}}
+		case clock.Now().Before(published):
+			return sourceResponse{err: &cgm.TransientError{Err: errors.New("network timeout")}}
+		}
+		return sourceResponse{current: &cgm.Reading{Time: published, MgDl: 187, Trend: cgm.TrendFlat, Source: "synthetic"}}
+	}}
+	var out lockedBuffer
+	p := poller.New(src, &fakeStore{}, 15*24*time.Hour, poller.WithClock(clock), poller.WithLogger(log.New(&out, "", 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	// Fetches land at 0, 55 and 115 s (the last two fail), then at 175 s.
+	for clock.Now().Before(start.Add(170 * time.Second)) {
+		clock.tick(clock.waitForNextWait())
+	}
+	clock.waitForNextWait()
+	cancel()
+	if err := waitDone(t, done); err != context.Canceled {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+
+	got := out.lines()
+	t.Logf("log lines: %q", got)
+	if len(got) != 1 {
+		t.Fatalf("logged %d lines, want exactly one for the jump:\n%s", len(got), strings.Join(got, "\n"))
+	}
+	want := "never fetched (0 fetches returned the earlier reading again, 2 failed, never more than 60s apart)"
+	if !strings.Contains(got[0], want) {
+		t.Errorf("jump line = %q, want it to contain %q", got[0], want)
 	}
 	if strings.Contains(got[0], "187") {
 		t.Errorf("jump line = %q, must not contain a glucose value", got[0])
