@@ -49,7 +49,8 @@ const (
 // reading's age says little about when the next one lands. Instead every new
 // reading is followed by a fetch aimed an Interval after its own timestamp
 // plus its upload lag, and a fetch that finds the same reading again retries
-// soon, so each reading is caught whichever side of its upload the fetch falls.
+// soon, so a reading is caught whichever side of its upload the fetch falls as
+// long as it is still current at the retry.
 type pacer struct {
 	// started is when the first fetch finished, bounding how long a source
 	// that has returned no reading at all is asked again soon.
@@ -116,8 +117,8 @@ func (c *pacer) observe(now time.Time, cur *cgm.Reading) (time.Duration, bool, s
 		// reaches the source about as long after that as this one took. A
 		// late upload is usually followed closely by the next, so the lag is
 		// capped at an Interval: aiming from the reading's own timestamp
-		// rather than from now keeps the fetch ahead of a reading that is
-		// current for only a few seconds.
+		// rather than from now keeps the fetch ahead of a reading that follows
+		// a late one closely.
 		aim := cur.Time.Add(Interval + min(max(age, 0), Interval) - fetchLead)
 		return min(max(aim.Sub(now), minFetchGap), Interval-fetchLead), true, between
 	}

@@ -19,13 +19,14 @@ const authRetryInterval = 5 * time.Minute
 var rateLimitBackoff = []time.Duration{60 * time.Second, 120 * time.Second, 300 * time.Second}
 
 // Run fetches a reading about once an Interval, timed from what each fetch
-// returns so none the source publishes is skipped, storing it and filling
-// any history gaps, until ctx is done. It prunes on its first cycle and every
-// PruneInterval after that, so retention is enforced even across frequent
-// restarts. It backs off after a rate limit or an authentication failure
-// and retries a transient failure, a fetch that timed out, or a rejected
-// store insert at the next Interval; none of those stop the loop. Run
-// returns ctx's own error once ctx is done, and for no other reason.
+// returns so a reading the source keeps current until a fetch sees it is not
+// skipped, storing it and filling any history gaps, until ctx is done. It
+// prunes on its first cycle and every PruneInterval after that, so retention
+// is enforced even across frequent restarts. It backs off after a rate limit
+// or an authentication failure and retries a transient failure, a fetch that
+// timed out, or a rejected store insert at the next Interval; none of those
+// stop the loop. Run returns ctx's own error once ctx is done, and for no
+// other reason.
 func (p *Poller) Run(ctx context.Context) error {
 	// Starting lastPrune a full PruneInterval in the past makes the very
 	// first cycle's check due immediately, so retention is enforced from
