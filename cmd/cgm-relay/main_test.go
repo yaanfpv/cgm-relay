@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -373,6 +374,44 @@ func TestExitCodeForServeErrorDistinguishesStoreDamaged(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "the saved readings file is damaged and cannot be read") {
 		t.Errorf("stderr = %q, want it to say the saved readings file is damaged", got)
+	}
+}
+
+// TestExitCodeForServeErrorDistinguishesPortInUse proves a relay asked to
+// listen on a follower port another program already holds -- a real
+// listener on an OS-assigned port, here -- is reported with its own exit
+// code, apart from the exit code 1 an ordinary crash gets, so a supervising
+// app does not restart it in a loop.
+func TestExitCodeForServeErrorDistinguishesPortInUse(t *testing.T) {
+	t.Parallel()
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a port: %v", err)
+	}
+	defer holder.Close()
+
+	cfg := config.Config{
+		LibreLinkUpEmail:    "person@example.test",
+		LibreLinkUpPassword: "leak-check-password-should-never-log",
+		Token:               "leak-check-token-should-never-log",
+		ListenAddr:          holder.Addr().String(),
+		StatusAddr:          "127.0.0.1:0",
+		DatabasePath:        filepath.Join(t.TempDir(), "readings.db"),
+		RetentionDays:       15,
+		Key:                 bytes.Repeat([]byte{'P'}, 32),
+	}
+	runErr := relay.Run(context.Background(), cfg)
+	if runErr == nil {
+		t.Fatal("relay.Run listened on a port another listener holds, want an error")
+	}
+
+	var out bytes.Buffer
+	code := exitCodeForServeError(&out, runErr)
+	if code != exitCodePortInUse {
+		t.Errorf("exit code = %d, want %d", code, exitCodePortInUse)
+	}
+	if !strings.Contains(out.String(), "port is in use by another program") {
+		t.Errorf("stderr = %q, want it to say the port is in use", out.String())
 	}
 }
 

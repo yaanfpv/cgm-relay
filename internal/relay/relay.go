@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
@@ -88,6 +89,12 @@ func WithReady(fn func(Addresses)) Option {
 	return func(st *settings) { st.ready = fn }
 }
 
+// ErrPortInUse is wrapped into Run's error when the Nightscout listener
+// cannot bind because another program already holds its address. A
+// supervising app tells it apart from an ordinary crash by the exit code
+// cmd/cgm-relay gives it: restarting loses the same race.
+var ErrPortInUse = errors.New("relay: port is in use by another program")
+
 // Run signs in to the configured CGM account, polls it once a minute, and
 // serves the stored readings over the Nightscout API (cfg.ListenAddr) and
 // a local status endpoint (cfg.StatusAddr), until ctx is done. It returns
@@ -136,6 +143,9 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	pairings := pairing.NewStore(nil)
 	nsServer, err := startServer(cfg.ListenAddr, withPairingPage(trackClients(nsHandler, tracker, time.Now), pairings, cfg.Token))
 	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return fmt.Errorf("relay: listen on %s: %w: %w", cfg.ListenAddr, ErrPortInUse, err)
+		}
 		return fmt.Errorf("relay: listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer nsServer.shutdown()
