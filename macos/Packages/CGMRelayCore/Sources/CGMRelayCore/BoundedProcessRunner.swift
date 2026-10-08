@@ -28,8 +28,8 @@ public struct BoundedProcessOutput: Sendable, Equatable {
 /// write standardInputData to its stdin, close it, and wait for the
 /// process to exit on its own within timeout. Unlike ProcessLauncher,
 /// which supervises a process meant to keep running indefinitely, this is
-/// for a one-shot command: check-account, read by its exit code alone, or
-/// a Tailscale command, whose answer runCapturingOutput also returns.
+/// for a one-shot command: check-account, or a Tailscale command, whose
+/// answer runCapturingOutput also returns.
 public protocol BoundedProcessRunning: Sendable {
     func run(
         executableURL: URL,
@@ -52,13 +52,16 @@ public protocol BoundedProcessRunning: Sendable {
 /// giving it the same minimal, explicit environment RealProcessLauncher
 /// gives the supervised engine: a one-shot command needs no more of this
 /// app's own environment than the supervised one does. `run` discards the
-/// child's stdout and stderr outright -- check-account promises to print no
-/// secret, and its only contract with a caller is the exit code;
-/// `runCapturingOutput` keeps them for a caller that must read the answer.
+/// child's stdout and stderr outright; `runCapturingOutput` keeps them for
+/// a caller that must read the answer.
 public struct RealBoundedProcessRunner: BoundedProcessRunning {
     /// extraEnvironment is added to the minimal child environment, for a
     /// caller whose child needs one variable more than the engine does.
     private let extraEnvironment: [String: String]
+
+    /// terminateGrace is how long a timed-out child gets to exit after
+    /// being asked to before it is killed.
+    private static let terminateGrace: Duration = .seconds(2)
 
     public init(extraEnvironment: [String: String] = [:]) {
         self.extraEnvironment = extraEnvironment
@@ -176,7 +179,15 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
             if process.isRunning {
                 process.terminate()
             }
+            // A child that ignores the request is killed outright after a
+            // short grace, so a timed-out run never leaves it running.
+            let processID = process.processIdentifier
+            let killer = Task {
+                try? await Task.sleep(for: Self.terminateGrace)
+                if !Task.isCancelled { kill(processID, SIGKILL) }
+            }
             _ = await group.next()
+            killer.cancel()
             return .timedOut
         }
         return BoundedProcessOutput(result: result, output: await collectedOutput?.data() ?? Data())

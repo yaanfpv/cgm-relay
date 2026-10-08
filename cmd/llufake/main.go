@@ -22,6 +22,7 @@
 //	curl -X POST "<url>/mode?mode=terms"         # every sign-in needs LibreLinkUp's updated terms accepted
 //	curl -X POST "<url>/mode?mode=ratelimited"   # every sign-in answers 429, rate limited
 //	curl -X POST "<url>/mode?mode=noconnections" # sign-in succeeds, but the account follows nobody
+//	curl -X POST "<url>/mode?mode=unrecognised"  # every sign-in answers a status nothing defines
 //	curl "<url>/mode"                            # print the current mode
 //
 // It runs until interrupted (Ctrl-C) or sent SIGTERM.
@@ -54,6 +55,7 @@ func main() {
 	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=terms")
 	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=ratelimited")
 	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=noconnections")
+	fmt.Printf("  curl -X POST %q\n", srv.URL+"/mode?mode=unrecognised")
 	fmt.Printf("  curl %q\n", srv.URL+"/mode")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

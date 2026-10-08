@@ -21,7 +21,12 @@ public struct AccountSignIn: Sendable {
     /// .saveFailed instead of .signedIn. Every other outcome, including
     /// .other, leaves store exactly as it was, so a refused check never
     /// overwrites a previously working account.
-    public func signIn(email: String, password: String, librelinkupBaseURL: String?) async -> AccountCheckOutcome {
+    ///
+    /// The email is trimmed first, and an email that is not
+    /// local@domain.tld is refused as .malformedEmail without starting
+    /// any check; the trimmed value is what is checked and saved.
+    public func signIn(email rawEmail: String, password: String, librelinkupBaseURL: String?) async -> AccountCheckOutcome {
+        guard let email = AccountEmail.trimmedIfValid(rawEmail) else { return .malformedEmail }
         let outcome = await checker.checkAccount(email: email, password: password, librelinkupBaseURL: librelinkupBaseURL)
         guard outcome == .signedIn else { return outcome }
         do {

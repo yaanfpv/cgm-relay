@@ -35,6 +35,11 @@ const staleReadingAge = 10 * time.Minute
 // enough.
 const dynamicReadingMgDl = 100
 
+// unrecognisedLoginStatus is the sign-in JSON status SetMode's
+// "unrecognised" mode answers: one LibreLinkUp's follower source defines
+// no meaning for.
+const unrecognisedLoginStatus = 99
+
 // Measurement is one glucose reading as the fake's graph endpoint reports
 // it, in LibreLinkUp's own JSON shape. FactoryTimestamp and Timestamp are
 // pre-formatted strings ("M/d/yyyy h:mm:ss a") so a test can set them to
@@ -238,7 +243,9 @@ func (s *Server) Fail(status int) {
 // LibreLinkUp does when the account must accept updated terms), "ratelimited"
 // (every sign-in answers HTTP 429, with no Retry-After header), or
 // "noconnections" (sign-in succeeds, but the connections list is always
-// empty, as for an account nobody follows). It takes effect on the very
+// empty, as for an account nobody follows), or "unrecognised" (every
+// sign-in answers a JSON status LibreLinkUp's follower source does not
+// define). It takes effect on the very
 // next request, with no restart needed, and is the one control the
 // standalone fake (cmd/llufake) exposes over HTTP at /mode; the Go test
 // suite drives the fake directly through SetGraph, RejectCredentials and
@@ -250,9 +257,9 @@ func (s *Server) Fail(status int) {
 // stopped being so.
 func (s *Server) SetMode(mode string) error {
 	switch mode {
-	case "fresh", "stale", "reject", "terms", "ratelimited", "noconnections":
+	case "fresh", "stale", "reject", "terms", "ratelimited", "noconnections", "unrecognised":
 	default:
-		return fmt.Errorf("llufake: unknown mode %q, want one of fresh, stale, reject, terms, ratelimited, noconnections", mode)
+		return fmt.Errorf("llufake: unknown mode %q, want one of fresh, stale, reject, terms, ratelimited, noconnections, unrecognised", mode)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,6 +347,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.mode == "ratelimited" {
 		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	if s.mode == "unrecognised" {
+		writeJSON(w, map[string]any{"status": unrecognisedLoginStatus, "data": map[string]any{}})
 		return
 	}
 

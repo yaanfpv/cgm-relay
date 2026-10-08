@@ -435,6 +435,51 @@ func TestExitCodeForCheckAccountError(t *testing.T) {
 			wantContains: "rate limiting",
 		},
 		{
+			name: "fake mode reject",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("reject")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountRejected,
+			wantContains: "rejected the email or password",
+		},
+		{
+			name: "fake mode terms",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("terms")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountTermsNotAccepted,
+			wantContains: "updated terms accepted",
+		},
+		{
+			name: "fake mode noconnections",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("noconnections")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountNoConnections,
+			wantContains: "follows nobody",
+		},
+		{
+			name: "fake mode ratelimited",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("ratelimited")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountRateLimited,
+			wantContains: "rate limiting",
+		},
+		{
+			name: "fake mode unrecognised sign-in status",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("unrecognised")
+				return fake.URL
+			},
+			wantCode:     exitCodeGenericFailure,
+			wantContains: "carried no user id or token",
+		},
+		{
 			name: "unreachable",
 			configure: func(fake *llufake.Server) string {
 				baseURL := fake.URL
