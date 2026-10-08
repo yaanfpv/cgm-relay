@@ -6,8 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Changed
-
 - The Connect screen lines every follower app up the same way, the steps follow each app's own settings screen in the order it asks, xDrip4iOS and LoopFollow end on the check they really have, and xDrip+ says what its single copy button is for.
 
 ### Added
