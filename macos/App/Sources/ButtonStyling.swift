@@ -6,10 +6,9 @@ import SwiftUI
 /// chosen by an availability check, never a second look. Both styles pick
 /// up the app's own AccentColor asset (a deep teal in the light appearance,
 /// so the text the system draws in or on it reads). The primary style
-/// instead names ActionFill, the bright mint, as its tint: a prominent
-/// button otherwise falls back to the system blue in the light appearance,
-/// and its AccentLabel ink reads on the mint fill where it could not on the
-/// deep teal.
+/// names ActionFill as its tint, since a prominent button otherwise falls
+/// back to the system blue: a deep teal carrying a white AccentLabel in the
+/// light appearance, a bright mint carrying a dark one in the dark.
 extension View {
     /// cgmPrimaryActionStyle marks a pane or panel's one primary action
     /// (Sign In, Start, Try Again, Copy Diagnostics): glass-prominent on

@@ -97,6 +97,7 @@ struct AccessibleButton: View {
     var style: CGMButtonStyle = .secondary
     let action: () -> Void
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlActiveState) private var controlActiveState
 
     init(_ title: String, accessibleName: String? = nil, role: ButtonRole? = nil, style: CGMButtonStyle = .secondary, action: @escaping () -> Void) {
         self.title = title
@@ -115,14 +116,19 @@ struct AccessibleButton: View {
     private var styledButton: some View {
         switch style {
         case .primary:
-            // Enabled, the label is the AccentLabel ink, the one colour that
-            // reads on the ActionFill tint in both appearances. Disabled, the
-            // system draws its own fill, so it also draws its own label.
+            // In a key window the label is the AccentLabel ink, chosen to read
+            // on the ActionFill tint in each appearance. In a background window
+            // the system swaps the tint for its own grey fill, and its own
+            // dimmed label on that fill is too faint to read, so the label
+            // becomes InactiveActionLabel: still visibly at rest, but legible.
+            // Disabled, the system draws both fill and label.
             Button(role: role, action: action) {
-                if isEnabled {
-                    Text(title).foregroundStyle(Color("AccentLabel"))
-                } else {
+                if !isEnabled {
                     Text(title)
+                } else if controlActiveState == .inactive {
+                    Text(title).foregroundStyle(Color("InactiveActionLabel"))
+                } else {
+                    Text(title).foregroundStyle(Color("AccentLabel"))
                 }
             }
             .cgmPrimaryActionStyle()
