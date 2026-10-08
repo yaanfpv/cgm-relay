@@ -34,6 +34,12 @@ public enum FollowerAppEntry {
     public struct Field: Codable, Equatable, Sendable {
         public let label: String
         public let value: String
+
+        /// value(withToken:) is the value to copy or show: the field's value
+        /// with the access token put where it asks for it.
+        public func value(withToken token: String) -> String {
+            value.replacingOccurrences(of: FollowerAppEntry.tokenPlaceholder, with: token)
+        }
     }
 
     /// Link is a button on the pairing page (opening or getting the app).
@@ -60,23 +66,24 @@ public enum FollowerAppEntry {
         let token = tokenPlaceholder
         switch app {
         case .xDrip4iOS:
-            var fields = [Field(label: "URL", value: entry.host)]
-            let portStep: String
+            // The Nightscout screen lists URL, API_SECRET, Token, then Port,
+            // with Test Connection in the actions group below them.
+            var fields = [Field(label: "URL", value: entry.host), Field(label: "Token", value: token)]
+            var steps = [
+                "In Settings, set Master or Follower to Follower, and Data Source to Nightscout.",
+                "In Settings, open Sharing and Services, then Nightscout, and turn it on.",
+                entry.port == nil ? "In URL, enter the address." : "In URL, enter the address without its port.",
+                "Leave API_SECRET blank.",
+                "In Token, enter the token.",
+            ]
             if let port = entry.port {
                 fields.append(Field(label: "Port", value: port))
-                portStep = "In URL, enter the address without its port, \(port) in Port, and the token in Token."
-            } else {
-                portStep = "In URL, enter the address, and the token in Token."
+                steps.append("In Port, enter \(port).")
             }
-            fields.append(Field(label: "Token", value: token))
+            steps.append("Tap Test Connection and wait for the dot to turn green.")
             return Instructions(
                 name: app.displayName,
-                steps: [
-                    "In Settings, set Master or Follower to Follower, and Data Source to Nightscout.",
-                    "In Settings, open Sharing and Services, then Nightscout, and turn it on.",
-                    portStep,
-                    "Leave API_SECRET blank.",
-                ],
+                steps: steps,
                 fields: fields,
                 links: [Link(label: "Open xDrip4iOS", url: "xdripswift://open")]
             )
@@ -85,7 +92,7 @@ public enum FollowerAppEntry {
                 name: app.displayName,
                 steps: [
                     "In Settings, set Hardware Data Source to Nightscout Follower.",
-                    "In Nightscout Follow URL, enter the address with the token in front of it.",
+                    "Nightscout Follow URL takes the address and the token as one value. Copy it below and paste it there.",
                 ],
                 fields: [Field(label: "Nightscout Follow URL", value: urlWithToken(address: address, token: token))],
                 links: []
@@ -93,8 +100,11 @@ public enum FollowerAppEntry {
         case .loopFollow:
             return Instructions(
                 name: app.displayName,
-                steps: ["In Settings, open Nightscout, then enter the address in URL and the token in Token."],
-                fields: [Field(label: "URL", value: address), Field(label: "Token", value: token)],
+                steps: [
+                    "In Settings, open Nightscout, then enter the address in URL and the token in Access Token.",
+                    "Check that Status shows a green checkmark.",
+                ],
+                fields: [Field(label: "URL", value: address), Field(label: "Access Token", value: token)],
                 links: []
             )
         case .nightguard:

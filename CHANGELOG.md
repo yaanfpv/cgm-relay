@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The Connect screen lines every follower app up the same way, the steps follow each app's own settings screen in the order it asks, xDrip4iOS and LoopFollow end on the check they really have, and xDrip+ says what its single copy button is for.
+
 ### Added
 
 - A Mac menu bar app that checks your LibreLinkUp account about once a minute and keeps every reading it fetches, so a follower app on your phone catches up when it opens, even after a night asleep. A minute it didn't fetch, for example while your Mac was off or your phone was offline, is covered only by LibreLinkUp's own history of one reading every 15 minutes.

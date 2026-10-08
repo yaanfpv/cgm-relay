@@ -113,6 +113,17 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 	if strings.Contains(body, "{token}") {
 		t.Error("a token placeholder was left unfilled")
 	}
+	// An app's steps come before its values, and the values keep the order
+	// the Mac sent them in.
+	order := []string{"Leave the secret blank.", ">URL</div>", ">Token</div>", ">Second App</h2>"}
+	last := -1
+	for _, want := range order {
+		at := strings.Index(body, want)
+		if at <= last {
+			t.Errorf("%q is out of order in the page", want)
+		}
+		last = at
+	}
 	if strings.Contains(body, "<b>now</b>") || !strings.Contains(body, "&lt;b&gt;now&lt;/b&gt;") {
 		t.Error("app wording was not HTML-escaped")
 	}
