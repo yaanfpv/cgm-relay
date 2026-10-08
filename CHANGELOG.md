@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A new Mac install now shows the reading in the menu bar and keeps 30 days of readings, and setup moves to a free port when the default is taken; a port you type is never changed, and a port another app holds is refused or reported in the menu instead of retried in a loop.
 - Sign-in now catches a mistyped email before sending anything, says what actually went wrong when a check fails to start, times out or fails in a way it does not know, and puts the Sign In button below the fields as the default.
 - The Connect screen lines every follower app up the same way, the steps follow each app's own settings screen in the order it asks, xDrip4iOS and LoopFollow end on the check they really have, and xDrip+ says what its single copy button is for.
-- Button labels read clearly in Light and Dark, including in a window behind another app: white on a deeper teal in Light, and a readable grey when the window is in the background.
+- Button labels read clearly in Light and Dark, including in a window behind another app: white on a deeper teal in Light, and a readable grey when the window is in the background or the button isn't available yet.
 - The disk image opens to a designed window: CGM Relay on the left, Applications on the right, and an arrow showing where to drag it.
 - README lists what's coming next: Windows, a Docker image and systemd unit, more CGM clouds.
 
