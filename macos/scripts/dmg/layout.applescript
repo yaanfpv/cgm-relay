@@ -1,6 +1,8 @@
 -- Lays out the installer window of a mounted, writable disk image: the app on
--- the left, Applications on the right, the background art behind them. Finder
--- writes the result into the volume's .DS_Store, which the finished image keeps.
+-- the left, Applications on the right, the background art behind them. The
+-- window has room below the instruction line, so a Finder that keeps its
+-- toolbar showing still shows the line. Finder writes the result into the
+-- volume's .DS_Store, which the finished image keeps.
 -- Usage: osascript layout.applescript "<volume name>"
 on run argv
 	set volumeName to item 1 of argv
@@ -10,7 +12,8 @@ on run argv
 			set current view of container window to icon view
 			set toolbar visible of container window to false
 			set statusbar visible of container window to false
-			set the bounds of container window to {200, 120, 860, 520}
+			set pathbar visible of container window to false
+			set the bounds of container window to {200, 120, 860, 560}
 			set viewOptions to the icon view options of container window
 			set arrangement of viewOptions to not arranged
 			set icon size of viewOptions to 112
