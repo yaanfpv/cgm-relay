@@ -262,6 +262,18 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.firstFreePort(from: 65530, bindHost: "127.0.0.1", binder: topFree) == .free(65535))
     }
 
+    @Test("during setup a saved port that is still free stays, and a taken one moves to the first free from the default")
+    func setupKeepsAFreeSavedPort() {
+        let defaultPort = 4000
+        let table = TableBinder(taken: ["127.0.0.1": [4001]])
+        #expect(PortAvailability.setupPort(current: 4002, default: defaultPort, bindHost: "127.0.0.1", binder: table) == .free(4002), "a non-default saved port stays while free, even though the default is free too")
+        #expect(PortAvailability.setupPort(current: 4000, default: defaultPort, bindHost: "127.0.0.1", binder: table) == .free(4000))
+        #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: table) == .free(4000), "a taken saved port searches from the default")
+        let defaultTaken = TableBinder(taken: ["127.0.0.1": [4000, 4001]])
+        #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: defaultTaken) == .free(4002))
+        #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true)) == .exhausted(first: 4000, last: 4049))
+    }
+
     @Test("a port another app holds on either address family is taken, and the refusal names it")
     func ipv4AndIPv6Conflicts() throws {
         let v4 = try #require(HeldListener.run(host: "127.0.0.1", count: 1))
