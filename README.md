@@ -5,7 +5,7 @@
 <h1 align="center">CGM Relay</h1>
 
 <p align="center">
-  <b>A Mac menu bar app that keeps every minute of your Libre glucose, even while your phone sleeps.</b>
+  <b>A Mac menu bar app that catches the Libre readings your phone drops while it sleeps.</b>
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 
 Your phone lets xDrip run for a moment, then puts it back to sleep, and the minutes in between are gone. LibreLinkUp only keeps a point every 15 minutes. So you wake up to a graph full of holes.
 
-CGM Relay fixes that from your Mac. It follows your LibreLinkUp account every single minute, keeps every reading, and hands them all to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any Nightscout follower app the moment it wakes up. No gaps, no account, no cloud in between.
+CGM Relay fills those minutes in from your Mac. It checks your LibreLinkUp account about once a minute, keeps every reading it gets, and hands them all to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any Nightscout follower app the moment it wakes up. No account, no cloud in between.
 
 <p align="center">
   <img src="docs/images/panel.png" width="320" alt="The CGM Relay menu open under the menu bar icon, showing a reading of 100 mg/dL, Current, just now, with Stop, Settings and Quit buttons">
@@ -34,11 +34,11 @@ CGM Relay fixes that from your Mac. It follows your LibreLinkUp account every si
 2. Open it and follow setup. It signs you in to LibreLinkUp, sets up how your phone reaches your Mac (one click if you use Tailscale) and connects your app with a QR code.
 3. Turn off your app's own LibreLinkUp follower. Only one thing should follow your account.
 
-That's it. Your app now gets every minute.
+That's it. Your app now catches up whenever it wakes.
 
 ## What you get
 
-- **Every minute, kept.** Readings are encrypted on your Mac and kept for 15 days, which you can set anywhere from 1 to 90.
+- **Your minutes, kept.** Readings are encrypted on your Mac and kept for 15 days, which you can set anywhere from 1 to 90.
 - **A menu bar icon that stays out of your way.** It turns amber when readings are late and red when something stops, and can show your number right there.
 - **Set and forget.** It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
 - **Private.** Your follower apps talk to your Mac, not to us. There's no account and nothing to sign up for.
