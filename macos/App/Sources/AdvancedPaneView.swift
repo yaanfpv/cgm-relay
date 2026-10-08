@@ -82,7 +82,8 @@ struct AdvancedPaneView: View {
     /// keystroke: a value already equal to the saved one is left alone
     /// (no restart), and an invalid one is refused with an inline message
     /// rather than saved or silently clamped into range. A port another app
-    /// already holds is refused the same way, and never changed to another.
+    /// already holds, or the one the relay uses for its own status listener,
+    /// is refused the same way, and never changed to another.
     private func commitPort() {
         switch PortCommitValidation.validate(portText) {
         case .invalid(let message):
