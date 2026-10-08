@@ -226,6 +226,24 @@ struct EngineSupervisorTests {
         #expect(await supervisor.state == .failed(.storeInUse))
     }
 
+    @Test("an exit with the port in use code fails permanently, with no restart loop")
+    func portInUseExitFailsPermanentlyWithNoRestart() async throws {
+        let launcher = FakeProcessLauncher()
+        let clock = FakeVirtualClock()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock)
+        await supervisor.start(configuration: .fixture())
+
+        launcher.finishLaunch(at: 0, exitCode: EngineSupervisor.portInUseExitCode)
+        #expect(await waitUntil { await supervisor.state == .failed(.portInUse) })
+
+        await clock.advance(by: .seconds(120))
+        try await Task.sleep(for: .milliseconds(30))
+
+        #expect(await clock.sleepRequests.isEmpty, "a port another app holds must never enter the backoff wait")
+        #expect(launcher.launchCount == 1)
+        #expect(await supervisor.state == .failed(.portInUse))
+    }
+
     @Test("an exit with the store damaged code fails permanently, with no restart ever scheduled")
     func storeDamagedExitFailsPermanentlyWithNoRestart() async throws {
         let launcher = FakeProcessLauncher()

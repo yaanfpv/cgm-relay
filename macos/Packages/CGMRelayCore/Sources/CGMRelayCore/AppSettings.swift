@@ -65,8 +65,8 @@ public struct AppSettings: Equatable, Sendable {
     /// setup. Setup is complete only together with a signed-in account.
     public var setupFinished: Bool
     /// showReadingInMenuBar puts the latest reading and its trend arrow
-    /// beside the menu bar mark. Off by default: the mark alone says all is
-    /// well.
+    /// beside the menu bar mark. On by default; a person who turns it off
+    /// keeps the mark alone.
     public var showReadingInMenuBar: Bool
     /// connectFollowerApp is the follower app last chosen in the Connect
     /// pane, so its QR code is the one shown the next time.
@@ -86,7 +86,8 @@ public struct AppSettings: Equatable, Sendable {
 
     public static let defaultPort = RelayDefaults.followerPort
     public static let portRange = 1024...65535
-    public static let defaultRetentionDays = 15
+    public static let defaultRetentionDays = 30
+    public static let defaultShowReadingInMenuBar = true
     public static let retentionDaysRange = 1...90
     public static let defaultNoReadingAlertMinutes = 20
     public static let noReadingAlertMinutesRange = 5...120
@@ -101,7 +102,7 @@ public struct AppSettings: Equatable, Sendable {
         signInFailingAlertEnabled: false,
         tailscaleHTTPSEnabled: false,
         setupFinished: false,
-        showReadingInMenuBar: false,
+        showReadingInMenuBar: defaultShowReadingInMenuBar,
         connectFollowerApp: .xDrip4iOS,
         safetyNoticeAcceptance: nil
     )
@@ -116,7 +117,7 @@ public struct AppSettings: Equatable, Sendable {
         signInFailingAlertEnabled: Bool,
         tailscaleHTTPSEnabled: Bool = false,
         setupFinished: Bool = false,
-        showReadingInMenuBar: Bool = false,
+        showReadingInMenuBar: Bool = AppSettings.defaultShowReadingInMenuBar,
         connectFollowerApp: FollowerApp = .xDrip4iOS,
         safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil
     ) {

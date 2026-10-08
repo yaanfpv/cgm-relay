@@ -73,7 +73,7 @@ struct CGMRelayApp: App {
         // finds setup incomplete, and by the menu's "Finish setup…", never
         // by the system on its own.
         Window("Set Up CGM Relay", id: SetupWindow.id) {
-            SetupView(model: model)
+            SetupView(model: model, openAdvanced: { sceneActions.showSettings(tab: .advanced) })
         }
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)

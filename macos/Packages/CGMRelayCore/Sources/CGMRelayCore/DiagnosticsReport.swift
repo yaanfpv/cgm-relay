@@ -66,6 +66,7 @@ public enum DiagnosticsReport {
         case .storeInUse: return "already running elsewhere"
         case .storeDamaged: return "saved readings can't be read"
         case .configurationUnreadable: return "saved settings can't be read"
+        case .portInUse: return "port in use by another app"
         case .recoveryMoveFailed: return "recovery move failed"
         }
     }

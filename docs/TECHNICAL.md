@@ -6,7 +6,7 @@ CGM Relay signs in to your LibreLinkUp follower account and fetches the latest r
 
 ## Storage
 
-Readings live in a small SQLite database. Each glucose value and trend is encrypted with AES-256-GCM, so the database file alone shows timestamps and nothing else. On a Mac the key is in your Keychain. On a server it's a file next to the database, so a backup that holds both isn't protected. Readings older than your retention setting (15 days by default) are deleted.
+Readings live in a small SQLite database. Each glucose value and trend is encrypted with AES-256-GCM, so the database file alone shows timestamps and nothing else. On a Mac the key is in your Keychain. On a server it's a file next to the database, so a backup that holds both isn't protected. Readings older than your retention setting (30 days by default in the Mac app, 15 on a server) are deleted.
 
 ## What it serves
 

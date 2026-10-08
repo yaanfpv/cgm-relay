@@ -100,6 +100,18 @@ struct MenuDisplayStateTests {
         }
     }
 
+    @Test("a port another app holds says so with the port number, and points at Advanced")
+    func portInUseFailure() {
+        let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .failed(.portInUse), status: nil, now: Self.now, port: 1337)
+        #expect(state.dot == .red)
+        #expect(state.statusLine == "Port is in use")
+        #expect(state.readingLine == "Port 1337 is in use by another app. Choose another in Settings, under Advanced.")
+        for forbidden in ["engine", "restart", "exit status", "exit code"] {
+            #expect(!state.statusLine.lowercased().contains(forbidden))
+            #expect(!state.readingLine.lowercased().contains(forbidden))
+        }
+    }
+
     @Test("a damaged saved readings file names the problem in plain words, never engine jargon, SQLite terms, or the exit status")
     func storeDamagedFailure() {
         let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .failed(.storeDamaged), status: nil, now: Self.now)

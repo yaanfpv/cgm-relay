@@ -42,8 +42,13 @@ struct SetupView: View {
     @State private var requestedStep: Step
     @StateObject private var signInForm = SignInForm()
 
-    init(model: AppModel) {
+    /// openAdvanced opens Settings on the Advanced pane, offered when setup
+    /// found no free port.
+    private let openAdvanced: () -> Void
+
+    init(model: AppModel, openAdvanced: @escaping () -> Void = {}) {
         self.model = model
+        self.openAdvanced = openAdvanced
         _requestedStep = State(initialValue: Self.startingStep(credentialsConfigured: model.credentialsConfigured))
     }
 
@@ -65,6 +70,7 @@ struct SetupView: View {
             } else {
                 VStack(spacing: 0) {
                     header
+                    portNotice
                     content
                         .fixedSize(horizontal: false, vertical: true)
                     footer
@@ -125,6 +131,22 @@ struct SetupView: View {
         .padding(.top, 20)
         .padding(.horizontal, 24)
         .accessibilityElement(children: .combine)
+    }
+
+    /// portNotice says so, and offers Advanced, when none of the ports setup
+    /// tries was free.
+    @ViewBuilder
+    private var portNotice: some View {
+        if let notice = model.setupPortNotice {
+            VStack(spacing: 8) {
+                Text(notice)
+                    .multilineTextAlignment(.center)
+                AccessibleButton("Open Advanced…", action: openAdvanced)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .accessibilityElement(children: .contain)
+        }
     }
 
     @ViewBuilder

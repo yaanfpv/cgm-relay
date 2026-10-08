@@ -68,6 +68,14 @@ final class AppModel: ObservableObject {
     /// incomplete. The scene that owns the window watches it.
     @Published private(set) var setupPresentationRequest = 0
     private var launchChecked = false
+    /// setupPortNotice is the sentence setup shows when no port in the
+    /// search range was free, with a way to open Advanced; nil otherwise.
+    @Published private(set) var setupPortNotice: String?
+    /// portIsPersonChosen is whether the port is one the person typed (or
+    /// that finished setup saved), so it is never changed for them. Until
+    /// then, each engine start during setup looks for a free port again,
+    /// starting from the default, on the addresses the chosen reach binds.
+    private var portIsPersonChosen: Bool
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
     /// did not work, with Tailscale's own page where one helps.
@@ -89,6 +97,7 @@ final class AppModel: ObservableObject {
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
+    private let portBinder: any PortBinding
 
     private var latestStatus: EngineStatus?
 
@@ -167,7 +176,7 @@ final class AppModel: ObservableObject {
         switch engineState {
         case .failed(.storeKeyMismatch), .failed(.recoveryMoveFailed), .failed(.storeDamaged):
             return true
-        case .failed(.configurationUnreadable), .failed(.storeInUse), .stopped, .starting, .running, .waitingToRestart:
+        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .stopped, .starting, .running, .waitingToRestart:
             return false
         }
     }
@@ -175,12 +184,13 @@ final class AppModel: ObservableObject {
     /// canTryAgain is true for the permanent failures a plain re-run can
     /// actually fix, since nothing was ever written to disk that a
     /// move-aside would need to recover first: configurationUnreadable,
-    /// and storeInUse, since the other copy holding the lock may quit at
-    /// any time, and this is what makes that quit take effect the moment
-    /// the menu is next opened rather than needing a manual click.
+    /// storeInUse and portInUse, since the other copy or app holding the
+    /// lock or port may quit at any time, and this is what makes that quit
+    /// take effect the moment the menu is next opened rather than needing a
+    /// manual click.
     var canTryAgain: Bool {
         switch engineState {
-        case .failed(.configurationUnreadable), .failed(.storeInUse):
+        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse):
             return true
         case .failed(.storeKeyMismatch), .failed(.storeDamaged), .failed(.recoveryMoveFailed), .stopped, .starting, .running, .waitingToRestart:
             return false
@@ -195,9 +205,11 @@ final class AppModel: ObservableObject {
         databasePath: String,
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
-        loginItemManager: any LoginItemManaging = SystemLoginItemManager()
+        loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
+        portBinder: any PortBinding = SystemPortBinder()
     ) {
         self.tailscale = tailscale
+        self.portBinder = portBinder
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
         // notificationDelivering has no throwaway Debug counterpart the
@@ -214,7 +226,9 @@ final class AppModel: ObservableObject {
         pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
-        settings = settingsStore.load()
+        let loaded = settingsStore.load()
+        settings = loaded
+        portIsPersonChosen = loaded.setupFinished || loaded.port != AppSettings.defaultPort
         accountSignIn = AccountSignIn(checker: RealAccountChecker(engineURL: engineURL), store: credentialStore)
         alertEngine = AlertEngine()
         menuState = .make(credentialsConfigured: false, engineState: .stopped, status: nil, now: Date())
@@ -266,7 +280,7 @@ final class AppModel: ObservableObject {
     /// onMenuOpened refreshes the status immediately, so opening the menu
     /// never shows a reading that is stale only because the slow timer
     /// has not fired since it changed. It also retries a
-    /// configurationUnreadable or storeInUse failure on its own, so a
+    /// configurationUnreadable, storeInUse or portInUse failure on its own, so a
     /// Keychain that was only briefly unavailable, or another copy that
     /// has since quit, recovers the moment the menu is opened, with no
     /// click needed.
@@ -328,7 +342,7 @@ final class AppModel: ObservableObject {
     }
 
     /// tryAgain re-runs the ordinary launch sequence for a
-    /// configurationUnreadable or storeInUse failure: clear the failure,
+    /// configurationUnreadable, storeInUse or portInUse failure: clear the failure,
     /// run CredentialsBootstrapper again, then start the engine. A no-op
     /// unless canTryAgain is currently true.
     func tryAgain() {
@@ -495,8 +509,27 @@ final class AppModel: ObservableObject {
         // fixed while HTTPS is on.
         guard !httpsLocked else { return }
         settings.port = port.clamped(to: AppSettings.portRange)
+        portIsPersonChosen = true
+        setupPortNotice = nil
         persistSettings()
-        Task { await restartEngineIfRunning() }
+        Task {
+            // A relay that could not listen on the old port starts on the
+            // new one at once; a running one restarts onto it.
+            if engineState == .failed(.portInUse) {
+                await supervisor.clearFailure()
+                await startEngine()
+            } else {
+                await restartEngineIfRunning()
+            }
+        }
+    }
+
+    /// typedPortInUseMessage is the refusal for a typed port another app
+    /// already holds on the addresses the chosen reach binds, nil when it is
+    /// free. A typed port is never moved to another.
+    func typedPortInUseMessage(_ port: Int) -> String? {
+        let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
+        return PortAvailability.isFree(port: port, bindHost: bindHost, binder: portBinder) ? nil : PortAvailability.inUseMessage(port: port)
     }
 
     func updateReach(_ reach: NetworkReach) {
@@ -845,6 +878,11 @@ final class AppModel: ObservableObject {
             return
         }
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+        if !choosePortForSetup(interfaces: interfaces) {
+            boundHost = nil
+            await supervisor.fail(.portInUse)
+            return
+        }
         guard
             let config = try? SettingsEngineConfigurationBuilder.build(
                 settings: settings,
@@ -862,6 +900,29 @@ final class AppModel: ObservableObject {
         boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         await alertEngine.resumeAfterEngineStart()
         await supervisor.start(configuration: config)
+    }
+
+    /// choosePortForSetup looks for a free follower port before the engine
+    /// starts, while setup is unfinished and the port is not one the person
+    /// chose or Tailscale HTTPS is serving: the default first, then each next
+    /// one, saving the first that is free. It returns false, with the notice
+    /// setup shows, when every candidate is taken. A check reserves nothing,
+    /// so an engine that still cannot listen is reported by its exit code.
+    private func choosePortForSetup(interfaces: [NetworkInterfaceAddress]) -> Bool {
+        guard !settings.setupFinished, !portIsPersonChosen, !httpsLocked else { return true }
+        let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+        switch PortAvailability.firstFreePort(from: AppSettings.defaultPort, bindHost: bindHost, binder: portBinder) {
+        case .free(let port):
+            setupPortNotice = nil
+            if port != settings.port {
+                settings.port = port
+                persistSettings()
+            }
+            return true
+        case .exhausted(let first, let last):
+            setupPortNotice = PortAvailability.exhaustedMessage(first: first, last: last)
+            return false
+        }
     }
 
     private func refreshCredentialsConfigured() {
@@ -937,7 +998,8 @@ final class AppModel: ObservableObject {
             engineState: engineState,
             status: latestStatus,
             now: Date(),
-            units: settings.units
+            units: settings.units,
+            port: settings.port
         )
         if next != menuState {
             menuState = next

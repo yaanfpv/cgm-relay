@@ -131,12 +131,15 @@ public struct MenuDisplayState: Sendable, Equatable {
     /// - now: the instant to measure every age against.
     /// - units: which unit readingLine renders mgDl in. Defaults to
     ///   mg/dL so every existing caller keeps its current behaviour.
+    /// - port: the follower port the engine was asked to listen on, named
+    ///   in the explanation when another app already holds it.
     public static func make(
         credentialsConfigured: Bool,
         engineState: EngineSupervisor.RunState,
         status: EngineStatus?,
         now: Date,
-        units: GlucoseUnit = .mgDl
+        units: GlucoseUnit = .mgDl,
+        port: Int? = nil
     ) -> MenuDisplayState {
         guard credentialsConfigured else {
             return MenuDisplayState(
@@ -194,7 +197,7 @@ public struct MenuDisplayState: Sendable, Equatable {
             return MenuDisplayState(
                 dot: .red,
                 statusLine: statusLine(for: reason),
-                readingLine: detailLine(for: reason),
+                readingLine: detailLine(for: reason, port: port),
                 lastPolledLine: ""
             )
 
@@ -283,6 +286,8 @@ public struct MenuDisplayState: Sendable, Equatable {
             return "Saved readings can't be read"
         case .configurationUnreadable:
             return "Can't read your saved settings"
+        case .portInUse:
+            return "Port is in use"
         case .recoveryMoveFailed:
             // Names the action the person took (Start Fresh, the button
             // whose confirmation triggers this recovery path) rather than
@@ -295,7 +300,7 @@ public struct MenuDisplayState: Sendable, Equatable {
 
     /// detailLine renders a permanent failure's explanation, shown where
     /// the current reading would otherwise go.
-    private static func detailLine(for reason: EngineSupervisor.FailureReason) -> String {
+    private static func detailLine(for reason: EngineSupervisor.FailureReason, port: Int?) -> String {
         switch reason {
         case .storeKeyMismatch:
             return "They were saved with a key this Mac no longer has."
@@ -305,6 +310,9 @@ public struct MenuDisplayState: Sendable, Equatable {
             return "The file is damaged."
         case .configurationUnreadable:
             return "Try again. If it keeps happening, quit and reopen CGM Relay."
+        case .portInUse:
+            let named = port.map(PortAvailability.inUseMessage(port:)) ?? "The port is in use by another app."
+            return "\(named) Choose another in Settings, under Advanced."
         case .recoveryMoveFailed:
             return "Check that CGM Relay can write to its own folder, then try Start Fresh again."
         }
