@@ -6,7 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-A new Mac install now shows the reading in the menu bar and keeps 30 days of readings, and setup moves to a free port when the default is taken; a port you type is never changed, and a port another app holds is refused or reported in the menu instead of retried in a loop.
+- A new Mac install now shows the reading in the menu bar and keeps 30 days of readings, and setup moves to a free port when the default is taken; a port you type is never changed, and a port another app holds is refused or reported in the menu instead of retried in a loop.
+- Sign-in now catches a mistyped email before sending anything, says what actually went wrong when a check fails to start, times out or fails in a way it does not know, and puts the Sign In button below the fields as the default.
 
 ### Added
 

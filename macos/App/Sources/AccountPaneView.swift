@@ -10,8 +10,19 @@ final class SignInForm: ObservableObject {
     @Published var password = ""
     @Published private(set) var isChecking = false
     @Published private(set) var message: String?
+    /// emailLeft is set once the email field has lost focus, the moment a
+    /// malformed address starts to be pointed out.
+    @Published var emailLeft = false
 
-    var canSubmit: Bool { !isChecking && !email.isEmpty && !password.isEmpty }
+    var emailIsValid: Bool { AccountEmail.trimmedIfValid(email) != nil }
+
+    /// emailPrompt is the line under the email field: only for a
+    /// malformed address, and only after the person has left the field.
+    var emailPrompt: String? {
+        emailLeft && !emailIsValid ? AccountEmail.prompt : nil
+    }
+
+    var canSubmit: Bool { !isChecking && emailIsValid && !password.isEmpty }
 
     /// submit checks the account against LibreLinkUp; the password is
     /// dropped once it has been accepted.
@@ -32,6 +43,7 @@ final class SignInForm: ObservableObject {
         email = ""
         password = ""
         message = nil
+        emailLeft = false
     }
 }
 
@@ -58,18 +70,43 @@ struct AccountPaneView: View {
     private var form: SignInForm { externalForm ?? ownForm }
 
     var body: some View {
-        Form {
-            if model.credentialsConfigured, let signedInEmail = model.accountEmail {
-                switch presentation {
-                case .settings: signedInSection(signedInEmail: signedInEmail)
-                case .setup: setupSignedInSection(signedInEmail: signedInEmail)
+        VStack(spacing: 0) {
+            Form {
+                if model.credentialsConfigured, let signedInEmail = model.accountEmail {
+                    switch presentation {
+                    case .settings: signedInSection(signedInEmail: signedInEmail)
+                    case .setup: setupSignedInSection(signedInEmail: signedInEmail)
+                    }
+                } else {
+                    SignInSection(form: form, model: model)
                 }
-            } else {
-                SignInSection(form: form, model: model, presentation: presentation)
+            }
+            .formStyle(.grouped)
+            if presentation == .settings, !(model.credentialsConfigured && model.accountEmail != nil) {
+                signInButtonRow
             }
         }
-        .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// signInButtonRow is Settings' Sign In, below the grouped fields and
+    /// right-aligned, where a Mac puts a form's default button. Setup has
+    /// the same button in its footer.
+    private var signInButtonRow: some View {
+        HStack(spacing: 8) {
+            Spacer()
+            if form.isChecking {
+                ProgressView().controlSize(.small)
+            }
+            AccessibleButton(form.isChecking ? "Checking…" : "Sign In", style: .primary) {
+                Task { await form.submit(model: model) }
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(!form.canSubmit)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 4)
+        .padding(.bottom, 16)
     }
 
     private var signOutDialogMessage: some View {
@@ -163,13 +200,13 @@ struct AccountPaneView: View {
 }
 
 /// SignInSection is the email and password fields. Each label is the
-/// field's own placeholder, so typing replaces it; Return in the password
-/// field signs in. Where the hosting window has no footer button for it
-/// (Settings), the Sign In button sits in the section's own last row.
+/// field's own placeholder, so typing replaces it; Return in either field
+/// presses the hosting window's default Sign In button, which sits outside
+/// this group (below it in Settings, in the footer in setup).
 private struct SignInSection: View {
     @ObservedObject var form: SignInForm
     let model: AppModel
-    let presentation: AccountPaneView.Presentation
+    @FocusState private var emailFocused: Bool
 
     var body: some View {
         Section {
@@ -177,21 +214,20 @@ private struct SignInSection: View {
                 .labelsHidden()
                 .disableAutocorrection(true)
                 .accessibilityLabel("Email")
+                .focused($emailFocused)
+                .onChange(of: emailFocused) { _, focused in
+                    if !focused { form.emailLeft = true }
+                }
                 .onSubmit { submit() }
+            if let prompt = form.emailPrompt {
+                Text(prompt)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
             SecureField("Password", text: $form.password, prompt: Text("Password"))
                 .labelsHidden()
                 .accessibilityLabel("Password")
                 .onSubmit { submit() }
-            if presentation == .settings {
-                HStack(spacing: 8) {
-                    Spacer()
-                    if form.isChecking {
-                        ProgressView().controlSize(.small)
-                    }
-                    AccessibleButton(form.isChecking ? "Checking…" : "Sign In", style: .primary) { submit() }
-                        .disabled(!form.canSubmit)
-                }
-            }
         } header: {
             Text("Sign in with your LibreLinkUp email and password.")
         } footer: {

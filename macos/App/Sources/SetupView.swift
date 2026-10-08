@@ -211,6 +211,7 @@ struct SetupView: View {
                 AccessibleButton(signInForm.isChecking ? "Checking…" : "Sign In", style: .primary) {
                     Task { await signInForm.submit(model: model) }
                 }
+                .keyboardShortcut(.defaultAction)
                 .disabled(!signInForm.canSubmit)
             }
         }
