@@ -118,6 +118,23 @@ public enum PortAvailability {
         return .exhausted(first: start, last: last)
     }
 
+    /// setupPort decides the port for an engine start during setup: current
+    /// stays whenever it is still free on every address bindHost needs, since
+    /// it may already be in a follower app, and only a taken one is replaced by
+    /// the first free port searching from the default.
+    public static func setupPort(
+        current: Int,
+        default defaultPort: Int,
+        bindHost: String,
+        binder: any PortBinding,
+        candidates: Int = candidateCount
+    ) -> SetupPortChoice {
+        if AppSettings.portRange.contains(current), isFree(port: current, bindHost: bindHost, binder: binder) {
+            return .free(current)
+        }
+        return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates)
+    }
+
     /// inUseMessage is the sentence for a port another app already holds.
     public static func inUseMessage(port: Int) -> String {
         "Port \(port) is in use by another app."

@@ -74,7 +74,8 @@ final class AppModel: ObservableObject {
     /// portIsPersonChosen is whether the port is one the person typed (or
     /// that finished setup saved), so it is never changed for them. Until
     /// then, each engine start during setup looks for a free port again,
-    /// starting from the default, on the addresses the chosen reach binds.
+    /// starting from the default only when the saved port is taken, on the
+    /// addresses the chosen reach binds.
     private var portIsPersonChosen: Bool
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
@@ -848,7 +849,9 @@ final class AppModel: ObservableObject {
     private func restartEngineIfRunning() async {
         switch engineState {
         case .starting, .running, .waitingToRestart:
-            await supervisor.stop()
+            // Wait for the old process to be gone, so its own listener never
+            // reads as another app holding the port when the new start checks.
+            await supervisor.stopAndWait(timeout: .seconds(3))
             await startEngine()
         case .stopped, .failed:
             return
@@ -904,14 +907,16 @@ final class AppModel: ObservableObject {
 
     /// choosePortForSetup looks for a free follower port before the engine
     /// starts, while setup is unfinished and the port is not one the person
-    /// chose or Tailscale HTTPS is serving: the default first, then each next
-    /// one, saving the first that is free. It returns false, with the notice
+    /// chose or Tailscale HTTPS is serving: the saved port stays while it is
+    /// still free, so an address already given to a phone keeps working, and
+    /// only a taken one is replaced by the first free port from the default
+    /// up, which is then saved. It returns false, with the notice
     /// setup shows, when every candidate is taken. A check reserves nothing,
     /// so an engine that still cannot listen is reported by its exit code.
     private func choosePortForSetup(interfaces: [NetworkInterfaceAddress]) -> Bool {
         guard !settings.setupFinished, !portIsPersonChosen, !httpsLocked else { return true }
         let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        switch PortAvailability.firstFreePort(from: AppSettings.defaultPort, bindHost: bindHost, binder: portBinder) {
+        switch PortAvailability.setupPort(current: settings.port, default: AppSettings.defaultPort, bindHost: bindHost, binder: portBinder) {
         case .free(let port):
             setupPortNotice = nil
             if port != settings.port {
