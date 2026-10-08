@@ -76,7 +76,7 @@ is_test_mode && TEST_MODE=yes
 SKIP_NOTARIZE=no
 [ "${CGMRELAY_RELEASE_SKIP_NOTARIZE:-}" = "1" ] && SKIP_NOTARIZE=yes
 
-for t in git go xcodegen xcodebuild lipo codesign hdiutil ditto xmllint plutil shasum curl awk sed tar; do
+for t in git go xcodegen xcodebuild lipo codesign hdiutil ditto tiffutil osascript xmllint plutil shasum curl awk sed tar; do
   need_tool "$t"
 done
 if [ "$SKIP_NOTARIZE" = no ]; then
@@ -272,9 +272,27 @@ new_scratch
 STAGING="$SCRATCH"
 ditto "$APP" "$STAGING/CGM Relay.app"
 ln -s /Applications "$STAGING/Applications"
-mkdir -p "$WORK_DIR/archives"
-hdiutil create -quiet -volname "CGM Relay" -srcfolder "$STAGING" -fs APFS -format ULFO -ov "$WORK_DIR/archives/${DMG_FILE}" ||
+mkdir -p "$STAGING/.background" "$WORK_DIR/archives"
+tiffutil -cathidpicheck "$SCRIPT_DIR/dmg/background.png" "$SCRIPT_DIR/dmg/background@2x.png" \
+  -out "$STAGING/.background/background.tiff" >/dev/null ||
+  die "tiffutil could not combine the installer background" "check macos/scripts/dmg/background.png and background@2x.png"
+# The window layout is written by Finder into a writable image, which is then
+# compressed into the read-only one that ships. Finder finds the volume by
+# name, so a mounted volume already called "CGM Relay" would take its place.
+[ ! -e "/Volumes/CGM Relay" ] || die "a volume named CGM Relay is already mounted" "eject it and run again"
+hdiutil create -quiet -volname "CGM Relay" -srcfolder "$STAGING" -fs HFS+ -format UDRW -ov "$WORK_DIR/layout.dmg" ||
   die "hdiutil could not create the disk image" "run again; check free disk space"
+hdiutil attach -quiet -noautoopen "$WORK_DIR/layout.dmg" || die "could not mount the disk image to lay out its window" "run again"
+MOUNT_POINT="/Volumes/CGM Relay"
+osascript "$SCRIPT_DIR/dmg/layout.applescript" "CGM Relay" >/dev/null ||
+  die "Finder could not lay out the installer window" "allow this terminal to control Finder in System Settings > Privacy & Security > Automation, then run again"
+[ -f "$MOUNT_POINT/.DS_Store" ] || die "Finder saved no window layout on the disk image" "run again"
+sync
+hdiutil detach -quiet "$MOUNT_POINT" || die "could not unmount the disk image after laying it out" "eject CGM Relay and run again"
+MOUNT_POINT=""
+hdiutil convert -quiet "$WORK_DIR/layout.dmg" -format ULFO -ov -o "$WORK_DIR/archives/${DMG_FILE}" ||
+  die "hdiutil could not compress the disk image" "run again; check free disk space"
+rm -f "$WORK_DIR/layout.dmg"
 if ! DMG_SIGN_OUT="$(codesign --force --timestamp --sign "$IDENTITY" "$WORK_DIR/archives/${DMG_FILE}" 2>&1)"; then
   echo "$DMG_SIGN_OUT" >&2
   die "codesign could not sign the DMG" "read the message above; a timestamp failure means the network or Apple's timestamp server"

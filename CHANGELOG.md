@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- The disk image opens to a designed window: CGM Relay on the left, Applications on the right, and an arrow showing where to drag it.
+
 ### Added
 
 - A Mac menu bar app that checks your LibreLinkUp account about once a minute and keeps every reading it fetches, so a follower app on your phone catches up when it opens, even after a night asleep. A minute it didn't fetch, for example while your Mac was off or your phone was offline, is covered only by LibreLinkUp's own history of one reading every 15 minutes.
