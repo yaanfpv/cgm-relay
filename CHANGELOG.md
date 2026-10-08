@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Sign-in now catches a mistyped email before sending anything, says what actually went wrong when a check fails to start, times out or fails in a way it does not know, and puts the Sign In button below the fields as the default.
 - The Connect screen lines every follower app up the same way, the steps follow each app's own settings screen in the order it asks, xDrip4iOS and LoopFollow end on the check they really have, and xDrip+ says what its single copy button is for.
 - Button labels read clearly in Light and Dark, including in a window behind another app: white on a deeper teal in Light, and a readable grey when the window is in the background.
+- The disk image opens to a designed window: CGM Relay on the left, Applications on the right, and an arrow showing where to drag it.
 
 ### Added
 
