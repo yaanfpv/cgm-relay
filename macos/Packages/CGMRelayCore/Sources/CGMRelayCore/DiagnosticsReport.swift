@@ -67,6 +67,7 @@ public enum DiagnosticsReport {
         case .storeDamaged: return "saved readings can't be read"
         case .configurationUnreadable: return "saved settings can't be read"
         case .portInUse: return "port in use by another app"
+        case .httpsOnStatusPort: return "Tailscale HTTPS on the status port"
         case .recoveryMoveFailed: return "recovery move failed"
         }
     }

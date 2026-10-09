@@ -288,6 +288,8 @@ public struct MenuDisplayState: Sendable, Equatable {
             return "Can't read your saved settings"
         case .portInUse:
             return "Port is in use"
+        case .httpsOnStatusPort:
+            return "Tailscale HTTPS port clash"
         case .recoveryMoveFailed:
             // Names the action the person took (Start Fresh, the button
             // whose confirmation triggers this recovery path) rather than
@@ -313,6 +315,8 @@ public struct MenuDisplayState: Sendable, Equatable {
         case .portInUse:
             let named = port.map(PortAvailability.inUseMessage(port:)) ?? "The port is in use by another app."
             return "\(named) Choose another in Settings, under Advanced."
+        case .httpsOnStatusPort:
+            return "Tailscale HTTPS is set on the port CGM Relay keeps for itself. Turn Tailscale HTTPS off in Settings, under Advanced, with Tailscale running, and CGM Relay moves to a free port."
         case .recoveryMoveFailed:
             return "Check that CGM Relay can write to its own folder, then try Start Fresh again."
         }

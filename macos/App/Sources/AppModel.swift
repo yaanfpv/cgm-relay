@@ -178,7 +178,7 @@ final class AppModel: ObservableObject {
         switch engineState {
         case .failed(.storeKeyMismatch), .failed(.recoveryMoveFailed), .failed(.storeDamaged):
             return true
-        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .stopped, .starting, .running, .waitingToRestart:
+        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort), .stopped, .starting, .running, .waitingToRestart:
             return false
         }
     }
@@ -189,10 +189,11 @@ final class AppModel: ObservableObject {
     /// storeInUse and portInUse, since the other copy or app holding the
     /// lock or port may quit at any time, and this is what makes that quit
     /// take effect the moment the menu is next opened rather than needing a
-    /// manual click.
+    /// manual click; and httpsOnStatusPort, which a retry clears once
+    /// Tailscale HTTPS is off.
     var canTryAgain: Bool {
         switch engineState {
-        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse):
+        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort):
             return true
         case .failed(.storeKeyMismatch), .failed(.storeDamaged), .failed(.recoveryMoveFailed), .stopped, .starting, .running, .waitingToRestart:
             return false
@@ -281,10 +282,10 @@ final class AppModel: ObservableObject {
 
     /// onMenuOpened refreshes the status immediately, so opening the menu
     /// never shows a reading that is stale only because the slow timer
-    /// has not fired since it changed. It also retries a
-    /// configurationUnreadable, storeInUse or portInUse failure on its own, so a
-    /// Keychain that was only briefly unavailable, or another copy that
-    /// has since quit, recovers the moment the menu is opened, with no
+    /// has not fired since it changed. It also retries every failure
+    /// canTryAgain names on its own, so a Keychain that was only briefly
+    /// unavailable, another copy that has since quit, or Tailscale HTTPS
+    /// since turned off recovers the moment the menu is opened, with no
     /// click needed.
     func onMenuOpened() {
         refreshCredentialsConfigured()
@@ -343,8 +344,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// tryAgain re-runs the ordinary launch sequence for a
-    /// configurationUnreadable, storeInUse or portInUse failure: clear the failure,
+    /// tryAgain re-runs the ordinary launch sequence for a failure
+    /// canTryAgain names: clear the failure,
     /// run CredentialsBootstrapper again, then start the engine. A no-op
     /// unless canTryAgain is currently true.
     func tryAgain() {
@@ -581,6 +582,11 @@ final class AppModel: ObservableObject {
             persistSettings()
             refreshNetworkAddresses()
         }
+        // A start refused while Tailscale's state was unknown can go ahead
+        // once Tailscale shows nothing holds the port.
+        if engineState == .failed(.httpsOnStatusPort), !httpsLocked {
+            tryAgain()
+        }
     }
 
     /// enableTailscaleHTTPS runs the one serve command the button shows, on
@@ -637,6 +643,11 @@ final class AppModel: ObservableObject {
             settings.tailscaleHTTPSEnabled = false
             persistSettings()
             refreshNetworkAddresses()
+            // A start refused for Tailscale HTTPS on the status port can move
+            // now that nothing holds the port.
+            if engineState == .failed(.httpsOnStatusPort) {
+                tryAgain()
+            }
         case .unchanged:
             break
         case .refused:
@@ -883,9 +894,9 @@ final class AppModel: ObservableObject {
             return
         }
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
-        if !choosePortBeforeStart(interfaces: interfaces) {
+        if let refusal = choosePortBeforeStart(interfaces: interfaces) {
             boundHost = nil
-            await supervisor.fail(.portInUse)
+            await supervisor.fail(refusal)
             return
         }
         guard
@@ -907,40 +918,43 @@ final class AppModel: ObservableObject {
         await supervisor.start(configuration: config)
     }
 
-    /// choosePortBeforeStart looks for a free follower port before the engine
-    /// starts (PortAvailability.startPort decides when), unless Tailscale
-    /// HTTPS is serving: during setup the saved port stays while it is still
-    /// free, so an address already given to a phone keeps working, and only
-    /// a taken one is replaced by the first free port from the default up,
-    /// which is then saved. A saved port equal to the relay's own status port
-    /// is replaced the same way at any time, since the engine can never
-    /// listen there. It returns false, with the notice setup shows, when
-    /// every candidate is taken. A check reserves nothing, so an engine that
-    /// still cannot listen is reported by its exit code.
-    private func choosePortBeforeStart(interfaces: [NetworkInterfaceAddress]) -> Bool {
-        guard !httpsLocked else { return true }
+    /// choosePortBeforeStart settles the follower port before the engine
+    /// starts (PortAvailability.startPort decides): during setup the saved
+    /// port stays while it is still free, so an address already given to a
+    /// phone keeps working, and only a taken one is replaced by the first
+    /// free port from the default up, which is then saved. A saved port equal
+    /// to the relay's own status port is replaced the same way at any time,
+    /// since the engine can never listen there, except while Tailscale HTTPS
+    /// holds it, which refuses the start instead. It returns the failure to
+    /// report, nil to start: portInUse with the notice setup shows when every
+    /// candidate is taken. A check reserves nothing, so an engine that still
+    /// cannot listen is reported by its exit code.
+    private func choosePortBeforeStart(interfaces: [NetworkInterfaceAddress]) -> EngineSupervisor.FailureReason? {
         let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        let choice = PortAvailability.startPort(
+        let decision = PortAvailability.startPort(
             current: settings.port,
             default: AppSettings.defaultPort,
             searching: !settings.setupFinished && !portIsPersonChosen,
+            locked: httpsLocked,
             bindHost: bindHost,
             binder: portBinder,
             reserved: PortAvailability.port(inAddress: statusAddr)
         )
-        switch choice {
-        case nil:
-            return true
-        case .free(let port):
+        switch decision {
+        case .keep:
+            return nil
+        case .use(let port):
             setupPortNotice = nil
             if port != settings.port {
                 settings.port = port
                 persistSettings()
             }
-            return true
+            return nil
         case .exhausted(let first, let last):
             setupPortNotice = PortAvailability.exhaustedMessage(first: first, last: last)
-            return false
+            return .portInUse
+        case .statusPortLocked:
+            return .httpsOnStatusPort
         }
     }
 

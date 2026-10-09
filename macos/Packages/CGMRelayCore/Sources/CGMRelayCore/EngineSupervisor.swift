@@ -65,6 +65,11 @@ public actor EngineSupervisor {
         /// race, but it is retried whenever the menu opens, and a new port
         /// recovers it at once.
         case portInUse
+        /// httpsOnStatusPort is the caller refusing a start because Tailscale
+        /// HTTPS holds the follower port fixed and it is the relay's own
+        /// status port, where the engine can never listen. Turning Tailscale
+        /// HTTPS off frees the port to move, so it is retried like portInUse.
+        case httpsOnStatusPort
     }
 
     /// storeKeyMismatchExitCode is the process exit status

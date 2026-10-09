@@ -84,6 +84,22 @@ public enum PortAvailability {
         case exhausted(first: Int, last: Int)
     }
 
+    /// StartPortDecision is what happens to the follower port before an
+    /// engine start.
+    public enum StartPortDecision: Sendable, Equatable {
+        /// keep starts on the saved port as it is.
+        case keep
+        /// use starts on this port, saving it when it differs.
+        case use(Int)
+        /// exhausted means every candidate port was taken.
+        case exhausted(first: Int, last: Int)
+        /// statusPortLocked means Tailscale HTTPS holds the port fixed and it
+        /// is the reserved status port: the engine can never listen there,
+        /// and moving it would strand the Tailscale handler, so the start is
+        /// refused until Tailscale HTTPS is turned off.
+        case statusPortLocked
+    }
+
     /// hostsToCheck is every address a port must be free on for the engine
     /// to bind bindHost: the IPv4 address itself and, for the loopback and
     /// all-interfaces hosts, the IPv6 counterpart a listener elsewhere on
@@ -155,22 +171,32 @@ public enum PortAvailability {
         return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved)
     }
 
-    /// startPort decides the follower port before an engine start, nil to
-    /// keep the saved one. While searching (setup unfinished and the port not
-    /// one the person chose) it is setupPort. Otherwise the saved port stays,
-    /// unless it is the reserved status port: the engine can never listen
-    /// there, so it is replaced like a taken port during setup.
+    /// startPort decides the follower port before an engine start. While
+    /// Tailscale HTTPS holds the port (locked) it is kept, unless it is the
+    /// reserved status port, which refuses the start. Otherwise, while
+    /// searching (setup unfinished and the port not one the person chose) it
+    /// is setupPort; after that the saved port stays, unless it is the
+    /// reserved status port, which is replaced like a taken port in setup.
     public static func startPort(
         current: Int,
         default defaultPort: Int,
         searching: Bool,
+        locked: Bool,
         bindHost: String,
         binder: any PortBinding,
         candidates: Int = candidateCount,
         reserved: Int?
-    ) -> SetupPortChoice? {
-        guard searching || current == reserved else { return nil }
-        return setupPort(current: current, default: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved)
+    ) -> StartPortDecision {
+        if locked {
+            return current == reserved ? .statusPortLocked : .keep
+        }
+        guard searching || current == reserved else { return .keep }
+        switch setupPort(current: current, default: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved) {
+        case .free(let port):
+            return .use(port)
+        case .exhausted(let first, let last):
+            return .exhausted(first: first, last: last)
+        }
     }
 
     /// inUseMessage is the sentence for a port another app already holds.

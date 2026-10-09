@@ -321,12 +321,21 @@ struct PortAvailabilityTests {
     @Test("before a start a saved port stays once setup is over or the person chose it, unless it is the status port, which is replaced at any time")
     func startPortRepairsASavedStatusPort() {
         let table = TableBinder(taken: ["127.0.0.1": [4000]])
-        #expect(PortAvailability.startPort(current: 4005, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil, "a person's or finished setup's port is kept")
-        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil, "kept even when taken: that failure is reported, never moved")
-        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002), "a saved status port is replaced after setup too")
-        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true), reserved: 4001) == .exhausted(first: 4000, last: 4049))
-        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002), "during setup it is setupPort")
-        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: nil) == nil, "no status port, nothing to repair")
+        #expect(PortAvailability.startPort(current: 4005, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep, "a person's or finished setup's port is kept")
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep, "kept even when taken: that failure is reported, never moved")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .use(4002), "a saved status port is replaced after setup too")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true), reserved: 4001) == .exhausted(first: 4000, last: 4049))
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: true, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .use(4002), "during setup it is setupPort")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: nil) == .keep, "no status port, nothing to repair")
+    }
+
+    @Test("while Tailscale HTTPS holds the port it is kept, and a held status port refuses the start rather than moving")
+    func startPortUnderTailscaleHTTPS() {
+        let table = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .statusPortLocked)
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: true, locked: true, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == .statusPortLocked, "refused during setup too")
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: true, locked: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep, "a held port is never moved, even when taken")
+        #expect(PortAvailability.startPort(current: 4005, default: 4000, searching: false, locked: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep)
     }
 
     @Test("a port another app holds on either address family is taken, and the refusal names it")
