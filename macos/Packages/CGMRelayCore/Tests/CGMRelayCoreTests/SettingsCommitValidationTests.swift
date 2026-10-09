@@ -200,6 +200,19 @@ private struct TableBinder: PortBinding {
     }
 }
 
+/// Answers as the real binder does and keeps every answer, so a test can
+/// check what the search saw without asking the system again later.
+private final class RecordingBinder: PortBinding, @unchecked Sendable {
+    let inner: any PortBinding
+    private(set) var answers: [(host: String, port: Int, free: Bool)] = []
+    init(inner: any PortBinding) { self.inner = inner }
+    func canBind(host: String, port: Int) -> Bool {
+        let free = inner.canBind(host: host, port: port)
+        answers.append((host, port, free))
+        return free
+    }
+}
+
 // Serialized: tests that hold a run of 50 neighbouring ports would otherwise
 // make a concurrent test see its own neighbours as taken.
 @Suite("Port availability", .serialized)
@@ -219,21 +232,36 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.hostsToCheck(bindHost: "100.101.102.103") == ["100.101.102.103"])
     }
 
+    // Another suite running alongside can take a released port between the
+    // probe and the search, so a port lost that way is retried; one still
+    // free after the search but not chosen is the failure.
     @Test("a free default port is chosen as it is")
     func defaultFree() throws {
-        let port = try freePort()
-        #expect(PortAvailability.firstFreePort(from: port, bindHost: "127.0.0.1", binder: binder) == .free(port))
+        for _ in 0..<20 {
+            let port = try freePort()
+            guard PortAvailability.isFree(port: port, bindHost: "127.0.0.1", binder: binder) else { continue }
+            let choice = PortAvailability.firstFreePort(from: port, bindHost: "127.0.0.1", binder: binder)
+            if choice == .free(port) { return }
+            if PortAvailability.isFree(port: port, bindHost: "127.0.0.1", binder: binder) {
+                Issue.record("port \(port) was free on both address families but the search chose \(choice)")
+                return
+            }
+        }
+        Issue.record("no port stayed free long enough to search from")
     }
 
     @Test("a taken default port moves to the next free one")
     func defaultTaken() throws {
         let held = try #require(HeldListener.run(host: "127.0.0.1", count: 1))
-        guard case .free(let chosen) = PortAvailability.firstFreePort(from: held[0].port, bindHost: "127.0.0.1", binder: binder) else {
+        let recorder = RecordingBinder(inner: binder)
+        guard case .free(let chosen) = PortAvailability.firstFreePort(from: held[0].port, bindHost: "127.0.0.1", binder: recorder) else {
             Issue.record("expected a free port")
             return
         }
         #expect(chosen > held[0].port)
-        #expect(PortAvailability.isFree(port: chosen, bindHost: "127.0.0.1", binder: binder))
+        let answers = recorder.answers.filter { $0.port == chosen }
+        #expect(Set(answers.map { $0.host }) == ["127.0.0.1", "::1"])
+        #expect(answers.allSatisfy { $0.free }, "the search saw the chosen port free on both address families")
     }
 
     @Test("several taken ports in a row are all skipped")
