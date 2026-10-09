@@ -184,7 +184,7 @@ struct SetupView: View {
                 if !isPhoneReachable {
                     AccessibleButton("Set Up Later", style: .plain) { requestedStep = .ready }
                 }
-                AccessibleButton("Continue", style: isPhoneReachable && !offersTailscaleHTTPS ? .primary : .secondary) { requestedStep = .connect }
+                AccessibleButton("Continue", style: offersTailscaleHTTPS ? .secondary : .primary) { requestedStep = .connect }
                     .disabled(!isPhoneReachable)
             case .connect:
                 AccessibleButton("Continue", style: .primary) { requestedStep = .ready }
