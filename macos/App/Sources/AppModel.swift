@@ -72,7 +72,8 @@ final class AppModel: ObservableObject {
     /// search range was free, with a way to open Advanced; nil otherwise.
     @Published private(set) var setupPortNotice: String?
     /// portIsPersonChosen is whether the port is one the person typed (or
-    /// that finished setup saved), so it is never changed for them. Until
+    /// that finished setup saved), so it is never changed for them unless it
+    /// is the relay's own status port, where the engine can never listen. Until
     /// then, each engine start during setup looks for a free port again,
     /// starting from the default only when the saved port is taken, on the
     /// addresses the chosen reach binds.
@@ -882,7 +883,7 @@ final class AppModel: ObservableObject {
             return
         }
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
-        if !choosePortForSetup(interfaces: interfaces) {
+        if !choosePortBeforeStart(interfaces: interfaces) {
             boundHost = nil
             await supervisor.fail(.portInUse)
             return
@@ -906,19 +907,30 @@ final class AppModel: ObservableObject {
         await supervisor.start(configuration: config)
     }
 
-    /// choosePortForSetup looks for a free follower port before the engine
-    /// starts, while setup is unfinished and the port is not one the person
-    /// chose or Tailscale HTTPS is serving: the saved port stays while it is
-    /// still free, so an address already given to a phone keeps working, and
-    /// only a taken one is replaced by the first free port from the default
-    /// up, which is then saved. The relay's own status port is never chosen.
-    /// It returns false, with the notice setup shows, when every candidate is
-    /// taken. A check reserves nothing, so an engine that still cannot listen
-    /// is reported by its exit code.
-    private func choosePortForSetup(interfaces: [NetworkInterfaceAddress]) -> Bool {
-        guard !settings.setupFinished, !portIsPersonChosen, !httpsLocked else { return true }
+    /// choosePortBeforeStart looks for a free follower port before the engine
+    /// starts (PortAvailability.startPort decides when), unless Tailscale
+    /// HTTPS is serving: during setup the saved port stays while it is still
+    /// free, so an address already given to a phone keeps working, and only
+    /// a taken one is replaced by the first free port from the default up,
+    /// which is then saved. A saved port equal to the relay's own status port
+    /// is replaced the same way at any time, since the engine can never
+    /// listen there. It returns false, with the notice setup shows, when
+    /// every candidate is taken. A check reserves nothing, so an engine that
+    /// still cannot listen is reported by its exit code.
+    private func choosePortBeforeStart(interfaces: [NetworkInterfaceAddress]) -> Bool {
+        guard !httpsLocked else { return true }
         let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        switch PortAvailability.setupPort(current: settings.port, default: AppSettings.defaultPort, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr)) {
+        let choice = PortAvailability.startPort(
+            current: settings.port,
+            default: AppSettings.defaultPort,
+            searching: !settings.setupFinished && !portIsPersonChosen,
+            bindHost: bindHost,
+            binder: portBinder,
+            reserved: PortAvailability.port(inAddress: statusAddr)
+        )
+        switch choice {
+        case nil:
+            return true
         case .free(let port):
             setupPortNotice = nil
             if port != settings.port {

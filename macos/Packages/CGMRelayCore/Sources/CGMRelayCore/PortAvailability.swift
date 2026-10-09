@@ -155,6 +155,24 @@ public enum PortAvailability {
         return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved)
     }
 
+    /// startPort decides the follower port before an engine start, nil to
+    /// keep the saved one. While searching (setup unfinished and the port not
+    /// one the person chose) it is setupPort. Otherwise the saved port stays,
+    /// unless it is the reserved status port: the engine can never listen
+    /// there, so it is replaced like a taken port during setup.
+    public static func startPort(
+        current: Int,
+        default defaultPort: Int,
+        searching: Bool,
+        bindHost: String,
+        binder: any PortBinding,
+        candidates: Int = candidateCount,
+        reserved: Int?
+    ) -> SetupPortChoice? {
+        guard searching || current == reserved else { return nil }
+        return setupPort(current: current, default: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved)
+    }
+
     /// inUseMessage is the sentence for a port another app already holds.
     public static func inUseMessage(port: Int) -> String {
         "Port \(port) is in use by another app."

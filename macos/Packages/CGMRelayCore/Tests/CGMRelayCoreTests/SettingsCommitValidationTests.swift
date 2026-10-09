@@ -318,6 +318,17 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.port(inAddress: "nonsense") == nil)
     }
 
+    @Test("before a start a saved port stays once setup is over or the person chose it, unless it is the status port, which is replaced at any time")
+    func startPortRepairsASavedStatusPort() {
+        let table = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(PortAvailability.startPort(current: 4005, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil, "a person's or finished setup's port is kept")
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil, "kept even when taken: that failure is reported, never moved")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002), "a saved status port is replaced after setup too")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true), reserved: 4001) == .exhausted(first: 4000, last: 4049))
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002), "during setup it is setupPort")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, bindHost: "127.0.0.1", binder: table, reserved: nil) == nil, "no status port, nothing to repair")
+    }
+
     @Test("a port another app holds on either address family is taken, and the refusal names it")
     func ipv4AndIPv6Conflicts() throws {
         let v4 = try #require(HeldListener.run(host: "127.0.0.1", count: 1))
