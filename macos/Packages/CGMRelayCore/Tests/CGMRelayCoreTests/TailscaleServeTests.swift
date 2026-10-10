@@ -116,30 +116,52 @@ struct TailscaleServeTests {
     static let running = TailscaleStatus.running(name: "relay-mac.example-tailnet.ts.net")
     static let stateCases: [(name: String, status: TailscaleStatus, json: String?, want: TailscaleHTTPSState)] = [
         ("443 free", running, "{}", .off(port: 443)),
-        ("443 taken by something else: the next free port", running, other443, .off(port: 8443)),
-        ("443 taken by TCP forwarding", running, tcpOnly443, .off(port: 8443)),
-        ("443 taken by a foreground session", running, foreground443, .off(port: 8443)),
-        ("every listed port taken", running, allTaken, .noFreePort),
+        ("443 taken by something else: the nearest free port above it", running, other443, .off(port: 444)),
+        ("443 taken by TCP forwarding", running, tcpOnly443, .off(port: 444)),
+        ("443 taken by a foreground session", running, foreground443, .off(port: 444)),
+        ("443, 8443 and 10000 all taken: the nearest free port, not a short list", running, allTaken, .off(port: 444)),
+        ("443 to 450 taken: 451", running, Self.taken(443...450), .off(port: 451)),
+        ("ours on a port outside the old list is still found", running, Self.ours(on: 20000), .on(port: 20000)),
         ("ours present on 443", running, ours443, .on(port: 443)),
         ("ours present on 8443, beside another service on 443", running, ours8443, .on(port: 8443)),
-        ("ours gone: 443 holds only another service", running, other443, .off(port: 8443)),
-        ("its proxy points at another relay port, so not ours", running, ours443.replacingOccurrences(of: "1337", with: "1338"), .off(port: 8443)),
+        ("ours gone: 443 holds only another service", running, other443, .off(port: 444)),
+        ("its proxy points at another relay port, so not ours", running, ours443.replacingOccurrences(of: "1337", with: "1338"), .off(port: 444)),
         ("plain HTTP on 8443 with our proxy is not ours, and the port stays taken", running, httpOnlyTCP, .off(port: 443)),
-        ("another host's entry on 443 is not ours, and 443 stays taken", running, otherHost443, .off(port: 8443)),
-        ("a foreground session's handler with our proxy is not ours, and its port stays taken", running, foregroundOurs443, .off(port: 8443)),
-        ("a web entry with no HTTPS flag on its port is not ours", running, noHTTPSFlag, .off(port: 8443)),
+        ("another host's entry on 443 is not ours, and 443 stays taken", running, otherHost443, .off(port: 444)),
+        ("a foreground session's handler with our proxy is not ours, and its port stays taken", running, foregroundOurs443, .off(port: 444)),
+        ("a web entry with no HTTPS flag on its port is not ours", running, noHTTPSFlag, .off(port: 444)),
         ("this Mac's name in another case and with a trailing dot is ours", running, upperCaseDotHost, .on(port: 443)),
-        ("ours on 443 but this Mac's name differs: not ours", .running(name: "renamed-mac.example-tailnet.ts.net"), ours443, .off(port: 8443)),
+        ("ours on 443 but this Mac's name differs: not ours", .running(name: "renamed-mac.example-tailnet.ts.net"), ours443, .off(port: 444)),
         ("serve settings unreadable", running, nil, .unreadable),
         ("Tailscale stopped", .stopped, "{}", .unavailable),
         ("Tailscale absent", .absent, nil, .unavailable),
         ("not read yet", .unknown, nil, .unknown),
     ]
 
+    /// taken is a serve config in which another service holds every port in ports.
+    static func taken(_ ports: ClosedRange<Int>) -> String {
+        let tcp = ports.map { "\"\($0)\":{\"HTTPS\":true}" }.joined(separator: ",")
+        let web = ports.map { "\"h.ts.net:\($0)\":{\"Handlers\":{\"/\":{\"Proxy\":\"http://127.0.0.1:3000\"}}}" }.joined(separator: ",")
+        return "{\"TCP\":{\(tcp)},\"Web\":{\(web)}}"
+    }
+
+    /// ours is a serve config in which this app's handler serves on port.
+    static func ours(on port: Int) -> String {
+        "{\"TCP\":{\"\(port)\":{\"HTTPS\":true}},\"Web\":{\"relay-mac.example-tailnet.ts.net:\(port)\":{\"Handlers\":{\"/\":{\"Proxy\":\"http://127.0.0.1:1337\"}}}}}"
+    }
+
     @Test("the HTTPS state is decided only from what Tailscale reports", arguments: stateCases)
     func httpsState(_ testCase: (name: String, status: TailscaleStatus, json: String?, want: TailscaleHTTPSState)) {
         let config = testCase.json.flatMap { TailscaleServeConfigParser.parse(Data($0.utf8)) }
         #expect(TailscaleHTTPSState.evaluate(status: testCase.status, config: config, relayPort: 1337) == testCase.want)
+    }
+
+    @Test("with every port from 443 up taken there is no free port, and one free port anywhere above is found")
+    func noFreePortOnlyWhenEveryPortIsTaken() {
+        let everyPort = TailscaleServeConfig(occupiedPorts: Set(443...65535))
+        #expect(TailscaleHTTPSState.evaluate(status: Self.running, config: everyPort, relayPort: 1337) == .noFreePort)
+        let oneLeft = TailscaleServeConfig(occupiedPorts: Set(443...65535).subtracting([65535]))
+        #expect(TailscaleHTTPSState.evaluate(status: Self.running, config: oneLeft, relayPort: 1337) == .off(port: 65535))
     }
 
     @Test("the address carries the port only when it is not 443")
