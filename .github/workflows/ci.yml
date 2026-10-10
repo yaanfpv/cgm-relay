@@ -1,12 +1,13 @@
 name: CI
 
 on:
-  # A pull request is checked once, through its pull_request run; a push run of the same commit would
-  # repeat every job. Pushes to main still run, so main's own state is always checked.
+  # A pull request is checked once per commit, through its pull_request run; a push run of the same
+  # commit would repeat every job. Label changes start no run here: the one check a label affects, the
+  # changelog entry, lives in changelog.yml. Pushes to main still run, so main's own state is checked.
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened]
   # Lets a maintainer run the checks on any branch or commit by hand.
   workflow_dispatch:
 
@@ -19,7 +20,8 @@ defaults:
 
 # Every job runs on the maintainer's own runners. Every check is a step named for what it checks, and
 # the work lives in .github/checks, which is what the local gate and a contributor run too. The last
-# job, gate, passes only when every other job passed, so branch protection requires that one job.
+# job, gate, passes only when every other job passed; branch protection requires it and the changelog
+# job in changelog.yml.
 jobs:
   go-checks:
     name: Go checks
@@ -28,8 +30,6 @@ jobs:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The changelog entry compares the pull request's base and head.
-          fetch-depth: 0
           persist-credentials: false
 
       - name: setup-go
@@ -51,22 +51,6 @@ jobs:
 
           - name: Go build
             run: bash .github/checks/go-build.sh
-
-          # Never skipped: the step itself decides whether an entry is owed and always says which.
-          - name: Changelog entry
-            env:
-              EVENT_NAME: ${{ github.event_name }}
-              WAIVED: ${{ contains(github.event.pull_request.labels.*.name, 'no changelog') }}
-              BASE_SHA: ${{ github.event.pull_request.base.sha }}
-              HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-            run: |
-              if [ "$EVENT_NAME" != pull_request ]; then
-                echo "The changelog entry applies to pull requests only; nothing to check on this ${EVENT_NAME}."
-              elif [ "$WAIVED" = true ]; then
-                echo "The \`no changelog\` label waives the changelog entry for this pull request."
-              else
-                bash .github/checks/changelog-entry.sh
-              fi
 
   swift-test:
     name: Swift tests

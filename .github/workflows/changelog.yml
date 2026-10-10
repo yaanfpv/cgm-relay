@@ -1,0 +1,39 @@
+name: Changelog
+
+on:
+  # The `no changelog` label waives the entry, so adding or removing it re-checks just this. Every
+  # other check lives in ci.yml, which label changes do not start.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  changelog:
+    name: changelog
+    runs-on: [self-hosted, linux, arm64, vayaan]
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The entry is found by comparing the pull request's base and head.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Never skipped: the step itself decides whether an entry is owed and always says which.
+      - name: Changelog entry
+        env:
+          WAIVED: ${{ contains(github.event.pull_request.labels.*.name, 'no changelog') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$WAIVED" = true ]; then
+            echo "The \`no changelog\` label waives the changelog entry for this pull request."
+          else
+            bash .github/checks/changelog-entry.sh
+          fi

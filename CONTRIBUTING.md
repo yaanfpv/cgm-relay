@@ -46,7 +46,7 @@ open "macos/.build/DerivedData/Build/Products/Debug/CGM Relay.app" --args \
 
 Keep each one to a single change, add tests for behaviour you change, and add a line under `## [Unreleased]` in `CHANGELOG.md` saying what changed for someone using the app. A docs or CI change can skip the changelog with the `no changelog` label.
 
-Every pull request runs these checks. The four Go checks and the changelog entry run side by side in one job, Go checks, so that's where they show up. Each is a script in `.github/checks/`, and you can run the same command yourself from the repo root:
+Every pull request runs these checks. The four Go checks run side by side in one job, Go checks, so that's where they show up; the changelog entry is its own check, changelog, which adding or removing the label re-runs on its own. Each is a script in `.github/checks/`, and you can run the same command yourself from the repo root:
 
 | Check | Command |
 | --- | --- |
