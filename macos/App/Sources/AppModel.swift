@@ -45,8 +45,8 @@ final class AppModel: ObservableObject {
     /// started against for this Mac's current network interfaces
     /// (EngineListenPlan.identity: the listen host, and on the local
     /// network route the private addresses and name too). Published beside
-    /// connectAddressAvailability, rather
-    /// than recomputed by connectPaneAddressState, so the Connect pane
+    /// connectAddressAvailability, rather than recomputed by
+    /// connectPaneAddressState, so the Connect pane
     /// compares boundHost against the exact same answer that decides
     /// whether the engine needs restarting at all.
     @Published private(set) var impliedBindHost = "127.0.0.1"
@@ -58,11 +58,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var primaryPrivateIPv4: String?
     @Published private(set) var localHostName = LocalHostName.fallback
     /// isCertificateStepPresented is true while the person is giving a phone
-    /// the certificate; the stepper that does it presents itself from this.
+    /// the certificate; the Connect pane that asked shows the stepper while
+    /// it is.
     @Published private(set) var isCertificateStepPresented = false
     /// certificateNotice is the sentence the menu shows after the
     /// certificate was made again, until the step is finished.
     @Published private(set) var certificateNotice: String?
+    /// lanReadingClients mirrors the latest status's report of the apps that
+    /// fetched readings over the encrypted local network address, published
+    /// so a view watching for the first such fetch redraws when one lands.
+    @Published private(set) var lanReadingClients: [String: Date] = [:]
     /// boundHost is the EngineListenPlan.identity the running engine was
     /// actually started against -- nil whenever nothing is currently running -- so the
     /// Connect pane can show the address the engine is really listening
@@ -491,6 +496,12 @@ final class AppModel: ObservableObject {
         localRoute?.address(for: app) ?? readyAddress
     }
 
+    /// lanReadingFetch is the newest fetch of readings over the encrypted
+    /// local network address at or after since, nil when there was none.
+    func lanReadingFetch(since: Date) -> (userAgent: String, at: Date)? {
+        latestStatus?.lanReadingFetch(since: since)
+    }
+
     /// refreshNetworkAddresses re-reads this Mac's own network
     /// interfaces: called when the menu opens and from the Connect and
     /// Advanced panes' onAppear, since Tailscale connecting or a network
@@ -627,20 +638,21 @@ final class AppModel: ObservableObject {
         isCertificateStepPresented = true
     }
 
-    /// finishCertificateStep records that the person's phone has the
-    /// certificate, so the local network route shows its address, token and
-    /// code, and ends the download link.
+    /// finishCertificateStep records the person's word that their phone has
+    /// the certificate, so the local network route shows its address, token
+    /// and code, and ends the download link. The stepper stays open, so the
+    /// person can set up their app and watch it connect.
     func finishCertificateStep() {
         settings.localCertificateStepFinished = true
         persistSettings()
         certificateNotice = nil
-        isCertificateStepPresented = false
         recomputeMenuState()
         Task { await endCertificateLink() }
     }
 
-    /// cancelCertificateStep closes the stepper without finishing the step.
-    func cancelCertificateStep() {
+    /// closeCertificateStep closes the stepper, finished or not, and ends the
+    /// download link.
+    func closeCertificateStep() {
         isCertificateStepPresented = false
         Task { await endCertificateLink() }
     }
@@ -1135,6 +1147,8 @@ final class AppModel: ObservableObject {
     private func handleStatusUpdate(_ status: EngineStatus?) {
         if let status {
             latestStatus = status
+            let lanClients = status.lanReadingClients ?? [:]
+            if lanClients != lanReadingClients { lanReadingClients = lanClients }
         }
         recomputeMenuState()
 

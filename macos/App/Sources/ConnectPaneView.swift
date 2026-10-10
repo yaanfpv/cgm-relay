@@ -12,8 +12,10 @@ import SwiftUI
 /// and shows a plain reason instead of a guess whenever there is none
 /// right now. Setup's connect step is this same view, laid out more compactly,
 /// with its own way out of the blocked state and its own trailing sections.
-/// The token is read from the Keychain once when the view appears and again
-/// after a rotation, and held in state.
+/// On the local network route, until the phone has CGM Relay's certificate,
+/// it offers the certificate stepper instead, as a sheet on this pane.
+/// The token is read from the Keychain when the view appears, after a
+/// rotation and when the certificate step changes, and held in state.
 struct ConnectPaneView<Extra: View>: View {
     @ObservedObject var model: AppModel
     let blockedSecondary: String
@@ -48,6 +50,9 @@ struct ConnectPaneView<Extra: View>: View {
     @State private var isConfirmingRotate = false
     @State private var isRotating = false
     @State private var rotateErrorMessage: String?
+    /// isPresentingCertificateStep is whether this pane opened the stepper,
+    /// so only the window the person pressed the button in shows it.
+    @State private var isPresentingCertificateStep = false
 
     var body: some View {
         Form {
@@ -68,7 +73,10 @@ struct ConnectPaneView<Extra: View>: View {
                     message: "Your phone needs CGM Relay's certificate before it can connect over your Wi-Fi.",
                     secondary: nil,
                     actionLabel: "Set Up HTTPS on Your Phone",
-                    action: model.beginCertificateStep
+                    action: {
+                        isPresentingCertificateStep = true
+                        model.beginCertificateStep()
+                    }
                 )
             case .ready(let address):
                 readySection(address: address)
@@ -80,6 +88,20 @@ struct ConnectPaneView<Extra: View>: View {
         .frame(maxWidth: .infinity, alignment: .top)
         .task(id: pairingKey) {
             if let readyAddress { await keepPairingCodeFresh(address: readyAddress) }
+        }
+        .sheet(isPresented: Binding(
+            get: { isPresentingCertificateStep && model.isCertificateStepPresented },
+            set: { presented in
+                if !presented {
+                    isPresentingCertificateStep = false
+                    model.closeCertificateStep()
+                }
+            }
+        )) {
+            CertificateStepView(model: model)
+        }
+        .onChange(of: model.isCertificateStepPresented) { _, presented in
+            if !presented { isPresentingCertificateStep = false }
         }
         .onChange(of: model.settings.needsCertificateStep) {
             token = model.currentToken() ?? ""
