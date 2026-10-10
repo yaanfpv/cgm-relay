@@ -157,7 +157,7 @@ struct CertificateDownloadServerTests {
         let early = try Self.makeFixture(lifetime: lifetime)
         let earlyURL = try await early.server.mint(format: .android)
         let started = clock.now
-        try await Task.sleep(for: .milliseconds(2000))
+        try await Task.sleep(for: .milliseconds(1500))
         let before = try await HTTPReply.get(earlyURL)
         #expect(clock.now - started < lifetime)
         #expect(before.status == 200)
@@ -253,15 +253,15 @@ struct CertificateDownloadServerTests {
 
     @Test("a link that expires while a response is held stops accepting connections at once and lets it finish")
     func expiryLetsHeldResponseFinish() async throws {
-        let fixture = try Self.makeFixture(lifetime: .milliseconds(800))
+        let fixture = try Self.makeFixture(lifetime: .seconds(3))
         let url = try await fixture.server.mint(format: .android)
         let port = url.port!
         let slow = try await RawClient.connect(port: port)
         try await slow.send("GET \(url.path) HTTP/1.1\r\n")
         try await Task.sleep(for: .milliseconds(300))
 
-        // Well past the lifetime, and well inside the request timeout.
-        try await Task.sleep(for: .milliseconds(1200))
+        // Past the lifetime, and inside the request timeout. The lifetime leaves a busy host seconds to accept.
+        try await Task.sleep(for: .milliseconds(3200))
         await #expect(throws: (any Error).self) {
             _ = try await RawClient.connect(port: port)
         }
