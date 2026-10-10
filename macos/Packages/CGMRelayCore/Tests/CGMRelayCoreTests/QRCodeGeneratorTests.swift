@@ -67,15 +67,18 @@ struct FollowerQRPlannerTests {
 
     @Test("xDrip+'s own decoder reads the QR back as exactly the Nightscout Follower source and the follow URL")
     func xDripPlusDecodes() throws {
-        let qr = try #require(FollowerQRPlanner.qr(for: .xDripPlus, address: Self.address, token: Self.token, pairingCode: nil))
-        let scanned = QRCodeGenerator.decode(try QRCodeGenerator.cgImage(for: qr.payload))
-        #expect(scanned == qr.payload)
-        let prefs = try #require(xdripDecode(qr.payload))
-        #expect(prefs == [
-            "dex_collection_method": "NSFollower",
-            "nsfollow_url": "https://\(Self.token)@relay-mac.example-tailnet.ts.net",
-        ])
-        #expect(qr.carriesToken)
+        let rows = [
+            (Self.address, "https://\(Self.token)@relay-mac.example-tailnet.ts.net"),
+            ("https://192.168.1.42:1337", "https://\(Self.token)@192.168.1.42:1337"),
+        ]
+        for (address, followURL) in rows {
+            let qr = try #require(FollowerQRPlanner.qr(for: .xDripPlus, address: address, token: Self.token, pairingCode: nil))
+            let scanned = QRCodeGenerator.decode(try QRCodeGenerator.cgImage(for: qr.payload))
+            #expect(scanned == qr.payload)
+            let prefs = try #require(xdripDecode(qr.payload))
+            #expect(prefs == ["dex_collection_method": "NSFollower", "nsfollow_url": followURL], "\(address)")
+            #expect(qr.carriesToken)
+        }
     }
 
     @Test("the xDrip+ code decodes a zlib stream made by another implementation, so the container is standard")
@@ -110,26 +113,30 @@ struct FollowerQRPlannerTests {
     @Test("LoopFollow's own decoder reads the QR back with the address as URL and the token as Token")
     func loopFollowDecodes() throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
-        let qr = try #require(FollowerQRPlanner.qr(for: .loopFollow, address: "http://192.168.1.42:10000", token: Self.token, pairingCode: nil, now: now))
-        let scanned = QRCodeGenerator.decode(try QRCodeGenerator.cgImage(for: qr.payload, correctionLevel: "L"))
-        #expect(scanned == qr.payload)
-        let decoded = try JSONDecoder().decode(LoopFollowCombined.self, from: Data(qr.payload.utf8))
-        #expect(decoded.nightscout?.url == "http://192.168.1.42:10000")
-        #expect(decoded.nightscout?.token == Self.token)
-        #expect(decoded.timestamp == now)
-        #expect(!qr.payload.contains("/?token="))
-        #expect(qr.carriesToken)
+        for address in ["http://192.168.1.42:10000", "https://relay-mac.local:1337"] {
+            let qr = try #require(FollowerQRPlanner.qr(for: .loopFollow, address: address, token: Self.token, pairingCode: nil, now: now))
+            let scanned = QRCodeGenerator.decode(try QRCodeGenerator.cgImage(for: qr.payload, correctionLevel: "L"))
+            #expect(scanned == qr.payload)
+            let decoded = try JSONDecoder().decode(LoopFollowCombined.self, from: Data(qr.payload.utf8))
+            #expect(decoded.nightscout?.url == address)
+            #expect(decoded.nightscout?.token == Self.token)
+            #expect(decoded.timestamp == now)
+            #expect(!qr.payload.contains("/?token="))
+            #expect(qr.carriesToken)
+        }
     }
 
     @Test("xDrip4iOS and Nightguard get the pairing page address with a code and never the token")
     func pairingPageApps() throws {
         for app in [FollowerApp.xDrip4iOS, .nightguard] {
             #expect(FollowerQRPlanner.qr(for: app, address: Self.address, token: Self.token, pairingCode: nil) == nil)
-            let qr = try #require(FollowerQRPlanner.qr(for: app, address: Self.address, token: Self.token, pairingCode: "CODE_abc-123"))
-            #expect(qr.payload == "\(Self.address)/connect/CODE_abc-123")
-            #expect(!qr.payload.contains(Self.token))
-            #expect(!qr.carriesToken)
-            #expect(qr.caption == FollowerQRPlanner.caption(for: app))
+            for address in [Self.address, "https://relay-mac.local:1337"] {
+                let qr = try #require(FollowerQRPlanner.qr(for: app, address: address, token: Self.token, pairingCode: "CODE_abc-123"))
+                #expect(qr.payload == "\(address)/connect/CODE_abc-123")
+                #expect(!qr.payload.contains(Self.token))
+                #expect(!qr.carriesToken)
+                #expect(qr.caption == FollowerQRPlanner.caption(for: app))
+            }
         }
         for app in [FollowerApp.xDripPlus, .loopFollow] {
             #expect(FollowerQRPlanner.qr(for: app, address: Self.address, token: "", pairingCode: "CODE") == nil)
@@ -161,7 +168,7 @@ struct FollowerQRPlannerTests {
 
     @Test("every follower app's code fills the same tile at the same drawn size and decodes back to its exact payload")
     func everyAppsCodeFillsTheTileAndDecodes() throws {
-        let addresses = [Self.address, "http://192.168.100.200:10000", "http://10.0.0.5:1337"]
+        let addresses = [Self.address, "http://192.168.100.200:10000", "http://10.0.0.5:1337", "https://relay-mac.local:1337", "https://192.168.1.42:1337"]
         let sides = [QRCodeGenerator.standardTileSide, QRCodeGenerator.compactTileSide]
         for side in sides {
             let pixels = Int(side) * QRCodeGenerator.renderScale
@@ -172,7 +179,8 @@ struct FollowerQRPlannerTests {
                     let image = try QRCodeGenerator.cgImage(for: qr.payload, sidePixels: pixels)
                     #expect(image.width == pixels && image.height == pixels, "\(app) at \(side) is not the tile's size")
                     #expect(QRCodeGenerator.decode(image) == qr.payload, "\(app) at \(side) did not decode back to its payload")
-                    boxes["\(app) \(address)"] = try #require(darkBoxSide(image))
+                    let box = try #require(darkBoxSide(image))
+                    boxes["\(app) \(address)"] = box
                 }
             }
             let largest = Double(boxes.values.max()!), smallest = Double(boxes.values.min()!)

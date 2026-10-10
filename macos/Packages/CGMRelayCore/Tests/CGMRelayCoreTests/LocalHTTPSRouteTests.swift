@@ -23,65 +23,103 @@ struct LocalHTTPSRouteTests {
         return LocalFollowerRoute(hostName: name, ipv4: ipv4, port: port)
     }
 
-    /// everyAddress collects each place a follower is shown an address on the
-    /// local route: the Connect pane's state, every app's instructions (the
-    /// Connect pane, setup step 3 and the engine's pairing page all render
-    /// these), every QR payload and the xDrip+ combined value.
-    static func everyAddress(_ route: LocalFollowerRoute) throws -> [(place: String, text: String)] {
-        var found: [(String, String)] = []
+    /// Expected is what one app is shown for the route: its address, every
+    /// field it asks for (label and value, the token filled in), the steps
+    /// that name a host or port, and the links on its page.
+    struct Expected {
+        let address: String
+        let fields: [String]
+        let addressSteps: [String]
+        let links: [String]
+    }
+
+    static func expected(ip: String) -> [FollowerApp: Expected] {
+        let nameAddress = "https://\(name):\(port)"
+        return [
+            .xDrip4iOS: Expected(
+                address: nameAddress,
+                fields: ["URL=https://\(name)", "Token=\(token)", "Port=\(port)"],
+                addressSteps: ["In Port, enter \(port)."],
+                links: ["xdripswift://open"]
+            ),
+            .xDripPlus: Expected(
+                address: "https://\(ip):\(port)",
+                fields: ["Nightscout Follow URL=https://\(token)@\(ip):\(port)"],
+                addressSteps: [],
+                links: []
+            ),
+            .loopFollow: Expected(
+                address: nameAddress,
+                fields: ["URL=\(nameAddress)", "Access Token=\(token)"],
+                addressSteps: [],
+                links: []
+            ),
+            .nightguard: Expected(
+                address: nameAddress,
+                fields: ["Nightscout URL=\(nameAddress)", "API Token=\(token)"],
+                addressSteps: [],
+                links: ["https://apps.apple.com/us/app/nightguard/id1116430352"]
+            ),
+        ]
+    }
+
+    /// namesAHostOrPort is whether a sentence says where the relay is.
+    static func namesAHostOrPort(_ text: String, ip: String) -> Bool {
+        text.contains("://") || text.contains("@") || text.contains(".local") || text.contains(ip) || text.contains(String(port))
+    }
+
+    /// checkOutputs holds the route's helpers composed (the Connect pane
+    /// state, each app's instructions, the pairing page's apps, each QR
+    /// payload) to the exact value each should show for a Mac whose private
+    /// address is ip. It proves the pieces agree with each other on the
+    /// route. The wording and the format of each output are held by that
+    /// output's own tests.
+    static func checkOutputs(_ route: LocalFollowerRoute, ip: String) throws {
+        let want = expected(ip: ip)
         let state = ConnectPaneAddressState.decide(
             reach: .myLocalNetwork, boundHost: "b", impliedBindHost: "b", port: port,
             displayHostAvailability: .available(route.ipv4), localHostName: name
         )
-        if case .ready(let address) = state { found.append(("connect pane", address)) }
+        #expect(state == .ready(address: "https://\(name):\(port)"))
 
+        var pages = FollowerAppEntry.pairingApps(addressFor: route.address(for:))
+        #expect(pages.map(\.name) == FollowerApp.allCases.map(\.displayName))
         for app in FollowerApp.allCases {
+            let w = try #require(want[app])
             let address = route.address(for: app)
-            found.append(("address for \(app)", address))
-            let instructions = FollowerAppEntry.instructions(for: app, address: address)
-            for field in instructions.fields where field.label != "Token" && field.label != "API Token" && field.label != "Access Token" {
-                found.append(("\(app) field \(field.label)", field.value(withToken: token)))
+            #expect(address == w.address, "\(app) is given another address")
+            let shown = [FollowerAppEntry.instructions(for: app, address: address), pages.removeFirst()]
+            for entry in shown {
+                #expect(entry.fields.map { "\($0.label)=\($0.value(withToken: token))" } == w.fields, "\(app) fields")
+                #expect(entry.steps.filter { namesAHostOrPort($0, ip: ip) } == w.addressSteps, "\(app) steps")
+                #expect(entry.links.map(\.url) == w.links, "\(app) links")
             }
-            for step in instructions.steps { found.append(("\(app) step", step)) }
-            found.append(("\(app) caption", FollowerQRPlanner.caption(for: app)))
-        }
-        for page in FollowerAppEntry.pairingApps(addressFor: route.address(for:)) {
-            for field in page.fields { found.append(("pairing page \(page.name) \(field.label)", field.value(withToken: token))) }
-            for step in page.steps { found.append(("pairing page \(page.name) step", step)) }
+            #expect(!namesAHostOrPort(FollowerQRPlanner.caption(for: app), ip: ip), "\(app) caption names a host")
         }
 
         for app in [FollowerApp.xDrip4iOS, .nightguard] {
             let qr = try #require(FollowerQRPlanner.qr(for: app, address: route.address(for: app), token: token, pairingCode: "CODE_abc-123"))
-            found.append(("\(app) qr", qr.payload))
+            #expect(qr.payload == "https://\(name):\(port)/connect/CODE_abc-123", "\(app) qr")
         }
+
         let plus = try #require(FollowerQRPlanner.qr(for: .xDripPlus, address: route.address(for: .xDripPlus), token: token, pairingCode: nil))
         var encoded = String(plus.payload.dropFirst(XDripPlusSettingsQR.marker.count))
         while encoded.count % 4 != 0 { encoded += "=" }
         let compressed = try #require(Data(base64Encoded: encoded))
         let inflated = try #require(ZlibStream.decompress(compressed))
-        found.append(("xDrip+ qr", String(decoding: inflated, as: UTF8.self)))
+        let preferences = try #require(JSONSerialization.jsonObject(with: inflated) as? [String: String])
+        #expect(preferences == ["dex_collection_method": "NSFollower", "nsfollow_url": "https://\(token)@\(ip):\(port)"], "xDrip+ qr")
+
         let loop = try #require(FollowerQRPlanner.qr(for: .loopFollow, address: route.address(for: .loopFollow), token: token, pairingCode: nil))
-        found.append(("LoopFollow qr", loop.payload))
-        return found
+        let settings = try #require(JSONSerialization.jsonObject(with: Data(loop.payload.utf8)) as? [String: Any])
+        let nightscout = try #require(settings["nightscout"] as? [String: String])
+        #expect(nightscout["url"] == "https://\(name):\(port)", "LoopFollow qr")
+        #expect(nightscout["token"] == token)
     }
 
-    @Test("every address shown for the local route is https, never plain http, and carries the right host and port")
-    func everyLocalAddressIsHTTPS() throws {
-        let route = try Self.route(Self.first)
-        let all = try Self.everyAddress(route)
-        #expect(all.count > 20, "the sweep covers every surface")
-        for (place, text) in all {
-            #expect(!text.contains("http://"), "\(place) offers a plain http address: \(text)")
-        }
-        let hostsSeen = all.filter { $0.text.contains("https://") }
-        #expect(!hostsSeen.isEmpty)
-        for (place, text) in hostsSeen where !place.hasSuffix("xDrip+ qr") && !text.contains("apps.apple.com") {
-            #expect(
-                text.contains("https://\(Self.name):\(Self.port)") || text.contains("https://192.168.1.42:\(Self.port)") || text.contains("@192.168.1.42:\(Self.port)")
-                    || text == "https://\(Self.name)" /* xDrip4iOS's URL field, its Port field is separate */,
-                "\(place) names another host or port: \(text)"
-            )
-        }
+    @Test("the route's helpers, composed, give each app its exact https address in every output it shows")
+    func everyLocalOutputCarriesItsExactAddress() throws {
+        try Self.checkOutputs(try Self.route(Self.first), ip: "192.168.1.42")
     }
 
     @Test("an app that takes an address is given the private address, and the rest are given the .local name")
@@ -93,11 +131,6 @@ struct LocalHTTPSRouteTests {
         for app in [FollowerApp.xDrip4iOS, .loopFollow, .nightguard] {
             #expect(route.address(for: app) == route.nameAddress)
         }
-        let plus = FollowerAppEntry.instructions(for: .xDripPlus, address: route.address(for: .xDripPlus))
-        #expect(plus.fields[0].value(withToken: Self.token) == "https://\(Self.token)@192.168.1.42:1337")
-        let xdrip = FollowerAppEntry.instructions(for: .xDrip4iOS, address: route.address(for: .xDrip4iOS))
-        #expect(xdrip.fields.first { $0.label == "URL" }?.value == "https://relay-mac.local")
-        #expect(xdrip.fields.first { $0.label == "Port" }?.value == "1337")
     }
 
     @Test("after the IP set changes, the addresses and the listen plan follow the new set")
@@ -110,10 +143,7 @@ struct LocalHTTPSRouteTests {
 
         let route = try Self.route(Self.moved)
         #expect(route.ipAddress == "https://192.168.50.9:1337")
-        for (place, text) in try Self.everyAddress(route) {
-            #expect(!text.contains("192.168.1.42"), "\(place) still shows the old address: \(text)")
-        }
-        #expect(try Self.everyAddress(route).contains { $0.text.contains("192.168.50.9") })
+        try Self.checkOutputs(route, ip: "192.168.50.9")
     }
 
     @Test("the listen identity changes with the name or the address set and is the bare host on every other route")

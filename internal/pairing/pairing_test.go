@@ -39,7 +39,8 @@ func sampleApps() []pairing.App {
 			Name:  "First App",
 			Steps: []string{"Open Settings <b>now</b>.", "Leave the secret blank."},
 			Fields: []pairing.Field{
-				{Label: "URL", Value: "https://relay.example.net"},
+				{Label: "URL", Value: "https://relay-mac.local"},
+				{Label: "Port", Value: "1337"},
 				{Label: "Token", Value: "{token}"},
 			},
 			Links: []pairing.Link{{Label: "Open First App", URL: "xdripswift://open"}},
@@ -47,7 +48,7 @@ func sampleApps() []pairing.App {
 		{
 			Name:   "Second App",
 			Steps:  []string{"Paste the address."},
-			Fields: []pairing.Field{{Label: "Follow URL", Value: "https://{token}@relay.example.net:8443"}},
+			Fields: []pairing.Field{{Label: "Follow URL", Value: "https://{token}@192.168.1.42:1337"}},
 			Links:  []pairing.Link{{Label: "Get Second App", URL: "https://apps.example.com/second"}},
 		},
 	}
@@ -100,9 +101,10 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 
 	for _, want := range []string{
 		">First App</h2>", ">Second App</h2>",
-		">https://relay.example.net</code>",
+		">https://relay-mac.local</code>",
+		">1337</code>",
 		">" + testToken + "</code>",
-		">https://" + testToken + "@relay.example.net:8443</code>",
+		">https://" + testToken + "@192.168.1.42:1337</code>",
 		"Leave the secret blank.",
 		`href="xdripswift://open"`, `href="https://apps.example.com/second"`,
 	} {
@@ -118,7 +120,7 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 	}
 	// An app's steps come before its values, and the values keep the order
 	// the Mac sent them in.
-	order := []string{"Leave the secret blank.", ">URL</div>", ">Token</div>", ">Second App</h2>"}
+	order := []string{"Leave the secret blank.", ">URL</div>", ">Port</div>", ">Token</div>", ">Second App</h2>"}
 	last := -1
 	for _, want := range order {
 		at := strings.Index(body, want)
@@ -278,8 +280,8 @@ func TestEveryCopyButtonHasAnAccessibleNameAndItsValue(t *testing.T) {
 	body := get(pairing.PageHandler(store, testToken), "/connect/"+code).Body.String()
 
 	buttons := regexp.MustCompile(`<button[^>]*class="btn copy"[^>]*>`).FindAllString(body, -1)
-	if len(buttons) != 3 {
-		t.Fatalf("found %d Copy buttons, want 3: one per minted field", len(buttons))
+	if len(buttons) != 4 {
+		t.Fatalf("found %d Copy buttons, want 4: one per minted field", len(buttons))
 	}
 	for _, b := range buttons {
 		id := regexp.MustCompile(`data-for="([^"]+)"`).FindStringSubmatch(b)
