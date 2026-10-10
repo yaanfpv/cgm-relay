@@ -118,10 +118,11 @@ struct AccessibleButton: View {
         case .primary:
             // In a key window the label is the AccentLabel ink, chosen to read
             // on the ActionFill tint in each appearance. Disabled, or in a
-            // background window, the system swaps the tint for its own grey
-            // fill, and its own dimmed label on that fill is too faint to read,
-            // so the label becomes InactiveActionLabel: the grey fill still
-            // says the button is not ready, but its name stays legible.
+            // background window, the fill is grey (the system's own, or the
+            // bordered bezel cgmPrimaryActionStyle uses for a disabled primary
+            // below macOS 26), and the system's dimmed label on it is too faint
+            // to read, so the label becomes InactiveActionLabel: the grey fill
+            // still says the button is not ready, but its name stays legible.
             Button(role: role, action: action) {
                 if isEnabled && controlActiveState != .inactive {
                     Text(title).foregroundStyle(Color("AccentLabel"))
@@ -129,7 +130,7 @@ struct AccessibleButton: View {
                     Text(title).foregroundStyle(Color("InactiveActionLabel"))
                 }
             }
-            .cgmPrimaryActionStyle()
+            .cgmPrimaryActionStyle(isEnabled: isEnabled)
         case .secondary:
             Button(title, role: role, action: action).cgmSecondaryActionStyle()
         case .plain:

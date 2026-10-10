@@ -12,13 +12,19 @@ import SwiftUI
 extension View {
     /// cgmPrimaryActionStyle marks a pane or panel's one primary action
     /// (Sign In, Start, Try Again, Copy Diagnostics): glass-prominent on
-    /// macOS 26+, bordered-prominent otherwise.
+    /// macOS 26+, bordered-prominent otherwise. Below macOS 26 a disabled
+    /// bordered-prominent button that is not the default button keeps a
+    /// faded tint in a key window, under which no label colour reads, so
+    /// there a disabled primary is drawn bordered: the plain grey bezel
+    /// every other disabled button has.
     @ViewBuilder
-    func cgmPrimaryActionStyle() -> some View {
+    func cgmPrimaryActionStyle(isEnabled: Bool) -> some View {
         if #available(macOS 26, *) {
             self.buttonStyle(.glassProminent).tint(Color("ActionFill"))
-        } else {
+        } else if isEnabled {
             self.buttonStyle(.borderedProminent).tint(Color("ActionFill"))
+        } else {
+            self.buttonStyle(.bordered)
         }
     }
 
