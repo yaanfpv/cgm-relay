@@ -802,7 +802,7 @@ func readSgvs(t *testing.T, client *http.Client, url string) []int {
 // local network gets its readings over TLS: a client trusting only the test
 // CA reads the exact synthetic entries over a LAN listener, both dialling its
 // address and through a name the leaf certifies, while the loopback
-// listener_addr keeps serving plain http. A handshake that returns no
+// listen_addr keeps serving plain http. A handshake that returns no
 // readings fails it.
 func TestLANListenerServesReadingsOverTLS(t *testing.T) {
 	t.Parallel()

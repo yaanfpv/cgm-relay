@@ -200,7 +200,8 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 
 	// A LAN listener that dies is as fatal as the loopback one: the process
 	// would otherwise keep running with phones silently unable to connect.
-	lanErr := make(chan error, 1)
+	// Sized for one send per listener, so a second failure never blocks.
+	lanErr := make(chan error, len(lanServers))
 	for _, lan := range lanServers {
 		go func() {
 			if err := <-lan.errCh; err != nil {
