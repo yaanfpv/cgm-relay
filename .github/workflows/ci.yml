@@ -18,14 +18,13 @@ defaults:
   run:
     shell: bash
 
-# Every job runs on the maintainer's own runners. Every check is a step named for what it checks, and
-# the work lives in .github/checks, which is what the local gate and a contributor run too. The last
-# job, gate, passes only when every other job passed; branch protection requires it and the changelog
-# job in changelog.yml.
+# Every check is a step named for what it checks, and the work lives in .github/checks, which is what
+# a contributor runs too. The last job, gate, passes only when every other job passed; branch
+# protection requires it and the changelog job in changelog.yml.
 jobs:
   go-checks:
     name: Go checks
-    runs-on: [self-hosted, linux, arm64, vayaan]
+    runs-on: ubuntu-latest
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +54,7 @@ jobs:
   swift-test:
     name: Swift tests
     # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
-    runs-on: [self-hosted, macos, arm64, vayaan]
+    runs-on: xcode-27
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,7 +72,7 @@ jobs:
   mac-app-build:
     name: Mac app build
     # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
-    runs-on: [self-hosted, macos, arm64, vayaan]
+    runs-on: xcode-27
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,9 +83,6 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # A self-hosted Mac keeps its own warm module cache; restoring the Actions cache over it
-          # only downloads and re-uploads hundreds of megabytes.
-          cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: show toolchain
         run: |
@@ -106,7 +102,7 @@ jobs:
       - go-checks
       - swift-test
       - mac-app-build
-    runs-on: [self-hosted, linux, arm64, vayaan]
+    runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: every check passed
