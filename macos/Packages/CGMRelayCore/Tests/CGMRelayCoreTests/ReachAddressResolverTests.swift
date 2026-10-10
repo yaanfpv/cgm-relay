@@ -344,6 +344,13 @@ struct FollowerAddressTests {
             "Tap Test Connection and wait for the dot to turn green.",
         ])
         #expect(noPort.fields.map(\.label) == ["URL", "Token"])
+        let local = FollowerAppEntry.instructions(for: .xDrip4iOS, address: "https://relay-mac.local:1337")
+        #expect(local.fields == [
+            .init(label: "URL", value: "https://relay-mac.local"),
+            .init(label: "Token", value: FollowerAppEntry.tokenPlaceholder),
+            .init(label: "Port", value: "1337"),
+        ])
+        #expect(local.steps.last(where: { $0.hasPrefix("In Port") }) == "In Port, enter 1337.")
     }
 
     @Test("xDrip+ introduces its one combined field with its own step, and the value to copy holds the address with the token in front")
@@ -354,6 +361,8 @@ struct FollowerAddressTests {
         #expect(entry.fields.map(\.label) == ["Nightscout Follow URL"])
         #expect(entry.fields[0].value(withToken: "synthetic-token") == "http://synthetic-token@192.168.1.42:1337")
         #expect(!entry.fields[0].value(withToken: "synthetic-token").contains(FollowerAppEntry.tokenPlaceholder))
+        let local = FollowerAppEntry.instructions(for: .xDripPlus, address: "https://192.168.1.42:1337")
+        #expect(local.fields[0].value(withToken: "synthetic-token") == "https://synthetic-token@192.168.1.42:1337")
     }
 
     @Test("LoopFollow names its token field Access Token and ends on its Status checkmark")
@@ -361,6 +370,11 @@ struct FollowerAddressTests {
         let entry = FollowerAppEntry.instructions(for: .loopFollow, address: "http://192.168.1.42:1337")
         #expect(entry.fields.map(\.label) == ["URL", "Access Token"])
         #expect(entry.steps.last == "Check that Status shows a green checkmark.")
+        let local = FollowerAppEntry.instructions(for: .loopFollow, address: "https://relay-mac.local:1337")
+        #expect(local.fields == [
+            .init(label: "URL", value: "https://relay-mac.local:1337"),
+            .init(label: "Access Token", value: FollowerAppEntry.tokenPlaceholder),
+        ])
     }
 
     @Test("Nightguard's token is its own API Token field and its Nightscout URL is the bare address")
@@ -372,6 +386,8 @@ struct FollowerAddressTests {
         ])
         #expect(!entry.fields[0].value.contains("?token="))
         #expect(!entry.fields[0].value.hasSuffix("/"))
+        let local = FollowerAppEntry.instructions(for: .nightguard, address: "https://relay-mac.local:1337")
+        #expect(local.fields[0] == .init(label: "Nightscout URL", value: "https://relay-mac.local:1337"))
     }
 
     @Test("every app's instructions carry the token only as the placeholder, never a real value")
