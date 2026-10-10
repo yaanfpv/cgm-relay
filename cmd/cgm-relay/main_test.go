@@ -1001,8 +1001,9 @@ func TestLANListenerRefusals(t *testing.T) {
 	t.Parallel()
 	good := newTestPKI(t)
 	other := newTestPKI(t)
-	garbage := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	garbageKey := "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
+	// Well-formed PEM armour around bytes that are not valid DER.
+	garbage := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not der")}))
+	garbageKey := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not der")}))
 
 	pemCases := []struct {
 		name, cert, key, wantField string
