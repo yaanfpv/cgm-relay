@@ -18,7 +18,7 @@ Everything needs your access token, as `?token=` or the `api-secret` header (raw
 
 The relay only listens on the machine it runs on until you choose a way in:
 
-- **Tailscale HTTPS.** The Mac app sets this up in one click. It runs `tailscale serve --bg --https=443 http://127.0.0.1:1337`, which gives your Mac a private HTTPS address your phone can reach anywhere. If 443 is taken it uses 8443 or 10000.
+- **Tailscale HTTPS.** The Mac app sets this up in one click. It runs `tailscale serve --bg --https=443 http://127.0.0.1:1337`, which gives your Mac a private HTTPS address your phone can reach anywhere. If something else already serves 443 on your tailnet, it takes the nearest free port above it.
 - **Your local network.** HTTPS on your Mac's `.local` name and private network addresses, for a phone on the same Wi-Fi. The phone installs CGM Relay's own certificate once; the plain port stays on this Mac only.
 - **A reverse proxy or a tunnel,** on a server.
 
