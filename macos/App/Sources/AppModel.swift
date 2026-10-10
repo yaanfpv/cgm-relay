@@ -124,6 +124,10 @@ final class AppModel: ObservableObject {
     /// certificateServer is the one live certificate download link's server,
     /// with the address and certificate it was made for.
     private var certificateServer: (server: CertificateDownloadServer, address: String, certificate: Data)?
+    /// certificateLinkEpoch counts the times a certificate link was ended on
+    /// purpose (the step closed or finished, or the app quitting), so a link
+    /// still being made can tell it was asked for before one of those.
+    private var certificateLinkEpoch = 0
 
     private var latestStatus: EngineStatus?
 
@@ -392,6 +396,7 @@ final class AppModel: ObservableObject {
     /// for the engine process to be gone, so a relaunch never meets a store
     /// the old engine still holds.
     func shutDown() async {
+        certificateLinkEpoch += 1
         await endCertificateLink()
         await statusPoller.stop()
         await supervisor.stopAndWait(timeout: .seconds(3))
@@ -643,6 +648,7 @@ final class AppModel: ObservableObject {
     /// and code, and ends the download link. The stepper stays open, so the
     /// person can set up their app and watch it connect.
     func finishCertificateStep() {
+        certificateLinkEpoch += 1
         settings.localCertificateStepFinished = true
         persistSettings()
         certificateNotice = nil
@@ -653,6 +659,7 @@ final class AppModel: ObservableObject {
     /// closeCertificateStep closes the stepper, finished or not, and ends the
     /// download link.
     func closeCertificateStep() {
+        certificateLinkEpoch += 1
         isCertificateStepPresented = false
         Task { await endCertificateLink() }
     }
@@ -660,8 +667,13 @@ final class AppModel: ObservableObject {
     /// mintCertificateLink makes the one link a phone opens to get CGM
     /// Relay's certificate, served from this Mac's primary private address.
     /// A newer link ends the previous one; the link works once, for a
-    /// couple of minutes.
+    /// couple of minutes. A link still being made when the step is closed,
+    /// or the app quits, is ended and the call throws CancellationError. A
+    /// cancelled caller does not end the link, since the phone may still be
+    /// downloading it.
     func mintCertificateLink(format: CertificateDownloadFormat) async throws -> URL {
+        let epoch = certificateLinkEpoch
+        func stillWanted() -> Bool { isCertificateStepPresented && certificateLinkEpoch == epoch }
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
         let primaryInterfaceName = SystemNetworkInterfaces.primaryInterfaceName()
         guard let address = ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) else {
@@ -674,6 +686,7 @@ final class AppModel: ObservableObject {
         if material.authorityChange != .unchanged {
             applyAuthorityChange(material.authorityChange)
             await restartEngineIfRunning()
+            guard stillWanted() else { throw CancellationError() }
         }
 
         let server: CertificateDownloadServer
@@ -681,10 +694,29 @@ final class AppModel: ObservableObject {
             server = live.server
         } else {
             await endCertificateLink()
+            guard stillWanted() else { throw CancellationError() }
             server = try CertificateDownloadServer(authorityCertificateDER: material.authorityCertificateDER, address: address)
             certificateServer = (server, address, material.authorityCertificateDER)
         }
-        return try await server.mint(format: format)
+        let url: URL
+        do {
+            url = try await server.mint(format: format)
+        } catch {
+            if !stillWanted() { await endCertificateLink(ifServing: server) }
+            throw error
+        }
+        guard stillWanted() else {
+            await endCertificateLink(ifServing: server)
+            throw CancellationError()
+        }
+        return url
+    }
+
+    /// endCertificateLink(ifServing:) ends the link only while `server` is
+    /// still the one being served, so a newer link is left alone.
+    private func endCertificateLink(ifServing server: CertificateDownloadServer) async {
+        guard let live = certificateServer, live.server === server else { return }
+        await endCertificateLink()
     }
 
     /// endCertificateLink stops serving the certificate; called when the step

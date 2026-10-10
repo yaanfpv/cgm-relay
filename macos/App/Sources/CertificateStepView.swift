@@ -261,6 +261,9 @@ struct CertificateStepView: View {
             link = .live(url)
             try? await Task.sleep(for: CertificateDownloadServer.defaultLifetime)
             if !Task.isCancelled { link = .ended }
+        } catch is CancellationError {
+            // The step was closed while the code was being made.
+            return
         } catch {
             link = .failed("Couldn't make a code. Check that this Mac is on your Wi-Fi, then make a new code.")
         }
