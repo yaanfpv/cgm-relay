@@ -12,8 +12,9 @@ import SwiftUI
 /// and shows a plain reason instead of a guess whenever there is none
 /// right now. Setup's connect step is this same view, laid out more compactly,
 /// with its own way out of the blocked state and its own trailing sections.
-/// On the local network route, until the phone has CGM Relay's certificate,
-/// it offers the certificate stepper instead, as a sheet on this pane.
+/// On the local network route, until a phone has CGM Relay's certificate,
+/// it offers the certificate stepper instead, as a sheet on this pane, and
+/// afterwards leads with the same step for each further phone.
 /// The token is read from the Keychain when the view appears, after a
 /// rotation and when the certificate step changes, and held in state.
 struct ConnectPaneView<Extra: View>: View {
@@ -73,12 +74,10 @@ struct ConnectPaneView<Extra: View>: View {
                     message: "Your phone needs CGM Relay's certificate before it can connect over your Wi-Fi.",
                     secondary: nil,
                     actionLabel: "Set Up HTTPS on Your Phone",
-                    action: {
-                        isPresentingCertificateStep = true
-                        model.beginCertificateStep()
-                    }
+                    action: openCertificateStep
                 )
             case .ready(let address):
+                if !isCompact, model.localRoute != nil { addPhoneSection }
                 readySection(address: address)
                 if !isCompact { stepsSection(address: address) }
                 extra(token)
@@ -151,6 +150,28 @@ struct ConnectPaneView<Extra: View>: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
+        }
+    }
+
+    private func openCertificateStep() {
+        isPresentingCertificateStep = true
+        model.beginCertificateStep()
+    }
+
+    /// addPhoneSection leads the local network route once a phone has the
+    /// certificate: the app cannot tell phones apart, so every further phone
+    /// is offered the same step, and nothing here claims which phones have it.
+    private var addPhoneSection: some View {
+        Section {
+            HStack {
+                Text("Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                AccessibleButton("Set Up HTTPS on a Phone…", action: openCertificateStep)
+                    .fixedSize()
+            }
         }
     }
 
