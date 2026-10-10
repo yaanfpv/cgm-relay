@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Button labels read clearly in Light and Dark, including in a window behind another app: white on a deeper teal in Light, and a readable grey when the window is in the background or the button isn't available yet.
 - The disk image opens to a designed window: CGM Relay on the left, Applications on the right, and an arrow showing where to drag it.
 - README lists what's coming next: Windows, a Docker image and systemd unit, more CGM clouds.
+- The relay can serve a phone on your local network over TLS only, on private IPv4 addresses with a certificate you supply, at TLS 1.2 or newer; the loopback address stays plain http.
 
 ### Added
 

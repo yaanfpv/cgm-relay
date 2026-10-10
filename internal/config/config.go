@@ -113,6 +113,18 @@ type Config struct {
 	// headless install has none and the relay refuses to mint pairing codes.
 	// It is never written to the config file and never logged.
 	StatusSecret string `json:"-"`
+	// LANListenAddrs are extra host:port addresses, each a private IPv4
+	// address, on which the relay serves the same API over TLS only, so a
+	// phone on the local network never sends a reading in plaintext. Only `serve
+	// --config-stdin` sets them (as lan_listen_addrs); ValidateLANListenAddrs
+	// is the validation.
+	LANListenAddrs []string `json:"-"`
+	// TLSCertPEM is the PEM server certificate the LAN listeners present,
+	// optionally followed by its chain. Required with LANListenAddrs.
+	TLSCertPEM string `json:"-"`
+	// TLSKeyPEM is the PEM private key for TLSCertPEM. It is never written to
+	// the config file and never logged.
+	TLSKeyPEM string `json:"-"`
 }
 
 // Paths are the on-disk locations Setup writes to and Load reads from.

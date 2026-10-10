@@ -23,8 +23,12 @@ import (
 // under DefaultPaths, the required fields, the key length, retention of
 // at least one day, a loopback-only status address, and an allowed
 // LibreLinkUp base URL -- apply the same way here, sharing the same
-// helpers. A field name it does not recognise is refused rather than
-// ignored.
+// helpers. lan_listen_addrs, tls_cert_pem and tls_key_pem are read only
+// here: the addresses must each be a private IPv4 address, and with any
+// address set the certificate and key must be a matching PEM pair; a
+// refusal names the field and never carries any part of the key.
+// listen_addr is untouched by them. A field name it does not recognise is
+// refused rather than ignored.
 //
 // LoadFromReader decodes exactly one JSON value and returns as soon as it
 // has one: it never reads r to EOF first. r is the caller's own stdin, a
@@ -44,6 +48,10 @@ func LoadFromReader(r io.Reader) (Config, error) {
 		Key           *string `json:"key"`
 		RetentionDays *int    `json:"retention_days"`
 		StatusSecret  string  `json:"status_secret"`
+		// The LAN listener fields shadow Config's json:"-" ones the same way.
+		LANListenAddrs []string `json:"lan_listen_addrs"`
+		TLSCertPEM     string   `json:"tls_cert_pem"`
+		TLSKeyPEM      string   `json:"tls_key_pem"`
 	}
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -66,6 +74,15 @@ func LoadFromReader(r io.Reader) (Config, error) {
 		return Config{}, fmt.Errorf("config: stdin config: status_secret must be at least %d characters", minStatusSecretLength)
 	}
 	cfg.StatusSecret = in.StatusSecret
+	cfg.LANListenAddrs = in.LANListenAddrs
+	cfg.TLSCertPEM = in.TLSCertPEM
+	cfg.TLSKeyPEM = in.TLSKeyPEM
+	if err := ValidateLANListenAddrs(cfg.LANListenAddrs); err != nil {
+		return Config{}, fmt.Errorf("config: stdin config: %w", err)
+	}
+	if _, err := cfg.LANTLSConfig(); err != nil {
+		return Config{}, fmt.Errorf("config: stdin config: %w", err)
+	}
 	if !IsAllowedLibreLinkUpBaseURL(cfg.LibreLinkUpBaseURL) {
 		return Config{}, fmt.Errorf("config: stdin config: librelinkup_base_url must be https, or plain http to a loopback address, got %q", cfg.LibreLinkUpBaseURL)
 	}
