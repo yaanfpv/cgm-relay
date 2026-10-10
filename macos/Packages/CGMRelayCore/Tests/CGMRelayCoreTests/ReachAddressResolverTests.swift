@@ -31,10 +31,37 @@ struct ReachAddressResolverTests {
         #expect(ReachAddressResolver.displayHost(for: .myTailnet, interfaces: noTailnet) == "127.0.0.1")
     }
 
-    @Test("My local network binds to every interface, but displays the actual LAN address")
-    func myLocalNetworkBindsWideDisplaysNarrow() {
-        #expect(ReachAddressResolver.bindHost(for: .myLocalNetwork, interfaces: Self.mixed) == "0.0.0.0")
+    @Test("My local network keeps its plain listener on loopback and displays the private LAN address")
+    func myLocalNetworkPlainListenerStaysOnLoopback() {
+        #expect(ReachAddressResolver.bindHost(for: .myLocalNetwork, interfaces: Self.mixed) == "127.0.0.1")
         #expect(ReachAddressResolver.displayHost(for: .myLocalNetwork, interfaces: Self.mixed) == "192.168.1.42")
+    }
+
+    @Test("the follower port is tested on every interface for My local network, and on the listening host for the others")
+    func portCheckHostCoversEveryListener() {
+        #expect(ReachAddressResolver.portCheckHost(for: .myLocalNetwork, interfaces: Self.mixed) == "0.0.0.0")
+        #expect(ReachAddressResolver.portCheckHost(for: .thisMacOnly, interfaces: Self.mixed) == "127.0.0.1")
+        #expect(ReachAddressResolver.portCheckHost(for: .myTailnet, interfaces: Self.mixed) == "100.101.102.5")
+    }
+
+    @Test("only private addresses on ordinary interfaces are offered to the local network route, each once and in a fixed order")
+    func privateLANAddressesOnly() {
+        let interfaces = [
+            NetworkInterfaceAddress(name: "en1", address: "10.0.0.7"),
+            NetworkInterfaceAddress(name: "en0", address: "192.168.1.42"),
+            NetworkInterfaceAddress(name: "en2", address: "203.0.113.9"),
+            NetworkInterfaceAddress(name: "en3", address: "172.15.0.1"),
+            NetworkInterfaceAddress(name: "en4", address: "172.16.4.2"),
+            NetworkInterfaceAddress(name: "en5", address: "192.168.1.42"),
+            NetworkInterfaceAddress(name: "bridge100", address: "192.168.64.1"),
+            NetworkInterfaceAddress(name: "utun4", address: "100.101.102.5"),
+            NetworkInterfaceAddress(name: "en6", address: "169.254.3.4"),
+        ]
+        #expect(ReachAddressResolver.privateLANIPv4s(among: interfaces) == ["10.0.0.7", "172.16.4.2", "192.168.1.42"])
+        #expect(ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: "en0") == "192.168.1.42")
+        #expect(ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: "en2") == "10.0.0.7", "a public address on the default route is never the one given to a phone")
+        let publicOnly = [NetworkInterfaceAddress(name: "en0", address: "203.0.113.9")]
+        #expect(ReachAddressResolver.displayHostAvailability(for: .myLocalNetwork, interfaces: publicOnly) == .unavailable(reason: "Waiting for a network connection."))
     }
 
     @Test("My local network with no LAN address falls back to loopback for display")
@@ -123,6 +150,8 @@ struct ReachAddressResolverTests {
 
 @Suite("ConnectPaneAddressState")
 struct ConnectPaneAddressStateTests {
+    static let localListen = "127.0.0.1|relay-mac.local|192.168.1.42"
+
     static let cases: [(name: String, reach: NetworkReach, boundHost: String?, impliedBindHost: String, availability: ReachAddressAvailability, want: ConnectPaneAddressState)] = [
         ("This Mac only, engine running", .thisMacOnly, "127.0.0.1", "127.0.0.1", .available("127.0.0.1"), .thisMacOnly),
         ("This Mac only, engine stopped", .thisMacOnly, nil, "127.0.0.1", .available("127.0.0.1"), .thisMacOnly),
@@ -138,16 +167,45 @@ struct ConnectPaneAddressStateTests {
         ("My tailnet, nothing running", .myTailnet, nil, "100.101.102.5", .available("100.101.102.5"), .unavailable(reason: "The engine isn't running right now.")),
         ("My tailnet just chosen with Tailscale connected: engine still bound to its old address", .myTailnet, "0.0.0.0", "100.101.102.5", .available("100.101.102.5"), .unavailable(reason: "The network setting is being applied.")),
 
-        ("consequence: My local network never shows the 0.0.0.0 bind host as ready", .myLocalNetwork, "0.0.0.0", "0.0.0.0", .available("192.168.1.42"), .ready(address: "http://192.168.1.42:1337")),
-        ("My local network, bound but no LAN address right now", .myLocalNetwork, "0.0.0.0", "0.0.0.0", .unavailable(reason: "Waiting for a network connection."), .unavailable(reason: "Waiting for a network connection.")),
-        ("My local network, nothing running", .myLocalNetwork, nil, "0.0.0.0", .available("192.168.1.42"), .unavailable(reason: "The engine isn't running right now.")),
-        ("My local network just chosen: engine still bound to its old This Mac only address", .myLocalNetwork, "127.0.0.1", "0.0.0.0", .available("192.168.1.42"), .unavailable(reason: "The network setting is being applied.")),
+        ("consequence: My local network never shows the loopback listen host, only the https address", .myLocalNetwork, localListen, localListen, .available("192.168.1.42"), .ready(address: "https://192.168.1.42:1337")),
+        ("My local network, bound but no LAN address right now", .myLocalNetwork, localListen, localListen, .unavailable(reason: "Waiting for a network connection."), .unavailable(reason: "Waiting for a network connection.")),
+        ("My local network, nothing running", .myLocalNetwork, nil, localListen, .available("192.168.1.42"), .unavailable(reason: "The engine isn't running right now.")),
+        ("My local network just chosen: engine still bound to its old This Mac only address", .myLocalNetwork, "127.0.0.1", localListen, .available("192.168.1.42"), .unavailable(reason: "The network setting is being applied.")),
+        ("My local network, an address joined since the engine started", .myLocalNetwork, localListen, "127.0.0.1|relay-mac.local|10.0.0.7,192.168.1.42", .available("192.168.1.42"), .unavailable(reason: "The network setting is being applied.")),
     ]
 
     @Test("decide maps every reach, bound host, implied host and availability combination to the pane's own state", arguments: cases)
     func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, boundHost: String?, impliedBindHost: String, availability: ReachAddressAvailability, want: ConnectPaneAddressState)) {
         let got = ConnectPaneAddressState.decide(reach: testCase.reach, boundHost: testCase.boundHost, impliedBindHost: testCase.impliedBindHost, port: 1337, displayHostAvailability: testCase.availability)
         #expect(got == testCase.want)
+    }
+
+    @Test("the local network address names this Mac's .local name when it has one, and always uses https")
+    func localNetworkAddressUsesTheName() {
+        let got = ConnectPaneAddressState.decide(
+            reach: .myLocalNetwork, boundHost: Self.localListen, impliedBindHost: Self.localListen, port: 1337,
+            displayHostAvailability: .available("192.168.1.42"), localHostName: "relay-mac.local"
+        )
+        #expect(got == .ready(address: "https://relay-mac.local:1337"))
+    }
+
+    @Test("until the certificate step is finished the local network route offers no address, and every other route is unaffected")
+    func certificateStepHoldsBackTheLocalRoute() {
+        let local = ConnectPaneAddressState.decide(
+            reach: .myLocalNetwork, boundHost: Self.localListen, impliedBindHost: Self.localListen, port: 1337,
+            displayHostAvailability: .available("192.168.1.42"), localHostName: "relay-mac.local", certificateStepFinished: false
+        )
+        #expect(local == .certificateStepNeeded)
+        let stopped = ConnectPaneAddressState.decide(
+            reach: .myLocalNetwork, boundHost: nil, impliedBindHost: Self.localListen, port: 1337,
+            displayHostAvailability: .available("192.168.1.42"), certificateStepFinished: false
+        )
+        #expect(stopped == .unavailable(reason: "The engine isn't running right now."), "a reason that is about the network is still said first")
+        let tailnet = ConnectPaneAddressState.decide(
+            reach: .myTailnet, boundHost: "100.101.102.5", impliedBindHost: "100.101.102.5", port: 1337,
+            displayHostAvailability: .available("100.101.102.5"), certificateStepFinished: false
+        )
+        #expect(tailnet == .ready(address: "http://100.101.102.5:1337"))
     }
 }
 

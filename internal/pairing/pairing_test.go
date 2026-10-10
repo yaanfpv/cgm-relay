@@ -113,6 +113,9 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 	if strings.Contains(body, "{token}") {
 		t.Error("a token placeholder was left unfilled")
 	}
+	if strings.Contains(body, "http://") {
+		t.Error("the page offers a plain http address")
+	}
 	// An app's steps come before its values, and the values keep the order
 	// the Mac sent them in.
 	order := []string{"Leave the secret blank.", ">URL</div>", ">Token</div>", ">Second App</h2>"}

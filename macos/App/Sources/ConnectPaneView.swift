@@ -62,6 +62,14 @@ struct ConnectPaneView<Extra: View>: View {
                 )
             case .unavailable(let reason):
                 blockedSection(symbol: "clock", message: reason, secondary: nil, actionLabel: nil, action: nil)
+            case .certificateStepNeeded:
+                blockedSection(
+                    symbol: "lock.shield",
+                    message: "Your phone needs CGM Relay's certificate before it can connect over your Wi-Fi.",
+                    secondary: nil,
+                    actionLabel: "Set Up HTTPS on Your Phone",
+                    action: model.beginCertificateStep
+                )
             case .ready(let address):
                 readySection(address: address)
                 if !isCompact { stepsSection(address: address) }
@@ -72,6 +80,9 @@ struct ConnectPaneView<Extra: View>: View {
         .frame(maxWidth: .infinity, alignment: .top)
         .task(id: pairingKey) {
             if let readyAddress { await keepPairingCodeFresh(address: readyAddress) }
+        }
+        .onChange(of: model.settings.needsCertificateStep) {
+            token = model.currentToken() ?? ""
         }
         .onAppear {
             token = model.currentToken() ?? ""
@@ -153,7 +164,12 @@ struct ConnectPaneView<Extra: View>: View {
 
     private var currentQR: FollowerQR? {
         guard let address = readyAddress else { return nil }
-        return FollowerQRPlanner.qr(for: followerApp, address: address, token: token, pairingCode: pairingCode?.code)
+        return FollowerQRPlanner.qr(
+            for: followerApp,
+            address: model.followerAddress(for: followerApp, readyAddress: address),
+            token: token,
+            pairingCode: pairingCode?.code
+        )
     }
 
     @ViewBuilder
@@ -213,7 +229,7 @@ struct ConnectPaneView<Extra: View>: View {
     }
 
     private func stepsBlock(address: String) -> some View {
-        let instructions = FollowerAppEntry.instructions(for: followerApp, address: address)
+        let instructions = FollowerAppEntry.instructions(for: followerApp, address: model.followerAddress(for: followerApp, readyAddress: address))
         return VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(instructions.steps.enumerated()), id: \.offset) { _, step in
                 Text(step)
@@ -257,8 +273,9 @@ struct ConnectPaneView<Extra: View>: View {
     /// little before ever truncating it: it is exactly the string a person
     /// has to read and retype on their phone, so it never breaks inside a
     /// hostname.
-    private func addressRow(address: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private func addressRow(address readyAddress: String) -> some View {
+        let address = model.followerAddress(for: followerApp, readyAddress: readyAddress)
+        return VStack(alignment: .leading, spacing: 6) {
             Text("Address")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)

@@ -35,6 +35,14 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
     /// caller of its local status listener. nil leaves the engine without
     /// one, so it refuses to mint pairing codes.
     public var statusSecret: String?
+    /// lanListenAddrs are the private host:port addresses the engine serves
+    /// over TLS only, tlsCertPEM and tlsKeyPEM the certificate chain and key
+    /// it presents there. All three are nil, and left out of the JSON, unless
+    /// the local network route is on. The key travels here on stdin and is
+    /// never written anywhere else.
+    public var lanListenAddrs: [String]?
+    public var tlsCertPEM: String?
+    public var tlsKeyPEM: String?
 
     private enum CodingKeys: String, CodingKey {
         case librelinkupEmail = "librelinkup_email"
@@ -47,6 +55,9 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         case key
         case librelinkupBaseURL = "librelinkup_base_url"
         case statusSecret = "status_secret"
+        case lanListenAddrs = "lan_listen_addrs"
+        case tlsCertPEM = "tls_cert_pem"
+        case tlsKeyPEM = "tls_key_pem"
     }
 
     public init(
@@ -59,7 +70,10 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         retentionDays: Int,
         key: String,
         librelinkupBaseURL: String? = nil,
-        statusSecret: String? = nil
+        statusSecret: String? = nil,
+        lanListenAddrs: [String] = [],
+        tlsCertPEM: String? = nil,
+        tlsKeyPEM: String? = nil
     ) {
         self.librelinkupEmail = librelinkupEmail
         self.librelinkupPassword = librelinkupPassword
@@ -71,6 +85,9 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         self.key = key
         self.librelinkupBaseURL = librelinkupBaseURL
         self.statusSecret = statusSecret
+        self.lanListenAddrs = lanListenAddrs.isEmpty ? nil : lanListenAddrs
+        self.tlsCertPEM = lanListenAddrs.isEmpty ? nil : tlsCertPEM
+        self.tlsKeyPEM = lanListenAddrs.isEmpty ? nil : tlsKeyPEM
     }
 
     /// withStatusSecret returns this configuration carrying secret as its
@@ -101,7 +118,10 @@ public enum EngineConfigurationBuilder {
         statusAddr: String,
         databasePath: String,
         retentionDays: Int,
-        librelinkupBaseURL: String? = nil
+        librelinkupBaseURL: String? = nil,
+        lanListenAddrs: [String] = [],
+        tlsCertPEM: String? = nil,
+        tlsKeyPEM: String? = nil
     ) throws -> EngineConfiguration? {
         guard
             let email = try store.string(for: .librelinkupEmail), !email.isEmpty,
@@ -120,7 +140,10 @@ public enum EngineConfigurationBuilder {
             databasePath: databasePath,
             retentionDays: retentionDays,
             key: key,
-            librelinkupBaseURL: librelinkupBaseURL
+            librelinkupBaseURL: librelinkupBaseURL,
+            lanListenAddrs: lanListenAddrs,
+            tlsCertPEM: tlsCertPEM,
+            tlsKeyPEM: tlsKeyPEM
         )
     }
 }

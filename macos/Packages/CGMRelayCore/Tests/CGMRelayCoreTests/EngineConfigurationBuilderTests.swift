@@ -105,6 +105,33 @@ struct EngineConfigurationBuilderTests {
         #expect(unsent["status_secret"] == nil)
     }
 
+    @Test("the LAN listener fields reach stdin only when there is a listener, with the key among them")
+    func lanFieldsAreEncodedOnlyWhenNonEmpty() throws {
+        let base = EngineConfiguration.fixture()
+        let plain = try #require(JSONSerialization.jsonObject(with: base.encodedForStandardInput()) as? [String: Any])
+        #expect(plain["lan_listen_addrs"] == nil && plain["tls_cert_pem"] == nil && plain["tls_key_pem"] == nil)
+
+        let withListener = EngineConfiguration(
+            librelinkupEmail: base.librelinkupEmail, librelinkupPassword: base.librelinkupPassword, token: base.token,
+            listenAddr: base.listenAddr, statusAddr: base.statusAddr, databasePath: base.databasePath,
+            retentionDays: base.retentionDays, key: base.key,
+            lanListenAddrs: ["192.168.1.42:1337"], tlsCertPEM: "CERT", tlsKeyPEM: "KEY"
+        )
+        let sent = try #require(JSONSerialization.jsonObject(with: withListener.encodedForStandardInput()) as? [String: Any])
+        #expect(sent["lan_listen_addrs"] as? [String] == ["192.168.1.42:1337"])
+        #expect(sent["tls_cert_pem"] as? String == "CERT")
+        #expect(sent["tls_key_pem"] as? String == "KEY")
+
+        let empty = EngineConfiguration(
+            librelinkupEmail: base.librelinkupEmail, librelinkupPassword: base.librelinkupPassword, token: base.token,
+            listenAddr: base.listenAddr, statusAddr: base.statusAddr, databasePath: base.databasePath,
+            retentionDays: base.retentionDays, key: base.key,
+            lanListenAddrs: [], tlsCertPEM: "CERT", tlsKeyPEM: "KEY"
+        )
+        let none = try #require(JSONSerialization.jsonObject(with: empty.encodedForStandardInput()) as? [String: Any])
+        #expect(none["lan_listen_addrs"] == nil && none["tls_cert_pem"] == nil && none["tls_key_pem"] == nil, "a certificate with no listener is never sent")
+    }
+
     @Test("each renewal makes a new 32-byte URL-safe secret that stays unusable until armed, arming ignores any other value, and clear forgets it")
     func secretLifecycle() throws {
         let secret = LocalStatusSecret(randomBytes: FakeRandomBytesGenerator())
