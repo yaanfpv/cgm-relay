@@ -46,9 +46,9 @@ struct ReachChoicesView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("The connection is not encrypted on your local network.")
+                Text("Each phone installs CGM Relay's certificate once, then reads over HTTPS.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
             }
         }
     }

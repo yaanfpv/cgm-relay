@@ -67,9 +67,10 @@ public enum BoundAddressDecision: Sendable, Equatable {
 /// agree, myTailnet checks the bound host against the Tailscale range
 /// itself, since a not-yet-connected tailnet leaves the engine bound to
 /// its own loopback fallback instead of a real tailnet address;
-/// myLocalNetwork uses the current LAN display address rather than the
-/// bind host, since the engine binds every interface there (0.0.0.0) and
-/// no follower could ever use that literally. thisMacOnly always has a
+/// myLocalNetwork uses this Mac's `.local` name (or, without one, its
+/// current LAN address) over https, since the engine listens there on each
+/// private address with TLS and the loopback host is no address a follower
+/// could use. thisMacOnly always has a
 /// real, bindable address (127.0.0.1) but a phone can never use it, which
 /// is a different fact from "no address exists" and gets its own case so
 /// the pane can explain it rather than silently omitting the QR code with
@@ -78,6 +79,10 @@ public enum ConnectPaneAddressState: Sendable, Equatable {
     case thisMacOnly
     case unavailable(reason: String)
     case ready(address: String)
+    /// certificateStepNeeded is the local network route before the phone has
+    /// been given CGM Relay's certificate: no address, token or code is
+    /// offered until the person has done that step.
+    case certificateStepNeeded
 
     /// decide is the pane's one pure mapping from network state to what it
     /// shows: boundHost is the host the running engine is actually bound to
@@ -86,14 +91,20 @@ public enum ConnectPaneAddressState: Sendable, Equatable {
     /// (ReachAddressResolver.bindHost's own answer, computed once by the
     /// caller and never recomputed here); and displayHostAvailability is
     /// ReachAddressResolver.displayHostAvailability's own answer for the
-    /// current interfaces. Nothing here reads live system state itself, so
-    /// it is exercised with a plain table of inputs.
+    /// current interfaces. localHostName is this Mac's `.local` name, used
+    /// in the local network address where there is one; certificateStepFinished
+    /// is whether the person has finished the certificate step for the local
+    /// network route, which holds back every address until they have. Nothing
+    /// here reads live system state itself, so it is exercised with a plain
+    /// table of inputs.
     public static func decide(
         reach: NetworkReach,
         boundHost: String?,
         impliedBindHost: String,
         port: Int,
-        displayHostAvailability: ReachAddressAvailability
+        displayHostAvailability: ReachAddressAvailability,
+        localHostName: String? = nil,
+        certificateStepFinished: Bool = true
     ) -> ConnectPaneAddressState {
         switch reach {
         case .thisMacOnly:
@@ -118,7 +129,8 @@ public enum ConnectPaneAddressState: Sendable, Equatable {
             }
             switch displayHostAvailability {
             case .available(let host):
-                return .ready(address: "http://\(host):\(port)")
+                guard certificateStepFinished else { return .certificateStepNeeded }
+                return .ready(address: "https://\(localHostName ?? host):\(port)")
             case .unavailable(let reason):
                 return .unavailable(reason: reason)
             }
@@ -266,28 +278,66 @@ public enum ReachAddressResolver {
     }
 
     /// bindHost is the host part of the engine's own listen_addr for
-    /// reach: 127.0.0.1 for thisMacOnly; the discovered Tailscale address
-    /// for myTailnet, so the engine is reachable only on the tailnet
-    /// interface itself, never the plain local network -- falling back to
-    /// 127.0.0.1, the most restrictive host, if this Mac currently has no
-    /// tailnet address at all; and 0.0.0.0 for myLocalNetwork, which
-    /// accepts a connection from any interface, tailnet included.
+    /// reach: 127.0.0.1 for thisMacOnly and myLocalNetwork (the local
+    /// network is served by the TLS listeners on each private address, see
+    /// EngineListenPlan, and the plain listener never leaves this Mac); the
+    /// discovered Tailscale address for myTailnet, so the engine is
+    /// reachable only on the tailnet interface itself, never the plain local
+    /// network -- falling back to 127.0.0.1, the most restrictive host, if
+    /// this Mac currently has no tailnet address at all.
     public static func bindHost(for reach: NetworkReach, interfaces: [NetworkInterfaceAddress]) -> String {
         switch reach {
-        case .thisMacOnly:
+        case .thisMacOnly, .myLocalNetwork:
             return "127.0.0.1"
         case .myTailnet:
             return tailscaleIPv4(among: interfaces) ?? "127.0.0.1"
-        case .myLocalNetwork:
-            return "0.0.0.0"
         }
     }
 
-    /// displayHost is the address the Connect pane shows and encodes into
+    /// portCheckHost is the host a follower port is tested on before the
+    /// engine starts. The local network route listens on loopback and on each
+    /// private address, so it is tested on every interface (0.0.0.0), which
+    /// is also what a port held by another app on any of them would block.
+    public static func portCheckHost(for reach: NetworkReach, interfaces: [NetworkInterfaceAddress]) -> String {
+        switch reach {
+        case .myLocalNetwork:
+            return "0.0.0.0"
+        case .thisMacOnly, .myTailnet:
+            return bindHost(for: reach, interfaces: interfaces)
+        }
+    }
+
+    /// isPrivateIPv4 reports whether address is a dotted-quad inside the
+    /// 10, 172.16 and 192.168 ranges, the only addresses the local
+    /// certificate can name.
+    static func isPrivateIPv4(_ address: String) -> Bool {
+        (try? LocalCertificateAuthority.normalizedAddresses([address])) != nil
+    }
+
+    /// privateLANIPv4s is every private IPv4 address this Mac has on an
+    /// ordinary Wi-Fi or wired interface, without duplicates and in a fixed
+    /// order: the addresses the local network route listens on and names in
+    /// its certificate.
+    public static func privateLANIPv4s(among interfaces: [NetworkInterfaceAddress]) -> [String] {
+        Set(interfaces.filter(isPhysicalLANCandidate).map(\.address).filter(isPrivateIPv4)).sorted()
+    }
+
+    /// primaryPrivateLANIPv4 is the private address a phone is given when an
+    /// app takes an address rather than a name: the one on the interface
+    /// carrying the default route when it has one, otherwise the first.
+    public static func primaryPrivateLANIPv4(among interfaces: [NetworkInterfaceAddress], primaryInterfaceName: String? = nil) -> String? {
+        let candidates = interfaces.filter { isPhysicalLANCandidate($0) && isPrivateIPv4($0.address) }
+        if let primaryInterfaceName, let onPrimary = candidates.first(where: { $0.name == primaryInterfaceName }) {
+            return onPrimary.address
+        }
+        return candidates.first?.address
+    }
+
+    /// displayHost is the host the Connect pane shows and encodes into
     /// its QR code: the same as bindHost for thisMacOnly and myTailnet,
     /// since both bind to exactly the address a follower would use, but
-    /// this Mac's actual LAN address for myLocalNetwork, since a follower
-    /// given the literal 0.0.0.0 could never connect with it. Falls back
+    /// this Mac's own private LAN address for myLocalNetwork, since the
+    /// engine's plain listener there is loopback only. Falls back
     /// to 127.0.0.1 when this Mac currently has no address of the kind
     /// the chosen reach needs -- the same safe default bindHost falls
     /// back to.
@@ -298,7 +348,7 @@ public enum ReachAddressResolver {
         case .myTailnet:
             return tailscaleIPv4(among: interfaces) ?? "127.0.0.1"
         case .myLocalNetwork:
-            return primaryLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) ?? "127.0.0.1"
+            return primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) ?? "127.0.0.1"
         }
     }
 
@@ -317,7 +367,7 @@ public enum ReachAddressResolver {
             }
             return .unavailable(reason: "Waiting for Tailscale to connect.")
         case .myLocalNetwork:
-            if let host = primaryLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) {
+            if let host = primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) {
                 return .available(host)
             }
             return .unavailable(reason: "Waiting for a network connection.")
@@ -394,4 +444,16 @@ public enum SystemNetworkInterfaces {
     #else
     public static func primaryInterfaceName() -> String? { nil }
     #endif
+
+    /// localHostName is this Mac's `.local` name: its Bonjour name when the
+    /// system has one, otherwise its host name, either made into a valid
+    /// `.local` name by LocalHostName.mdnsName.
+    public static func localHostName() -> String {
+        #if canImport(SystemConfiguration)
+        if let bonjour = SCDynamicStoreCopyLocalHostName(nil) as String?, let name = LocalHostName.mdnsName(from: bonjour) {
+            return name
+        }
+        #endif
+        return LocalHostName.mdnsName(from: ProcessInfo.processInfo.hostName) ?? LocalHostName.fallback
+    }
 }

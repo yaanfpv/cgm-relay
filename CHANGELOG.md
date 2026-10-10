@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The relay can serve a phone on your local network over TLS only, on private IPv4 addresses with a certificate you supply, at TLS 1.2 or newer; the loopback address stays plain http.
 - Add a phone by pointing its camera at a code on your Mac: CGM Relay hands the phone its certificate once, over your home network, from a link that works for two minutes, so you can trust the relay without typing anything.
 - Your phone can reach the relay over HTTPS on your home Wi-Fi without a public certificate: CGM Relay keeps its own small certificate authority, limited to your Mac's .local name and private network addresses, and issues the relay's certificate from it.
+- On your local network, every address CGM Relay gives a follower app is now https, by your Mac's .local name where the app can use one: readings no longer cross your Wi-Fi in plaintext, and the token and codes appear once your phone has the certificate.
 
 ### Added
 

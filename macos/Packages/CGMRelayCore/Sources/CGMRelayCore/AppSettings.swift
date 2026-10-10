@@ -74,6 +74,11 @@ public struct AppSettings: Equatable, Sendable {
     /// safetyNoticeAcceptance is the safety notice wording the person last
     /// accepted, nil until they have; see SafetyNotice.needsAcceptance.
     public var safetyNoticeAcceptance: SafetyNoticeAcceptance?
+    /// localCertificateStepFinished is whether the person has finished giving
+    /// their phone CGM Relay's certificate, which the local network route
+    /// needs before a phone can connect over https. It is per Mac, and is
+    /// cleared when the certificate authority is made again.
+    public var localCertificateStepFinished: Bool
 
     /// effectiveReach is the reach the relay is actually bound to: this
     /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
@@ -104,7 +109,8 @@ public struct AppSettings: Equatable, Sendable {
         setupFinished: false,
         showReadingInMenuBar: defaultShowReadingInMenuBar,
         connectFollowerApp: .xDrip4iOS,
-        safetyNoticeAcceptance: nil
+        safetyNoticeAcceptance: nil,
+        localCertificateStepFinished: false
     )
 
     public init(
@@ -119,7 +125,8 @@ public struct AppSettings: Equatable, Sendable {
         setupFinished: Bool = false,
         showReadingInMenuBar: Bool = AppSettings.defaultShowReadingInMenuBar,
         connectFollowerApp: FollowerApp = .xDrip4iOS,
-        safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil
+        safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil,
+        localCertificateStepFinished: Bool = false
     ) {
         self.port = port
         self.reach = reach
@@ -133,6 +140,7 @@ public struct AppSettings: Equatable, Sendable {
         self.showReadingInMenuBar = showReadingInMenuBar
         self.connectFollowerApp = connectFollowerApp
         self.safetyNoticeAcceptance = safetyNoticeAcceptance
+        self.localCertificateStepFinished = localCertificateStepFinished
     }
 }
 
@@ -147,6 +155,7 @@ extension AppSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
         case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
+        case localCertificateStepFinished
     }
 
     public init(from decoder: Decoder) throws {
@@ -166,6 +175,7 @@ extension AppSettings: Codable {
         // back to the default rather than failing the whole decode.
         connectFollowerApp = ((try? container.decodeIfPresent(FollowerApp.self, forKey: .connectFollowerApp)) ?? nil) ?? fallback.connectFollowerApp
         safetyNoticeAcceptance = ((try? container.decodeIfPresent(SafetyNoticeAcceptance.self, forKey: .safetyNoticeAcceptance)) ?? nil)
+        localCertificateStepFinished = try container.decodeIfPresent(Bool.self, forKey: .localCertificateStepFinished) ?? fallback.localCertificateStepFinished
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -182,6 +192,7 @@ extension AppSettings: Codable {
         try container.encode(showReadingInMenuBar, forKey: .showReadingInMenuBar)
         try container.encode(connectFollowerApp, forKey: .connectFollowerApp)
         try container.encodeIfPresent(safetyNoticeAcceptance, forKey: .safetyNoticeAcceptance)
+        try container.encode(localCertificateStepFinished, forKey: .localCertificateStepFinished)
     }
 }
 
