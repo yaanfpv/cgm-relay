@@ -295,7 +295,7 @@ struct LocalCertificateAuthorityTests {
         let oldAuthority = try Certificate(derEncoded: Array(old.authorityCertificateDER))
 
         let renamed = try authority.currentMaterial(name: newHost, ipv4s: ["192.168.1.20"])
-        #expect(renamed.authorityChange == .replaced)
+        #expect(renamed.authorityChange == .replaced(.renamed))
         #expect(renamed.phonesMustInstallCertificate)
         #expect(renamed.authorityCertificateDER != old.authorityCertificateDER)
 
@@ -335,8 +335,47 @@ struct LocalCertificateAuthorityTests {
         try store.setString(P256.Signing.PrivateKey().pemRepresentation, for: .authorityKey)
 
         let second = try authority.currentMaterial(name: Self.host, ipv4s: [])
-        #expect(second.authorityChange == .replaced)
+        #expect(second.authorityChange == .replaced(.unusable), "the name did not change, so it is not reported as a rename")
         #expect(second.authorityCertificateDER != first.authorityCertificateDER)
+    }
+
+    @Test("an authority replaced while the name stayed the same is never reported as a rename")
+    func replacementReasonsUnderTheSameName() throws {
+        let now = Date()
+        let expiredKey = P256.Signing.PrivateKey()
+        let expired = try LocalCertificateAuthority.issueAuthorityCertificate(
+            key: expiredKey, host: Self.host,
+            notBefore: LocalCertificateAuthority.whole(now - 20 * Self.day), notAfter: LocalCertificateAuthority.whole(now - Self.day))
+        let foreignKey = P256.Signing.PrivateKey()
+        let foreign = try Certificate(
+            version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: Certificate.PublicKey(foreignKey.publicKey),
+            notValidBefore: now - 3600, notValidAfter: now + 100 * Self.day,
+            issuer: try DistinguishedName { CommonName("Someone Else") }, subject: try DistinguishedName { CommonName("Someone Else") },
+            signatureAlgorithm: .ecdsaWithSHA256,
+            extensions: try Certificate.Extensions {
+                Critical(BasicConstraints.isCertificateAuthority(maxPathLength: 0))
+                Critical(LocalCertificateAuthority.authorityNameConstraints(host: Self.host))
+            },
+            issuerPrivateKey: Certificate.PrivateKey(foreignKey))
+
+        let cases: [(String, [CredentialKey: String?], LocalCertificateMaterial.ReplacementReason)] = [
+            ("expired", [.authorityKey: expiredKey.pemRepresentation, .authorityCertificate: try expired.serializeAsPEM().pemString], .expired),
+            ("missing key", [.authorityKey: nil], .unusable),
+            ("missing certificate", [.authorityCertificate: nil], .unusable),
+            ("malformed certificate", [.authorityCertificate: "-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n"], .unusable),
+            ("malformed key", [.authorityKey: "not a key"], .unusable),
+            ("foreign authority", [.authorityKey: foreignKey.pemRepresentation, .authorityCertificate: try foreign.serializeAsPEM().pemString], .unusable),
+        ]
+        for (label, overrides, reason) in cases {
+            let store = FakeCredentialStore()
+            let authority = LocalCertificateAuthority(store: store)
+            _ = try authority.currentMaterial(name: Self.host, ipv4s: [])
+            for (key, value) in overrides {
+                if let value { try store.setString(value, for: key) } else { try store.removeAll([key]) }
+            }
+            let replaced = try authority.currentMaterial(name: Self.host, ipv4s: [])
+            #expect(replaced.authorityChange == .replaced(reason), "\(label)")
+        }
     }
 
     @Test("a failed write leaves the stored authority and server certificate as they were")
@@ -468,7 +507,7 @@ struct LocalCertificateAuthoritySecrecyTests {
         }
 
         #expect(authorityKeys[0] == authorityKeys[1] && authorityKeys[1] != authorityKeys[2], "renewing keeps the authority key and a rename makes a new one")
-        #expect(handedBack.map(\.authorityChange) == [.created, .unchanged, .replaced])
+        #expect(handedBack.map(\.authorityChange) == [.created, .unchanged, .replaced(.renamed)])
 
         // Every authority key that was made, including the one whose write failed.
         let attempted = store.attemptedAuthorityKeys

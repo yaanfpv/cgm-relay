@@ -199,10 +199,16 @@ struct LocalHTTPSRouteTests {
         #expect(settings.noteAuthorityChange(.unchanged) == nil)
         #expect(settings.localCertificateStepFinished)
 
-        #expect(settings.noteAuthorityChange(.replaced) == "This Mac's name changed, so each phone needs the HTTPS step again.")
+        #expect(settings.noteAuthorityChange(.replaced(.renamed)) == "This Mac's name changed, so each phone needs the HTTPS step again.")
         #expect(!settings.localCertificateStepFinished)
 
-        #expect(settings.noteAuthorityChange(.replaced) == nil, "nothing was finished, so there is nothing to say")
+        #expect(settings.noteAuthorityChange(.replaced(.renamed)) == nil, "nothing was finished, so there is nothing to say")
+
+        settings.localCertificateStepFinished = true
+        #expect(settings.noteAuthorityChange(.replaced(.expired)) == "CGM Relay's certificate expired and was replaced, so each phone needs the HTTPS step again.")
+        settings.localCertificateStepFinished = true
+        #expect(settings.noteAuthorityChange(.replaced(.unusable)) == "CGM Relay's saved certificate couldn't be used and was replaced, so each phone needs the HTTPS step again.")
+        #expect(!settings.localCertificateStepFinished)
 
         settings.localCertificateStepFinished = true
         #expect(settings.noteAuthorityChange(.created) == nil)
@@ -212,7 +218,7 @@ struct LocalHTTPSRouteTests {
     @Test("the sentence about a replaced authority is the menu's detail line, and never replaces a failure's own detail")
     func menuDetailLine() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let notice = AppSettings.authorityReplacedNotice
+        let notice = AppSettings.authorityReplacedNotice(.renamed)
         let running = MenuDisplayState.make(
             credentialsConfigured: true, engineState: .running,
             status: EngineStatus(running: true, lastReadingTime: now, lastReadingMgDl: 120), now: now, certificateNotice: notice

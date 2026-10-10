@@ -16,10 +16,22 @@ public struct LocalCertificateMaterial: Sendable, Equatable {
         case unchanged
         /// There was no authority before this call.
         case created
-        /// An earlier authority existed but could not be kept, for example
-        /// because this Mac's name changed, so phones that trusted it must
-        /// install the new certificate.
-        case replaced
+        /// An earlier authority existed but could not be kept, so phones that
+        /// trusted it must install the new certificate. The reason says why.
+        case replaced(ReplacementReason)
+    }
+
+    /// ReplacementReason is why an earlier authority was not kept.
+    public enum ReplacementReason: Sendable, Equatable {
+        /// It was whole and still valid, but made for another `.local` name:
+        /// this Mac's name changed.
+        case renamed
+        /// It was whole but past its end date.
+        case expired
+        /// It could not be read or did not fit together: a key missing,
+        /// malformed or not matching the certificate, or a certificate
+        /// missing, malformed or not made the way CGM Relay makes one.
+        case unusable
     }
 
     public let authorityCertificateDER: Data
@@ -88,7 +100,9 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
                 authority = kept
             } else {
                 authority = try Self.makeAuthority(host: host, now: now)
-                change = stored[.authorityKey] == nil && stored[.authorityCertificate] == nil ? .created : .replaced
+                change = stored[.authorityKey] == nil && stored[.authorityCertificate] == nil
+                    ? .created
+                    : .replaced(Self.replacementReason(stored, host: host, now: now))
                 writes[.authorityKey] = authority.key.pemRepresentation
                 writes[.authorityCertificate] = try authority.certificate.serializeAsPEM().pemString
             }
@@ -140,9 +154,9 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
     }
 
     /// keptAuthority returns the stored authority only when it is whole and
-    /// still right: its key matches its certificate, its constraints are
-    /// exactly the ones for host, and it has not expired. Anything else is
-    /// treated as absent, never repaired.
+    /// still right: its key matches its certificate, its name and constraints
+    /// are exactly the ones CGM Relay gives an authority for host, and it has
+    /// not expired. Anything else is treated as absent, never repaired.
     private static func keptAuthority(_ stored: [CredentialKey: String], host: String, now: Date) -> Authority? {
         guard let keyPEM = stored[.authorityKey],
             let certificatePEM = stored[.authorityCertificate],
@@ -151,9 +165,31 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
             certificate.publicKey == Certificate.PublicKey(key.publicKey),
             let nameConstraints = try? certificate.extensions.nameConstraints,
             nameConstraints == authorityNameConstraints(host: host),
+            let subject = try? authoritySubject(host: host),
+            certificate.subject == subject,
             certificate.notValidAfter > now
         else { return nil }
         return Authority(key: key, certificate: certificate)
+    }
+
+    /// replacementReason says why a stored authority that keptAuthority
+    /// refused was not kept. Only an authority that is whole, unexpired and
+    /// made exactly as CGM Relay makes one for a different `.local` name counts
+    /// as a rename.
+    private static func replacementReason(_ stored: [CredentialKey: String], host: String, now: Date) -> LocalCertificateMaterial.ReplacementReason {
+        guard let keyPEM = stored[.authorityKey],
+            let certificatePEM = stored[.authorityCertificate],
+            let key = try? P256.Signing.PrivateKey(pemRepresentation: keyPEM),
+            let certificate = try? Certificate(pemEncoded: certificatePEM),
+            certificate.publicKey == Certificate.PublicKey(key.publicKey),
+            let nameConstraints = try? certificate.extensions.nameConstraints,
+            let earlierHost = nameConstraints.permittedDNSDomains.first,
+            nameConstraints == authorityNameConstraints(host: earlierHost),
+            let earlierSubject = try? authoritySubject(host: earlierHost),
+            certificate.subject == earlierSubject
+        else { return .unusable }
+        if certificate.notValidAfter <= now { return .expired }
+        return earlierHost == host ? .unusable : .renamed
     }
 
     /// keptServer returns the stored server certificate only when it is
@@ -222,10 +258,7 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
         notBefore: Date,
         notAfter: Date
     ) throws -> Certificate {
-        let subject = try DistinguishedName {
-            OrganizationName("CGM Relay")
-            CommonName("CGM Relay on \(host)")
-        }
+        let subject = try authoritySubject(host: host)
         let publicKey = Certificate.PublicKey(key.publicKey)
         return try Certificate(
             version: .v3,
@@ -244,6 +277,14 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
             },
             issuerPrivateKey: Certificate.PrivateKey(key)
         )
+    }
+
+    /// authoritySubject is the name an authority made for host carries.
+    static func authoritySubject(host: String) throws -> DistinguishedName {
+        try DistinguishedName {
+            OrganizationName("CGM Relay")
+            CommonName("CGM Relay on \(host)")
+        }
     }
 
     /// issueServerCertificate signs a server certificate for host and

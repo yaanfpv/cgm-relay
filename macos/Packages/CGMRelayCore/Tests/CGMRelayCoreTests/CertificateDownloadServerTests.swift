@@ -20,7 +20,8 @@ struct CertificateDownloadServerTests {
 
     private static func makeFixture(
         lifetime: Duration = .seconds(20),
-        randomBytes: any RandomBytesGenerating = SecureRandomBytesGenerator()
+        randomBytes: any RandomBytesGenerating = SecureRandomBytesGenerator(),
+        expiresOnTimer: Bool = true
     ) throws -> Fixture {
         let store = FakeCredentialStore(values: [
             .token: followerToken,
@@ -32,7 +33,8 @@ struct CertificateDownloadServerTests {
             authorityCertificateDER: material.authorityCertificateDER,
             unrestrictedAddress: "127.0.0.1",
             lifetime: lifetime,
-            randomBytes: randomBytes
+            randomBytes: randomBytes,
+            expiresOnTimer: expiresOnTimer
         )
         return Fixture(server: server, material: material)
     }
@@ -336,6 +338,12 @@ struct CertificateDownloadServerTests {
 
         let expired = DownloadCapability(token: "tok", response: response, lifetime: .zero)
         #expect(expired.reserve(token) == nil)
+
+        let lapsed = DownloadCapability(token: "tok", response: response, lifetime: .zero, expiresOnTimer: false)
+        #expect(lapsed.endIfExpired())
+        let current = DownloadCapability(token: "tok", response: response, lifetime: .seconds(60))
+        #expect(!current.endIfExpired())
+        #expect(current.reserve(token) != nil)
     }
 
     // MARK: Everything else is an empty 404
@@ -445,6 +453,29 @@ struct CertificateDownloadServerTests {
         let closed = await waitUntil(timeout: .seconds(5), pollInterval: .milliseconds(50)) {
             do {
                 let client = try await RawClient.connect(port: port)
+                client.cancel()
+                return false
+            } catch {
+                return true
+            }
+        }
+        #expect(closed)
+        await fixture.server.close()
+    }
+
+    @Test("a connection after the lifetime is refused and closes the listener, even before the timer fires")
+    func lateConnectionClosesTheListener() async throws {
+        let fixture = try Self.makeFixture(lifetime: .milliseconds(300), expiresOnTimer: false)
+        let url = try await fixture.server.mint(format: .android)
+        try await Task.sleep(for: .milliseconds(500))
+        // The first late connection gets no answer at all, and after it
+        // nothing accepts connections.
+        await #expect(throws: (any Error).self) {
+            _ = try await HTTPReply.get(url)
+        }
+        let closed = await waitUntil(timeout: .seconds(5), pollInterval: .milliseconds(50)) {
+            do {
+                let client = try await RawClient.connect(port: url.port!)
                 client.cancel()
                 return false
             } catch {

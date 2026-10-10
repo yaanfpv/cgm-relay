@@ -346,18 +346,15 @@ struct ConnectPaneView<Extra: View>: View {
     /// tokenRow mirrors addressRow's own layout (a label above a value row
     /// with its buttons trailing) so the two rows' Copy buttons share one
     /// trailing edge. The buttons always keep their own size; the token
-    /// wraps inside the space they leave.
+    /// wraps inside the space they leave, between any two characters and
+    /// never with a hyphen, since it is typed exactly as shown.
     private var tokenRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Token")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
-                Text(tokenRevealed ? token : String(repeating: "•", count: 12))
-                    .textSelection(.enabled)
-                    .font(.system(.body, design: .monospaced))
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                ExactWrappingText(text: tokenRevealed ? token : String(repeating: "•", count: 12))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
                     AccessibleButton(tokenRevealed ? "Hide" : "Show") { tokenRevealed.toggle() }
@@ -497,6 +494,39 @@ struct ConnectPaneView<Extra: View>: View {
         if !token.isEmpty, value.contains(token) {
             pasteboard.setString("", forType: concealedPasteboardType)
         }
+    }
+}
+
+/// ExactWrappingText shows a value a person may type by hand: selectable,
+/// monospaced, and wrapped between characters with no hyphen added, which
+/// SwiftUI's Text can insert at a line break.
+private struct ExactWrappingText: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.isSelectable = true
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byCharWrapping
+        paragraph.hyphenationFactor = 0
+        paragraph.usesDefaultHyphenation = false
+        field.attributedStringValue = NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ])
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+        field.preferredMaxLayoutWidth = width
+        let height = field.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height ?? 0
+        return CGSize(width: width, height: ceil(height))
     }
 }
 

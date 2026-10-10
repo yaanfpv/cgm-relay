@@ -4,7 +4,8 @@ import SwiftUI
 /// wherever it appears: a title, a one-line caption, and a right-hand slot
 /// of fixed size that shows checking, done, or the one action needed. The
 /// row and its slot never change size between states, so nothing beside or
-/// below it moves when a state changes.
+/// below it moves when a state changes. A row whose caption is a claim the
+/// person must read whole sets wrapsCaption, and grows to fit it instead.
 struct SetupStatusRow: View {
     enum Slot {
         case checking
@@ -25,6 +26,7 @@ struct SetupStatusRow: View {
     let caption: String
     var captionIsMonospaced = false
     var captionIsError = false
+    var wrapsCaption = false
     let slot: Slot
 
     var body: some View {
@@ -34,14 +36,13 @@ struct SetupStatusRow: View {
                 Text(caption)
                     .font(captionIsMonospaced ? .system(.caption, design: .monospaced) : .caption)
                     .foregroundStyle(captionIsError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .setupCaptionLines(wraps: wrapsCaption, truncation: .middle)
             }
             Spacer(minLength: 8)
             slotView
                 .frame(width: Self.slotWidth, alignment: .trailing)
         }
-        .frame(height: Self.height)
+        .setupRowHeight(wraps: wrapsCaption)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup-row-\(name)")
     }
@@ -78,11 +79,13 @@ struct SetupStatusRow: View {
 }
 
 /// SetupInfoRow is a statement in setup with nothing to check or set: a
-/// symbol, a title and one line of caption.
+/// symbol, a title and one line of caption, or as many lines as the caption
+/// needs where wrapsCaption is set.
 struct SetupInfoRow: View {
     let symbol: String
     let title: String
     let caption: String
+    var wrapsCaption = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -96,11 +99,35 @@ struct SetupInfoRow: View {
                 Text(caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .setupCaptionLines(wraps: wrapsCaption, truncation: .tail)
             }
             Spacer(minLength: 0)
         }
-        .frame(height: SetupStatusRow.height)
+        .setupRowHeight(wraps: wrapsCaption)
         .accessibilityElement(children: .combine)
+    }
+}
+
+private extension View {
+    /// setupCaptionLines keeps a caption to one line, shortened where
+    /// truncation says, or lets it wrap onto as many lines as it needs.
+    @ViewBuilder
+    func setupCaptionLines(wraps: Bool, truncation: Text.TruncationMode) -> some View {
+        if wraps {
+            fixedSize(horizontal: false, vertical: true)
+        } else {
+            lineLimit(1).truncationMode(truncation)
+        }
+    }
+
+    /// setupRowHeight holds a row at the standard height, or at least that
+    /// height when its caption wraps.
+    @ViewBuilder
+    func setupRowHeight(wraps: Bool) -> some View {
+        if wraps {
+            frame(minHeight: SetupStatusRow.height).padding(.vertical, 4)
+        } else {
+            frame(height: SetupStatusRow.height)
+        }
     }
 }

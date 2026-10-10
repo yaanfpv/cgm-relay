@@ -76,6 +76,7 @@ struct CertificateStepView: View {
             if let subtitle {
                 Text(subtitle)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .multilineTextAlignment(.center)
@@ -136,19 +137,22 @@ struct CertificateStepView: View {
                 SetupInfoRow(
                     symbol: "lock.shield",
                     title: "What this does",
-                    caption: "Your phone installs a certificate from this Mac, so readings travel encrypted between them."
+                    caption: "Your phone installs a certificate from this Mac, so readings travel encrypted between them.",
+                    wrapsCaption: true
                 )
                 SetupInfoRow(
                     symbol: "checkmark.seal",
                     title: "Why the phone says \u{201C}Not Verified\u{201D}",
-                    caption: "The certificate comes from this Mac, not from a company your phone already knows. That's expected."
+                    caption: "The certificate comes from this Mac, not from a company your phone already knows. That's expected.",
+                    wrapsCaption: true
                 )
                 SetupInfoRow(
                     symbol: "hand.raised",
                     title: "What it can't do",
-                    caption: "It only works for this Mac's own name and your home network's addresses, never for websites."
+                    caption: "It only works for this Mac's own name and your home network's addresses, never for websites.",
+                    wrapsCaption: true
                 )
-                SetupInfoRow(symbol: "trash", title: "Removing it later", caption: removalCaption)
+                SetupInfoRow(symbol: "trash", title: "Removing it later", caption: removalCaption, wrapsCaption: true)
             } footer: {
                 Text("On a shared or public Wi-Fi, use Tailscale instead: it's encrypted end to end.")
                     .fixedSize(horizontal: false, vertical: true)
@@ -357,6 +361,7 @@ struct CertificateStepView: View {
                 name: "certificate-check",
                 title: "Readings fetched",
                 caption: "An app reporting itself as \(fetch.userAgent) fetched readings over the encrypted address.",
+                wrapsCaption: true,
                 slot: .done("Working")
             )
         } else {
@@ -364,6 +369,7 @@ struct CertificateStepView: View {
                 name: "certificate-check",
                 title: "Waiting for your app",
                 caption: "Nothing has fetched readings over the encrypted address since you started.",
+                wrapsCaption: true,
                 slot: .checking
             )
         }

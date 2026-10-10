@@ -81,7 +81,7 @@ struct DiagnosticsReportTests {
         let savedSettings = String(decoding: try JSONEncoder().encode(settings), as: UTF8.self)
         let menu = String(describing: MenuDisplayState.make(
             credentialsConfigured: true, engineState: .running, status: nil, now: Date(),
-            certificateNotice: AppSettings.authorityReplacedNotice
+            certificateNotice: AppSettings.authorityReplacedNotice(.renamed)
         ))
         let shown = String(describing: [report, savedSettings, menu, String(describing: start.plan), String(describing: start.authorityChange)])
 

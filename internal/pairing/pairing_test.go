@@ -2,6 +2,7 @@ package pairing_test
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -131,6 +132,29 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 	}
 	if strings.Contains(body, "<b>now</b>") || !strings.Contains(body, "&lt;b&gt;now&lt;/b&gt;") {
 		t.Error("app wording was not HTML-escaped")
+	}
+}
+
+// TestPageRemindsEachPhoneOnlyOverTheLocalNetworkRoute checks the
+// once-per-phone certificate reminder is on a page served over the relay's
+// own TLS listener, and absent from one served in plain http (loopback, the
+// tailnet, or Tailscale Serve's proxy), where no certificate step exists.
+func TestPageRemindsEachPhoneOnlyOverTheLocalNetworkRoute(t *testing.T) {
+	t.Parallel()
+	const reminder = "Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi."
+	store, _ := newTestStore()
+	code := mustMint(t, store)
+	h := pairing.PageHandler(store, testToken)
+
+	overTLS := httptest.NewRequest(http.MethodGet, "/connect/"+code, nil)
+	overTLS.TLS = &tls.ConnectionState{}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, overTLS)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), reminder) {
+		t.Errorf("over TLS: status %d, reminder shown = %v", rec.Code, strings.Contains(rec.Body.String(), reminder))
+	}
+	if plain := get(h, "/connect/"+code).Body.String(); strings.Contains(plain, "certificate once") {
+		t.Error("a page served in plain http carries the certificate reminder")
 	}
 }
 

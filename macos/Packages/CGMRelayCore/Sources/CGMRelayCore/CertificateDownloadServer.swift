@@ -38,6 +38,7 @@ public actor CertificateDownloadServer {
     private let address: String
     private let lifetime: Duration
     private let randomBytes: any RandomBytesGenerating
+    private let expiresOnTimer: Bool
     private let queue = DispatchQueue(label: "CertificateDownloadServer")
 
     private var listener: ListenerBox?
@@ -61,17 +62,21 @@ public actor CertificateDownloadServer {
     }
 
     /// The same server without the private-address check, so tests can use
-    /// the loopback address.
+    /// the loopback address. expiresOnTimer false leaves a link to end only
+    /// when a connection arrives after its lifetime, so a test can show that
+    /// check holds on its own.
     init(
         authorityCertificateDER: Data,
         unrestrictedAddress address: String,
         lifetime: Duration = CertificateDownloadServer.defaultLifetime,
-        randomBytes: any RandomBytesGenerating = SecureRandomBytesGenerator()
+        randomBytes: any RandomBytesGenerating = SecureRandomBytesGenerator(),
+        expiresOnTimer: Bool = true
     ) {
         self.authorityCertificateDER = authorityCertificateDER
         self.address = address
         self.lifetime = lifetime
         self.randomBytes = randomBytes
+        self.expiresOnTimer = expiresOnTimer
     }
 
     /// mint ends any earlier link and returns the URL a phone should open:
@@ -88,7 +93,7 @@ public actor CertificateDownloadServer {
             throw CertificateDownloadError.randomSourceFailed
         }
 
-        let capability = DownloadCapability(token: token, response: response, lifetime: lifetime)
+        let capability = DownloadCapability(token: token, response: response, lifetime: lifetime, expiresOnTimer: expiresOnTimer)
         let box: ListenerBox
         if let existing = listener, !existing.isShutDown {
             box = existing
@@ -211,16 +216,26 @@ final class DownloadCapability: @unchecked Sendable {
     private var onClosed: (@Sendable () -> Void)?
     private var timer: Task<Void, Never>?
 
-    init(token: String, response: DownloadResponse, lifetime: Duration) {
+    init(token: String, response: DownloadResponse, lifetime: Duration, expiresOnTimer: Bool = true) {
         self.token = Array(token.utf8)
         self.response = response
         let clock = self.clock
         let deadline = clock.now.advanced(by: lifetime)
         self.deadline = deadline
+        guard expiresOnTimer else { return }
         timer = Task { [weak self] in
-            try? await clock.sleep(until: deadline)
+            try? await clock.sleep(until: deadline, tolerance: .zero)
             self?.end()
         }
+    }
+
+    /// endIfExpired ends the link when its lifetime has run out and reports
+    /// whether it did, so a connection that arrives after the lifetime is
+    /// refused even when the timer has not fired yet.
+    func endIfExpired() -> Bool {
+        let expired = lock.withLock { clock.now >= deadline }
+        if expired { end() }
+        return expired
     }
 
     /// whenClosed runs `action` once the link stops taking new requests,
@@ -415,6 +430,12 @@ private final class ListenerBox: @unchecked Sendable {
         }
         let lookup: @Sendable () -> DownloadCapability? = { [weak self] in self?.currentCapability() }
         listener.newConnectionHandler = { connection in
+            // No live link, or one whose lifetime has run out, means the
+            // listener is closing: the connection is dropped unanswered.
+            guard let live = lookup(), !live.endIfExpired() else {
+                connection.cancel()
+                return
+            }
             DownloadConnection(connection: connection, currentCapability: lookup, queue: queue).start()
         }
         listener.start(queue: queue)

@@ -102,8 +102,17 @@ extension AppSettings {
     }
 
     /// authorityReplacedNotice is the sentence the menu shows after the
-    /// certificate authority was replaced.
-    public static let authorityReplacedNotice = "This Mac's name changed, so each phone needs the HTTPS step again."
+    /// certificate authority was replaced, naming the real reason.
+    public static func authorityReplacedNotice(_ reason: LocalCertificateMaterial.ReplacementReason) -> String {
+        switch reason {
+        case .renamed:
+            "This Mac's name changed, so each phone needs the HTTPS step again."
+        case .expired:
+            "CGM Relay's certificate expired and was replaced, so each phone needs the HTTPS step again."
+        case .unusable:
+            "CGM Relay's saved certificate couldn't be used and was replaced, so each phone needs the HTTPS step again."
+        }
+    }
 
     /// noteAuthorityChange records what happened to the certificate authority
     /// when the engine's certificate was last made: a new or replaced
@@ -117,10 +126,10 @@ extension AppSettings {
         case .created:
             localCertificateStepFinished = false
             return nil
-        case .replaced:
+        case .replaced(let reason):
             let hadFinished = localCertificateStepFinished
             localCertificateStepFinished = false
-            return hadFinished ? Self.authorityReplacedNotice : nil
+            return hadFinished ? Self.authorityReplacedNotice(reason) : nil
         }
     }
 }
