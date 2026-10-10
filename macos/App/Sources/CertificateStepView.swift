@@ -399,9 +399,10 @@ struct CertificateStepView: View {
     /// the person saying their phone has the certificate, which is when the
     /// step is recorded finished and Connect shows the token.
     private func advance() {
-        let leavingInstall = screen == screens[screens.count - 2]
+        // Finished first, so Connect on the next screen already shows the
+        // token rather than the step it replaces.
+        if screen == screens[screens.count - 2] { model.finishCertificateStep() }
         move(by: 1)
-        if leavingInstall { model.finishCertificateStep() }
     }
 
     private func move(by offset: Int) {

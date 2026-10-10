@@ -191,10 +191,10 @@ public enum PhoneReachability: Sendable, Equatable {
 /// ReachAddressResolver computes the two addresses NetworkReach's choice
 /// actually implies: the host the engine should bind to (bindHost), and
 /// the host a follower app should be given (displayHost). The two differ
-/// only for myLocalNetwork: the engine binds to every interface (0.0.0.0)
-/// so a request from any of them is accepted, but 0.0.0.0 itself is never
-/// a usable client address, so a follower is given this Mac's actual LAN
-/// address instead.
+/// only for myLocalNetwork: the engine's plain listener stays on loopback
+/// there, and the local network is served by TLS listeners on each private
+/// address (EngineListenPlan), so a follower is given this Mac's private
+/// LAN address instead.
 public enum ReachAddressResolver {
     /// tailscaleRangeFirstOctet and tailscaleRangeSecondOctetMin/Max
     /// describe 100.64.0.0/10 (RFC 6598's carrier-grade NAT block), the

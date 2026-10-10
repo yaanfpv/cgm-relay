@@ -86,7 +86,15 @@ struct ConnectPaneView<Extra: View>: View {
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
         .task(id: pairingKey) {
-            if let readyAddress { await keepPairingCodeFresh(address: readyAddress) }
+            // The engine keeps one pairing code, so while this pane's stepper
+            // shows Connect itself, only that inner pane makes codes; this one
+            // makes a fresh code once the stepper closes. The inner pane's
+            // code replaces this one's, so this one is dropped meanwhile.
+            if let readyAddress, !isPresentingCertificateStep {
+                await keepPairingCodeFresh(address: readyAddress)
+            } else {
+                pairingCode = nil
+            }
         }
         .sheet(isPresented: Binding(
             get: { isPresentingCertificateStep && model.isCertificateStepPresented },
@@ -181,10 +189,10 @@ struct ConnectPaneView<Extra: View>: View {
     }
 
     /// pairingKey changes whenever a code already minted could stop working:
-    /// a new address, or the engine (which holds the codes) starting again,
-    /// as it does after a new token.
+    /// a new address, the engine (which holds the codes) starting again, as
+    /// it does after a new token, or this pane's stepper opening or closing.
     private var pairingKey: String {
-        "\(readyAddress ?? "")|\(token)|\(String(describing: model.engineState))"
+        "\(readyAddress ?? "")|\(token)|\(String(describing: model.engineState))|\(isPresentingCertificateStep)"
     }
 
     private var followerApp: FollowerApp { model.settings.connectFollowerApp }
