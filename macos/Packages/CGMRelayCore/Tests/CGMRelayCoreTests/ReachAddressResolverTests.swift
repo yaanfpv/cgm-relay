@@ -261,20 +261,48 @@ struct FollowerAddressTests {
         #expect(FollowerAppEntry.urlWithToken(address: "https://relay-mac.example-tailnet.ts.net", token: "abc") == "https://abc@relay-mac.example-tailnet.ts.net")
     }
 
-    @Test("xDrip4iOS's instructions name where its fields live and leave API_SECRET blank, with a Port field only when the address names one")
+    @Test("xDrip4iOS lists URL, API_SECRET, Token, Port in its settings order and ends on Test Connection, with a Port only when the address names one")
     func xDrip4iOSInstructions() {
         let withPort = FollowerAppEntry.instructions(for: .xDrip4iOS, address: "http://192.168.1.42:1337")
         #expect(withPort.steps.contains { $0.contains("Sharing and Services") && $0.contains("Nightscout") })
-        #expect(withPort.steps.contains { $0.contains("1337 in Port") })
-        #expect(withPort.steps.last == "Leave API_SECRET blank.")
+        #expect(withPort.steps.suffix(5) == [
+            "In URL, enter the address without its port.",
+            "Leave API_SECRET blank.",
+            "In Token, enter the token.",
+            "In Port, enter 1337.",
+            "Tap Test Connection and wait for the dot to turn green.",
+        ])
         #expect(withPort.fields == [
             .init(label: "URL", value: "http://192.168.1.42"),
-            .init(label: "Port", value: "1337"),
             .init(label: "Token", value: FollowerAppEntry.tokenPlaceholder),
+            .init(label: "Port", value: "1337"),
         ])
         let noPort = FollowerAppEntry.instructions(for: .xDrip4iOS, address: "https://relay-mac.example-tailnet.ts.net")
         #expect(!noPort.steps.contains { $0.contains("Port") })
+        #expect(noPort.steps.suffix(4) == [
+            "In URL, enter the address.",
+            "Leave API_SECRET blank.",
+            "In Token, enter the token.",
+            "Tap Test Connection and wait for the dot to turn green.",
+        ])
         #expect(noPort.fields.map(\.label) == ["URL", "Token"])
+    }
+
+    @Test("xDrip+ introduces its one combined field with its own step, and the value to copy holds the address with the token in front")
+    func xDripPlusInstructions() {
+        let entry = FollowerAppEntry.instructions(for: .xDripPlus, address: "http://192.168.1.42:1337")
+        #expect(entry.steps.count == 2)
+        #expect(entry.steps[1].hasPrefix("Nightscout Follow URL takes the address and the token as one value."))
+        #expect(entry.fields.map(\.label) == ["Nightscout Follow URL"])
+        #expect(entry.fields[0].value(withToken: "synthetic-token") == "http://synthetic-token@192.168.1.42:1337")
+        #expect(!entry.fields[0].value(withToken: "synthetic-token").contains(FollowerAppEntry.tokenPlaceholder))
+    }
+
+    @Test("LoopFollow names its token field Access Token and ends on its Status checkmark")
+    func loopFollowInstructions() {
+        let entry = FollowerAppEntry.instructions(for: .loopFollow, address: "http://192.168.1.42:1337")
+        #expect(entry.fields.map(\.label) == ["URL", "Access Token"])
+        #expect(entry.steps.last == "Check that Status shows a green checkmark.")
     }
 
     @Test("Nightguard's token is its own API Token field and its Nightscout URL is the bare address")

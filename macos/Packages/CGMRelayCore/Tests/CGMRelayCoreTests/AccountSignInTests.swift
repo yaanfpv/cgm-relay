@@ -24,6 +24,8 @@ struct AccountSignInTests {
             .noConnections,
             .rateLimited,
             .unreachable,
+            .launchFailed,
+            .timedOut,
             .other,
         ]
     )
@@ -37,6 +39,29 @@ struct AccountSignInTests {
         #expect(got == outcome)
         #expect(store.snapshot()[.librelinkupEmail] == nil)
         #expect(store.snapshot()[.librelinkupPassword] == nil)
+    }
+
+    @Test(
+        "a malformed email starts no check; a valid one starts exactly one, with the trimmed value",
+        arguments: [
+            ("", 0), ("abc", 0), ("a@", 0), ("a@b", 0), ("a@b.c", 1), (" a@b.c ", 1),
+        ] as [(String, Int)]
+    )
+    func emailGatesTheCheck(_ testCase: (String, Int)) async throws {
+        let store = FakeCredentialStore()
+        let checker = FakeAccountCheckRunning(outcome: .signedIn)
+        let signIn = AccountSignIn(checker: checker, store: store)
+
+        let outcome = await signIn.signIn(email: testCase.0, password: "not-a-real-password", librelinkupBaseURL: nil)
+
+        #expect(checker.calls.count == testCase.1)
+        if testCase.1 == 0 {
+            #expect(outcome == .malformedEmail)
+            #expect(store.snapshot()[.librelinkupEmail] == nil)
+        } else {
+            #expect(checker.calls[0].email == "a@b.c")
+            #expect(store.snapshot()[.librelinkupEmail] == "a@b.c")
+        }
     }
 
     @Test("a refused check on an already-signed-in account leaves the existing account alone")

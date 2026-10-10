@@ -129,9 +129,12 @@ struct FollowerQRPlannerTests {
             #expect(qr.payload == "\(Self.address)/connect/CODE_abc-123")
             #expect(!qr.payload.contains(Self.token))
             #expect(!qr.carriesToken)
+            #expect(qr.caption == FollowerQRPlanner.caption(for: app))
         }
         for app in [FollowerApp.xDripPlus, .loopFollow] {
             #expect(FollowerQRPlanner.qr(for: app, address: Self.address, token: "", pairingCode: "CODE") == nil)
+            let qr = try #require(FollowerQRPlanner.qr(for: app, address: Self.address, token: Self.token, pairingCode: nil))
+            #expect(qr.caption == FollowerQRPlanner.caption(for: app))
         }
     }
 

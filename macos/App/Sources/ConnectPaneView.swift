@@ -229,8 +229,9 @@ struct ConnectPaneView<Extra: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// singleValueField is the one address an app takes its address and
-    /// token in together (xDrip+), which gets its own Copy.
+    /// singleValueField is the one value an app takes its address and token
+    /// in together (xDrip+), which gets its own Copy, introduced by the
+    /// app's own step above it.
     private func singleValueField(_ instructions: FollowerAppEntry.Instructions) -> FollowerAppEntry.Field? {
         switch followerApp {
         case .xDripPlus: instructions.fields.first
@@ -247,7 +248,7 @@ struct ConnectPaneView<Extra: View>: View {
                 .foregroundStyle(.secondary)
             Spacer(minLength: 12)
             AccessibleButton("Copy", accessibleName: "Copy \(field.label)") {
-                copy(field.value.replacingOccurrences(of: FollowerAppEntry.tokenPlaceholder, with: token))
+                copy(field.value(withToken: token))
             }
         }
     }
@@ -349,14 +350,26 @@ struct ConnectPaneView<Extra: View>: View {
         }
     }
 
+    /// qrCaption holds room for the longest caption of any app, so the rows
+    /// that follow it (Address first) sit at the same place whichever app is
+    /// chosen and whatever the window's width wraps each caption to.
     private var qrCaption: some View {
-        Text(currentQR?.caption ?? "")
+        ZStack(alignment: isCompact ? .topLeading : .top) {
+            ForEach(FollowerApp.allCases) { app in
+                captionText(FollowerQRPlanner.caption(for: app)).hidden()
+            }
+            captionText(currentQR?.caption ?? "")
+                .opacity(currentQR == nil ? 0 : 1)
+        }
+    }
+
+    private func captionText(_ caption: String) -> some View {
+        Text(caption)
             .font(.callout)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(isCompact ? .leading : .center)
             .frame(maxWidth: .infinity, alignment: isCompact ? .leading : .center)
             .fixedSize(horizontal: false, vertical: true)
-            .opacity(currentQR == nil ? 0 : 1)
     }
 
     /// newTokenRow is the token's own row: what making a new one does, with

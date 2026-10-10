@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -376,6 +377,44 @@ func TestExitCodeForServeErrorDistinguishesStoreDamaged(t *testing.T) {
 	}
 }
 
+// TestExitCodeForServeErrorDistinguishesPortInUse proves a relay asked to
+// listen on a follower port another program already holds -- a real
+// listener on an OS-assigned port, here -- is reported with its own exit
+// code, apart from the exit code 1 an ordinary crash gets, so a supervising
+// app does not restart it in a loop.
+func TestExitCodeForServeErrorDistinguishesPortInUse(t *testing.T) {
+	t.Parallel()
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a port: %v", err)
+	}
+	defer holder.Close()
+
+	cfg := config.Config{
+		LibreLinkUpEmail:    "person@example.test",
+		LibreLinkUpPassword: "leak-check-password-should-never-log",
+		Token:               "leak-check-token-should-never-log",
+		ListenAddr:          holder.Addr().String(),
+		StatusAddr:          "127.0.0.1:0",
+		DatabasePath:        filepath.Join(t.TempDir(), "readings.db"),
+		RetentionDays:       15,
+		Key:                 bytes.Repeat([]byte{'P'}, 32),
+	}
+	runErr := relay.Run(context.Background(), cfg)
+	if runErr == nil {
+		t.Fatal("relay.Run listened on a port another listener holds, want an error")
+	}
+
+	var out bytes.Buffer
+	code := exitCodeForServeError(&out, runErr)
+	if code != exitCodePortInUse {
+		t.Errorf("exit code = %d, want %d", code, exitCodePortInUse)
+	}
+	if !strings.Contains(out.String(), "port is in use by another program") {
+		t.Errorf("stderr = %q, want it to say the port is in use", out.String())
+	}
+}
+
 // TestExitCodeForCheckAccountError is a table test of check-account's own
 // exit code for every fake account state its own oracle names: a happy
 // sign-in, each of LibreLinkUp's rejections, a rate limit, an unreachable
@@ -433,6 +472,51 @@ func TestExitCodeForCheckAccountError(t *testing.T) {
 			},
 			wantCode:     exitCodeAccountRateLimited,
 			wantContains: "rate limiting",
+		},
+		{
+			name: "fake mode reject",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("reject")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountRejected,
+			wantContains: "rejected the email or password",
+		},
+		{
+			name: "fake mode terms",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("terms")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountTermsNotAccepted,
+			wantContains: "updated terms accepted",
+		},
+		{
+			name: "fake mode noconnections",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("noconnections")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountNoConnections,
+			wantContains: "follows nobody",
+		},
+		{
+			name: "fake mode ratelimited",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("ratelimited")
+				return fake.URL
+			},
+			wantCode:     exitCodeAccountRateLimited,
+			wantContains: "rate limiting",
+		},
+		{
+			name: "fake mode unrecognised sign-in status",
+			configure: func(fake *llufake.Server) string {
+				_ = fake.SetMode("unrecognised")
+				return fake.URL
+			},
+			wantCode:     exitCodeGenericFailure,
+			wantContains: "carried no user id or token",
 		},
 		{
 			name: "unreachable",

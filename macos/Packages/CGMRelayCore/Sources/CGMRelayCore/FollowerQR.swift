@@ -22,6 +22,20 @@ public enum FollowerQRPlanner {
     /// it must match pairing.CodeLifetime in the engine.
     public static let pairingCodeLifetimeMinutes = 10
 
+    /// caption says which app scans app's code and where. It is the same
+    /// whether or not the code can be built yet, so a screen can hold room
+    /// for the longest one and keep what follows it in one place.
+    public static func caption(for app: FollowerApp) -> String {
+        switch app {
+        case .xDrip4iOS, .nightguard:
+            return "Scan with the iPhone camera. It opens a page where you copy each value into \(app.displayName). The code lasts \(pairingCodeLifetimeMinutes) minutes."
+        case .xDripPlus:
+            return "In xDrip+, open Settings, then Auto Configure, and scan this code. It holds your token, so keep it private."
+        case .loopFollow:
+            return "In LoopFollow, open Settings, then Nightscout, then Import Settings from QR Code, and scan this code. It holds your token, so keep it private."
+        }
+    }
+
     /// qr returns app's QR code for the relay at address (an origin such as
     /// `https://host` or `http://192.168.1.5:10000`), or nil when it cannot
     /// be built yet: app needs a pairing code and none is given, or the
@@ -44,21 +58,21 @@ public enum FollowerQRPlanner {
             return FollowerQR(
                 payload: "\(address)/connect/\(pairingCode)",
                 carriesToken: false,
-                caption: "Scan with the iPhone camera. It opens a page where you copy each value into \(app.displayName). The code lasts \(pairingCodeLifetimeMinutes) minutes."
+                caption: caption(for: app)
             )
         case .xDripPlus:
             guard !token.isEmpty, let payload = XDripPlusSettingsQR.payload(followURL: FollowerAppEntry.urlWithToken(address: address, token: token)) else { return nil }
             return FollowerQR(
                 payload: payload,
                 carriesToken: true,
-                caption: "In xDrip+, open Settings, then Auto Configure, and scan this code. It holds your token, so keep it private."
+                caption: caption(for: app)
             )
         case .loopFollow:
             guard !token.isEmpty, let payload = LoopFollowSettingsQR.payload(url: address, token: token, now: now) else { return nil }
             return FollowerQR(
                 payload: payload,
                 carriesToken: true,
-                caption: "In LoopFollow, open Settings, then Nightscout, then Import Settings from QR Code, and scan this code. It holds your token, so keep it private."
+                caption: caption(for: app)
             )
         }
     }

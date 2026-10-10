@@ -22,8 +22,8 @@ public actor EngineSupervisor {
 
     /// FailureReason names a permanent failure: one the supervisor never
     /// restarts out of on its own, whether it was recognised from the
-    /// engine's own exit code (storeKeyMismatch, storeInUse, storeDamaged)
-    /// or discovered by the caller before a process was ever started
+    /// engine's own exit code (storeKeyMismatch, storeInUse, storeDamaged,
+    /// portInUse) or discovered by the caller before a process was ever started
     /// (every other case, set through fail(_:) below).
     public enum FailureReason: Sendable, Equatable {
         /// storeKeyMismatch is the outcome of the engine exiting with
@@ -59,6 +59,17 @@ public actor EngineSupervisor {
         /// fresh database while the old one might still be sitting at the
         /// same path.
         case recoveryMoveFailed
+        /// portInUse is the outcome of the engine exiting with
+        /// portInUseExitCode: another program holds the follower port. It
+        /// is not restarted on its own, since a restart loses the same
+        /// race, but it is retried whenever the menu opens, and a new port
+        /// recovers it at once.
+        case portInUse
+        /// httpsOnStatusPort is the caller refusing a start because Tailscale
+        /// HTTPS holds the follower port fixed and it is the relay's own
+        /// status port, where the engine can never listen. Turning Tailscale
+        /// HTTPS off frees the port to move, so it is retried like portInUse.
+        case httpsOnStatusPort
     }
 
     /// storeKeyMismatchExitCode is the process exit status
@@ -82,6 +93,13 @@ public actor EngineSupervisor {
     /// (cmd/cgm-relay/main.go's own exitCodeStoreDamaged constant; the two
     /// must always agree).
     public static let storeDamagedExitCode: Int32 = 5
+
+    /// portInUseExitCode is the process exit status
+    /// `cgm-relay serve --config-stdin` returns when it cannot listen on
+    /// the follower port because another program holds it
+    /// (cmd/cgm-relay/main.go's own exitCodePortInUse constant; the two
+    /// must always agree).
+    public static let portInUseExitCode: Int32 = 6
 
     /// defaultBackoffSchedule is the delay before each successive restart
     /// attempt, holding at its last value once exhausted: 2 s, 5 s, 15 s,
@@ -239,14 +257,14 @@ public actor EngineSupervisor {
         statusSecret?.arm(secret)
     }
 
-    /// handleExit reacts to the child process ending on its own. Three
+    /// handleExit reacts to the child process ending on its own. Four
     /// exit codes are recognised as permanent (storeKeyMismatchExitCode,
-    /// storeInUseExitCode, storeDamagedExitCode): those exits earn no
-    /// restart at all, since the engine has already said running it again
-    /// will not help. Every other exit code is "unexpected" and earns a
-    /// restart, whatever code it carried; the engine's own /status
-    /// endpoint, once it is back up, is where a sign-in or configuration
-    /// problem actually surfaces.
+    /// storeInUseExitCode, storeDamagedExitCode, portInUseExitCode): those
+    /// exits earn no restart at all, since the engine has already said
+    /// running it again will not help. Every other exit code is
+    /// "unexpected" and earns a restart, whatever code it carried; the
+    /// engine's own /status endpoint, once it is back up, is where a
+    /// sign-in or configuration problem actually surfaces.
     private func handleExit(
         generation: Int,
         configuration: EngineConfiguration,
@@ -266,6 +284,9 @@ public actor EngineSupervisor {
             return
         case EngineSupervisor.storeDamagedExitCode:
             setState(.failed(.storeDamaged))
+            return
+        case EngineSupervisor.portInUseExitCode:
+            setState(.failed(.portInUse))
             return
         default:
             break

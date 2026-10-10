@@ -1,3 +1,4 @@
+import Darwin
 import Testing
 @testable import CGMRelayCore
 
@@ -119,5 +120,240 @@ struct SettingsCommitValidationTests {
         try await Task.sleep(for: .milliseconds(30))
         #expect(settled.values.isEmpty)
         #expect(settler.pendingValue == nil)
+    }
+}
+
+/// A listener held open on a real socket, with no address reuse, so any bind
+/// of the same address and port conflicts for as long as it is alive.
+private final class HeldListener {
+    let port: Int
+    private let descriptor: Int32
+
+    init?(host: String, port requested: Int = 0) {
+        let isIPv6 = host.contains(":")
+        let descriptor = socket(isIPv6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return nil }
+        var bound: Int32
+        var address4 = sockaddr_in()
+        var address6 = sockaddr_in6()
+        if isIPv6 {
+            address6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address6.sin6_family = sa_family_t(AF_INET6)
+            address6.sin6_port = in_port_t(requested).bigEndian
+            inet_pton(AF_INET6, host, &address6.sin6_addr)
+            var only: Int32 = 1
+            _ = setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &only, socklen_t(MemoryLayout<Int32>.size))
+            bound = withUnsafePointer(to: &address6) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) }
+            }
+        } else {
+            address4.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address4.sin_family = sa_family_t(AF_INET)
+            address4.sin_port = in_port_t(requested).bigEndian
+            inet_pton(AF_INET, host, &address4.sin_addr)
+            bound = withUnsafePointer(to: &address4) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+        }
+        guard bound == 0, listen(descriptor, 1) == 0 else {
+            close(descriptor)
+            return nil
+        }
+        var actual = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let named = withUnsafeMutablePointer(to: &actual) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+        }
+        guard named == 0 else {
+            close(descriptor)
+            return nil
+        }
+        self.descriptor = descriptor
+        self.port = isIPv6
+            ? Int(UInt16(bigEndian: withUnsafePointer(to: &actual) { $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee.sin6_port } }))
+            : Int(UInt16(bigEndian: withUnsafePointer(to: &actual) { $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_port } }))
+    }
+
+    deinit { close(descriptor) }
+
+    /// run holds count consecutive ports on host, starting at an OS-assigned
+    /// one, retrying elsewhere when a neighbour is already taken.
+    static func run(host: String, count: Int) -> [HeldListener]? {
+        for _ in 0..<200 {
+            guard let first = HeldListener(host: host) else { return nil }
+            var held = [first]
+            for offset in 1..<count {
+                guard first.port + offset <= 65535, let next = HeldListener(host: host, port: first.port + offset) else { break }
+                held.append(next)
+            }
+            if held.count == count { return held }
+        }
+        return nil
+    }
+}
+
+private struct TableBinder: PortBinding {
+    var taken: [String: Set<Int>] = [:]
+    var allTaken = false
+    func canBind(host: String, port: Int) -> Bool {
+        !allTaken && !(taken[host]?.contains(port) ?? false)
+    }
+}
+
+/// Answers as the real binder does and keeps every answer, so a test can
+/// check what the search saw without asking the system again later.
+private final class RecordingBinder: PortBinding, @unchecked Sendable {
+    let inner: any PortBinding
+    private(set) var answers: [(host: String, port: Int, free: Bool)] = []
+    init(inner: any PortBinding) { self.inner = inner }
+    func canBind(host: String, port: Int) -> Bool {
+        let free = inner.canBind(host: host, port: port)
+        answers.append((host, port, free))
+        return free
+    }
+}
+
+// Serialized: tests that hold a run of 50 neighbouring ports would otherwise
+// make a concurrent test see its own neighbours as taken.
+@Suite("Port availability", .serialized)
+struct PortAvailabilityTests {
+    private let binder = SystemPortBinder()
+
+    /// A free ephemeral port, found by binding and releasing one.
+    private func freePort() throws -> Int {
+        let probe = try #require(HeldListener(host: "127.0.0.1"))
+        return probe.port
+    }
+
+    @Test("the addresses checked are the IPv4 host and its IPv6 counterpart where there is one")
+    func hostsChecked() {
+        #expect(PortAvailability.hostsToCheck(bindHost: "127.0.0.1") == ["127.0.0.1", "::1"])
+        #expect(PortAvailability.hostsToCheck(bindHost: "0.0.0.0") == ["0.0.0.0", "::"])
+        #expect(PortAvailability.hostsToCheck(bindHost: "100.101.102.103") == ["100.101.102.103"])
+    }
+
+    // Another suite running alongside can take a released port between the
+    // probe and the search, so a port lost that way is retried; one still
+    // free after the search but not chosen is the failure.
+    @Test("a free default port is chosen as it is")
+    func defaultFree() throws {
+        for _ in 0..<20 {
+            let port = try freePort()
+            guard PortAvailability.isFree(port: port, bindHost: "127.0.0.1", binder: binder) else { continue }
+            let choice = PortAvailability.firstFreePort(from: port, bindHost: "127.0.0.1", binder: binder)
+            if choice == .free(port) { return }
+            if PortAvailability.isFree(port: port, bindHost: "127.0.0.1", binder: binder) {
+                Issue.record("port \(port) was free on both address families but the search chose \(choice)")
+                return
+            }
+        }
+        Issue.record("no port stayed free long enough to search from")
+    }
+
+    @Test("a taken default port moves to the next free one")
+    func defaultTaken() throws {
+        let held = try #require(HeldListener.run(host: "127.0.0.1", count: 1))
+        let recorder = RecordingBinder(inner: binder)
+        guard case .free(let chosen) = PortAvailability.firstFreePort(from: held[0].port, bindHost: "127.0.0.1", binder: recorder) else {
+            Issue.record("expected a free port")
+            return
+        }
+        #expect(chosen > held[0].port)
+        let answers = recorder.answers.filter { $0.port == chosen }
+        #expect(Set(answers.map { $0.host }) == ["127.0.0.1", "::1"])
+        #expect(answers.allSatisfy { $0.free }, "the search saw the chosen port free on both address families")
+    }
+
+    @Test("several taken ports in a row are all skipped")
+    func severalTaken() throws {
+        let held = try #require(HeldListener.run(host: "127.0.0.1", count: 3))
+        let start = held[0].port
+        guard case .free(let chosen) = PortAvailability.firstFreePort(from: start, bindHost: "127.0.0.1", binder: binder) else {
+            Issue.record("expected a free port")
+            return
+        }
+        #expect(chosen >= start + 3)
+    }
+
+    @Test("when all 50 candidate ports are taken the search says so, naming the range")
+    func allFiftyTaken() throws {
+        let held = try #require(HeldListener.run(host: "127.0.0.1", count: PortAvailability.candidateCount))
+        let start = held[0].port
+        #expect(PortAvailability.firstFreePort(from: start, bindHost: "127.0.0.1", binder: binder) == .exhausted(first: start, last: start + 49))
+    }
+
+    @Test("the search stops at 65535")
+    func stopsAtTop() {
+        let allTaken = TableBinder(allTaken: true)
+        #expect(PortAvailability.firstFreePort(from: 65530, bindHost: "127.0.0.1", binder: allTaken) == .exhausted(first: 65530, last: 65535))
+        let topFree = TableBinder(taken: ["127.0.0.1": Set(65530...65534)])
+        #expect(PortAvailability.firstFreePort(from: 65530, bindHost: "127.0.0.1", binder: topFree) == .free(65535))
+    }
+
+    @Test("during setup a saved port that is still free stays, and a taken one moves to the first free from the default")
+    func setupKeepsAFreeSavedPort() {
+        let defaultPort = 4000
+        let table = TableBinder(taken: ["127.0.0.1": [4001]])
+        #expect(PortAvailability.setupPort(current: 4002, default: defaultPort, bindHost: "127.0.0.1", binder: table) == .free(4002), "a non-default saved port stays while free, even though the default is free too")
+        #expect(PortAvailability.setupPort(current: 4000, default: defaultPort, bindHost: "127.0.0.1", binder: table) == .free(4000))
+        #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: table) == .free(4000), "a taken saved port searches from the default")
+        let defaultTaken = TableBinder(taken: ["127.0.0.1": [4000, 4001]])
+        #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: defaultTaken) == .free(4002))
+        #expect(PortAvailability.setupPort(current: 4001, default: defaultPort, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true)) == .exhausted(first: 4000, last: 4049))
+    }
+
+    @Test("the relay's own status port is never chosen: setup skips it, a typed one is refused as its own")
+    func statusPortIsReserved() {
+        let table = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(PortAvailability.firstFreePort(from: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002), "default taken and the status port next in line is skipped")
+        #expect(PortAvailability.setupPort(current: 4001, default: 4000, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == .free(4000), "a saved port equal to the status port is replaced")
+        #expect(PortAvailability.setupPort(current: 4000, default: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .free(4002))
+        for current in 3990...4060 {
+            #expect(PortAvailability.setupPort(current: current, default: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) != .free(4001))
+        }
+        #expect(PortAvailability.typedPortRefusal(port: 4001, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == "CGM Relay already uses port 4001 for itself. Choose another.")
+        #expect(PortAvailability.typedPortRefusal(port: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == "Port 4000 is in use by another app.")
+        #expect(PortAvailability.typedPortRefusal(port: 4002, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil)
+        #expect(PortAvailability.port(inAddress: "127.0.0.1:1338") == 1338)
+        #expect(PortAvailability.port(inAddress: "nonsense") == nil)
+    }
+
+    @Test("before a start a saved port stays once setup is over or the person chose it, unless it is the status port, which is replaced at any time")
+    func startPortRepairsASavedStatusPort() {
+        let table = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(PortAvailability.startPort(current: 4005, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep, "a person's or finished setup's port is kept")
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep, "kept even when taken: that failure is reported, never moved")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .use(4002), "a saved status port is replaced after setup too")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true), reserved: 4001) == .exhausted(first: 4000, last: 4049))
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: true, locked: false, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .use(4002), "during setup it is setupPort")
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: false, bindHost: "127.0.0.1", binder: table, reserved: nil) == .keep, "no status port, nothing to repair")
+    }
+
+    @Test("while Tailscale HTTPS holds the port it is kept, and a held status port refuses the start rather than moving")
+    func startPortUnderTailscaleHTTPS() {
+        let table = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: false, locked: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .statusPortLocked)
+        #expect(PortAvailability.startPort(current: 4001, default: 4000, searching: true, locked: true, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == .statusPortLocked, "refused during setup too")
+        #expect(PortAvailability.startPort(current: 4000, default: 4000, searching: true, locked: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep, "a held port is never moved, even when taken")
+        #expect(PortAvailability.startPort(current: 4005, default: 4000, searching: false, locked: true, bindHost: "127.0.0.1", binder: table, reserved: 4001) == .keep)
+    }
+
+    @Test("a port another app holds on either address family is taken, and the refusal names it")
+    func ipv4AndIPv6Conflicts() throws {
+        let v4 = try #require(HeldListener.run(host: "127.0.0.1", count: 1))
+        #expect(!PortAvailability.isFree(port: v4[0].port, bindHost: "127.0.0.1", binder: binder))
+        let wide = try #require(HeldListener.run(host: "0.0.0.0", count: 1))
+        #expect(!PortAvailability.isFree(port: wide[0].port, bindHost: "0.0.0.0", binder: binder))
+        #expect(PortAvailability.inUseMessage(port: v4[0].port) == "Port \(v4[0].port) is in use by another app.")
+
+        guard let v6 = HeldListener(host: "::1") else { return }
+        #expect(!PortAvailability.isFree(port: v6.port, bindHost: "127.0.0.1", binder: binder), "an IPv6 holder blocks a loopback reach too")
+    }
+
+    @Test("every address the reach binds is asked, and one taken makes the port taken")
+    func everyAddressAsked() {
+        let table = TableBinder(taken: ["::": [4000]])
+        #expect(!PortAvailability.isFree(port: 4000, bindHost: "0.0.0.0", binder: table))
+        #expect(PortAvailability.isFree(port: 4000, bindHost: "127.0.0.1", binder: table))
     }
 }

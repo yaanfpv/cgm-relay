@@ -67,6 +67,10 @@ struct AdvancedPaneView: View {
             portText = String(model.settings.port)
             Task { await model.refreshTailscale() }
         }
+        .onChange(of: model.settings.port) { _, newPort in
+            // Setup may move the port to a free one while this pane is open.
+            if !portFieldFocused { portText = String(newPort) }
+        }
         .onChange(of: portFieldFocused) { _, isFocused in
             if !isFocused {
                 commitPort()
@@ -77,7 +81,9 @@ struct AdvancedPaneView: View {
     /// commitPort runs once, on Return or focus loss, never on every
     /// keystroke: a value already equal to the saved one is left alone
     /// (no restart), and an invalid one is refused with an inline message
-    /// rather than saved or silently clamped into range.
+    /// rather than saved or silently clamped into range. A port another app
+    /// already holds, or the one the relay uses for its own status listener,
+    /// is refused the same way, and never changed to another.
     private func commitPort() {
         switch PortCommitValidation.validate(portText) {
         case .invalid(let message):
@@ -86,6 +92,10 @@ struct AdvancedPaneView: View {
             portErrorMessage = nil
             portText = String(value)
             guard value != model.settings.port else { return }
+            if let inUse = model.typedPortInUseMessage(value) {
+                portErrorMessage = inUse
+                return
+            }
             model.updatePort(value)
         }
     }

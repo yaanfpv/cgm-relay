@@ -91,16 +91,37 @@ struct AppSettingsTests {
         #expect(decoded == settings)
     }
 
-    @Test("the reading in the menu bar is off by default, absent from an older settings file, and survives a round trip")
-    func showReadingInMenuBar() throws {
-        #expect(AppSettings.default.showReadingInMenuBar == false)
-        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "setupFinished": true}"#.utf8))
-        #expect(older.showReadingInMenuBar == false)
-        #expect(older.port == 4000, "an older file keeps every other field")
+    @Test("a fresh install shows the reading in the menu bar and keeps 30 days")
+    func freshInstallDefaults() throws {
+        #expect(AppSettings.default.showReadingInMenuBar == true)
+        #expect(AppSettings.default.retentionDays == 30)
+        let fresh = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(fresh.showReadingInMenuBar == true)
+        #expect(fresh.retentionDays == 30)
+    }
+
+    @Test("explicitly saved menu bar and retention choices are kept, including off and 15 days")
+    func explicitSavedChoicesSurvive() throws {
         var settings = AppSettings.default
-        settings.showReadingInMenuBar = true
+        settings.showReadingInMenuBar = false
+        settings.retentionDays = 15
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
-        #expect(decoded.showReadingInMenuBar == true)
+        #expect(decoded.showReadingInMenuBar == false)
+        #expect(decoded.retentionDays == 15)
+        let handWritten = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"showReadingInMenuBar": false, "retentionDays": 15}"#.utf8))
+        #expect(handWritten.showReadingInMenuBar == false)
+        #expect(handWritten.retentionDays == 15)
+    }
+
+    @Test("an older settings file takes the new defaults only for the keys it never saved")
+    func legacyMissingKeysTakeNewDefaults() throws {
+        let noMenuBarKey = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "retentionDays": 15, "setupFinished": true}"#.utf8))
+        #expect(noMenuBarKey.showReadingInMenuBar == true)
+        #expect(noMenuBarKey.retentionDays == 15, "a saved retention is not replaced")
+        #expect(noMenuBarKey.port == 4000, "an older file keeps every other field")
+        let noRetentionKey = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"showReadingInMenuBar": false}"#.utf8))
+        #expect(noRetentionKey.retentionDays == 30)
+        #expect(noRetentionKey.showReadingInMenuBar == false, "a saved off is not replaced")
     }
 
     @Test("the chosen follower app defaults to xDrip4iOS, is absent from an older settings file, and survives a round trip")

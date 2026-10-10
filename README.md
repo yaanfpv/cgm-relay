@@ -38,8 +38,8 @@ That's it. Your app now catches up whenever it wakes.
 
 ## What you get
 
-- **Your minutes, kept.** Readings are encrypted on your Mac and kept for 15 days, which you can set anywhere from 1 to 90.
-- **A menu bar icon that stays out of your way.** It turns amber when readings are late and red when something stops, and can show your number right there.
+- **Your minutes, kept.** Readings are encrypted on your Mac and kept for 30 days, which you can set anywhere from 1 to 90.
+- **A menu bar icon that stays out of your way.** It turns amber when readings are late and red when something stops, and shows your number right there unless you turn that off.
 - **Set and forget.** It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
 - **Private.** Your follower apps talk to your Mac, not to us. There's no account and nothing to sign up for.
 - **Free and open source.** Read every line, build it yourself, or run it on a Linux server instead.
@@ -73,6 +73,14 @@ CGM Relay collects nothing. It talks to LibreLinkUp with your own account, and t
 - LibreLinkUp has no official API. CGM Relay uses the same endpoints the LibreLinkUp app and other open-source followers use, and those can change.
 - It only sees what LibreLinkUp has. If the phone running LibreLink drops off, those minutes come back later as 15-minute history.
 - It needs a Mac that stays awake, or a small server.
+
+## Roadmap
+
+- **Windows.** The same relay, living in the system tray by the clock instead of the menu bar.
+- **A Docker image and a systemd unit,** so a server install is one command.
+- **More CGM clouds** after LibreLinkUp.
+
+No dates. If one of these matters to you, [open an issue](https://github.com/yaanfpv/cgm-relay/issues/new) and say so.
 
 ## Contributing
 

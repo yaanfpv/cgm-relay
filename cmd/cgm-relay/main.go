@@ -49,6 +49,13 @@ const exitCodeStoreInUse = 4
 // value.
 const exitCodeStoreDamaged = 5
 
+// exitCodePortInUse is returned when the relay cannot listen on its follower
+// port because another program already holds it: permanent from this
+// process's own point of view, since restarting loses the same race. The
+// macOS menu bar app's EngineSupervisor.portInUseExitCode must always agree
+// with this value.
+const exitCodePortInUse = 6
+
 // The check-account exit codes below are returned only by the
 // check-account command; every one is a permanent verdict about the
 // account itself, never a reason to retry with the same credentials. The
@@ -208,6 +215,9 @@ func exitCodeForServeError(w io.Writer, err error) int {
 	case errors.Is(err, store.ErrDamaged):
 		fmt.Fprintln(w, "cgm-relay: serve: the saved readings file is damaged and cannot be read")
 		return exitCodeStoreDamaged
+	case errors.Is(err, relay.ErrPortInUse):
+		fmt.Fprintf(w, "cgm-relay: serve: %v\n", err)
+		return exitCodePortInUse
 	default:
 		fmt.Fprintf(w, "cgm-relay: serve: %v\n", err)
 		return exitCodeGenericFailure

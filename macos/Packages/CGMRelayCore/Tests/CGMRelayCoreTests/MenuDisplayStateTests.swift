@@ -100,6 +100,30 @@ struct MenuDisplayStateTests {
         }
     }
 
+    @Test("a port another app holds says so with the port number, and points at Advanced")
+    func portInUseFailure() {
+        let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .failed(.portInUse), status: nil, now: Self.now, port: 1337)
+        #expect(state.dot == .red)
+        #expect(state.statusLine == "Port is in use")
+        #expect(state.readingLine == "Port 1337 is in use by another app. Choose another in Settings, under Advanced.")
+        for forbidden in ["engine", "restart", "exit status", "exit code"] {
+            #expect(!state.statusLine.lowercased().contains(forbidden))
+            #expect(!state.readingLine.lowercased().contains(forbidden))
+        }
+    }
+
+    @Test("Tailscale HTTPS on the relay's own port says what to turn off, in plain words")
+    func httpsOnStatusPortFailure() {
+        let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .failed(.httpsOnStatusPort), status: nil, now: Self.now, port: 1338)
+        #expect(state.dot == .red)
+        #expect(state.statusLine == "Tailscale HTTPS port clash")
+        #expect(state.readingLine == "Tailscale HTTPS is set on the port CGM Relay keeps for itself. Turn Tailscale HTTPS off in Settings, under Advanced, with Tailscale running, and CGM Relay moves to a free port.")
+        for forbidden in ["engine", "restart", "exit status", "exit code", "status port"] {
+            #expect(!state.statusLine.lowercased().contains(forbidden))
+            #expect(!state.readingLine.lowercased().contains(forbidden))
+        }
+    }
+
     @Test("a damaged saved readings file names the problem in plain words, never engine jargon, SQLite terms, or the exit status")
     func storeDamagedFailure() {
         let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .failed(.storeDamaged), status: nil, now: Self.now)
@@ -322,6 +346,8 @@ struct MenuDisplayStateTests {
                  expectedShortStatus: "Saved readings can't be opened", expectedStatusAge: nil, expectedStatusDetail: nil),
             Case(name: "a permanently failed recovery move", engineState: .failed(.recoveryMoveFailed), status: nil,
                  expectedShortStatus: "Couldn't start fresh", expectedStatusAge: nil, expectedStatusDetail: nil),
+            Case(name: "Tailscale HTTPS on the relay's own port", engineState: .failed(.httpsOnStatusPort), status: nil,
+                 expectedShortStatus: "Tailscale HTTPS port clash", expectedStatusAge: nil, expectedStatusDetail: nil),
         ]
 
         for testCase in cases {
