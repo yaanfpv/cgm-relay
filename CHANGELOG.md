@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- For contributors: a small local certificate authority and a server certificate for this Mac's `.local` name, kept in the Keychain, so a phone on the same Wi-Fi can reach the relay over HTTPS without a public certificate. The authority is limited to that one name and the private IPv4 ranges, and a new one is made if the name changes.
 - A Mac menu bar app that checks your LibreLinkUp account about once a minute and keeps every reading it fetches, so a follower app on your phone catches up when it opens, even after a night asleep. A minute it didn't fetch, for example while your Mac was off or your phone was offline, is covered only by LibreLinkUp's own history of one reading every 15 minutes.
 - Works with xDrip4iOS, xDrip+, LoopFollow, Nightguard and any app that follows a Nightscout site: CGM Relay serves the part of the Nightscout API those apps use, accepts every token form they send, and compresses large responses for apps that ask.
 - First-launch setup: a short safety notice, then sign in to LibreLinkUp (checked before anything is saved), choose how your phone reaches your Mac, connect your app, and turn on Open at Login. Setup finishes only once a phone can actually reach the Mac.
