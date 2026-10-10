@@ -3,11 +3,20 @@ package relay_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -684,5 +693,139 @@ func TestRunPairingPageIsReachableButItsMintRouteIsNot(t *testing.T) {
 	}
 	if strings.Contains(pageURL, cfg.Token) {
 		t.Error("the pairing URL carries the token")
+	}
+}
+
+// selfSignedLeaf returns a certificate and key, both PEM, valid for
+// 127.0.0.1, for a LAN listener test whose client skips verification.
+func selfSignedLeaf(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "cgm-relay test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+}
+
+// TestRunStatusReportsReadingsFetchedOverTheLANListener drives the real
+// listeners: a client that fetches stored readings over the TLS LAN
+// listener with a valid token appears under lan_reading_clients with the
+// time of its latest fetch, and nothing else does. The same fetch on
+// listen_addr, a request with no or a wrong token, a status or profile
+// request, and a TLS connection that sends no request all leave it empty,
+// while the plain follower tracker keeps counting the loopback fetch.
+func TestRunStatusReportsReadingsFetchedOverTheLANListener(t *testing.T) {
+	t.Parallel()
+	fake := llufake.New(t)
+	fake.SetGraph(&llufake.Measurement{
+		FactoryTimestamp: recentReadingTime().Format(factoryTimestampLayout),
+		ValueInMgPerDl:   132,
+		TrendArrow:       3,
+	}, nil)
+	source := librelinkup.New("person@example.test", "leak-check-password-should-never-log", librelinkup.WithBaseURL(fake.URL))
+
+	cfg := testConfig(t)
+	cfg.LANListenAddrs = []string{"127.0.0.1:0"}
+	cfg.TLSCertPEM, cfg.TLSKeyPEM = selfSignedLeaf(t)
+	addrs, stop := runRelay(t, cfg, relay.WithSource(source))
+	defer stop()
+	if len(addrs.LAN) != 1 {
+		t.Fatalf("LAN addresses = %v, want exactly one", addrs.LAN)
+	}
+
+	lan := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	lanGet := func(path, userAgent string) (int, []byte) {
+		req, err := http.NewRequest(http.MethodGet, "https://"+addrs.LAN[0]+path, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := lan.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		return resp.StatusCode, mustReadAndClose(t, resp.Body)
+	}
+	lanReadingClients := func() map[string]time.Time {
+		resp, err := http.Get(fmt.Sprintf("http://%s/status", addrs.Status))
+		if err != nil {
+			t.Fatalf("GET /status: %v", err)
+		}
+		body := mustReadAndClose(t, resp.Body)
+		for _, secret := range []string{cfg.Token, "token="} {
+			if strings.Contains(string(body), secret) {
+				t.Errorf("/status carries %q: %s", secret, body)
+			}
+		}
+		var status struct {
+			Clients           map[string]time.Time `json:"clients"`
+			LANReadingClients map[string]time.Time `json:"lan_reading_clients"`
+		}
+		if err := json.Unmarshal(body, &status); err != nil {
+			t.Fatalf("decode /status: %v (body: %s)", err, body)
+		}
+		if _, ok := status.Clients["loopback-app/1.0"]; !ok {
+			t.Errorf("clients does not carry the loopback fetch: %s", body)
+		}
+		return status.LANReadingClients
+	}
+
+	entriesPath := "/api/v1/entries.json?count=5&token=" + cfg.Token
+	// The relay now holds a reading, so every request below that stays out
+	// of lan_reading_clients does so for its own reason, not for lack of data.
+	waitForEntry(t, fmt.Sprintf("http://%s%s", addrs.Nightscout, entriesPath), "loopback-app/1.0")
+
+	if code, _ := lanGet("/api/v1/entries.json?count=5", "no-token-app/1.0"); code != http.StatusUnauthorized {
+		t.Fatalf("LAN fetch with no token: status = %d, want 401", code)
+	}
+	if code, _ := lanGet("/api/v1/entries.json?count=5&token=wrong", "wrong-token-app/1.0"); code != http.StatusUnauthorized {
+		t.Fatalf("LAN fetch with a wrong token: status = %d, want 401", code)
+	}
+	if code, _ := lanGet("/api/v1/status.json?token="+cfg.Token, "status-app/1.0"); code != http.StatusOK {
+		t.Fatalf("LAN status.json: status = %d, want 200", code)
+	}
+	if code, _ := lanGet("/api/v1/profile?token="+cfg.Token, "profile-app/1.0"); code != http.StatusOK {
+		t.Fatalf("LAN profile: status = %d, want 200", code)
+	}
+	handshake, err := tls.Dial("tcp", addrs.LAN[0], &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("TLS handshake with no request: %v", err)
+	}
+	handshake.Close()
+	if got := lanReadingClients(); len(got) != 0 {
+		t.Fatalf("lan_reading_clients = %v after only requests that must not count, want none", got)
+	}
+
+	if code, body := lanGet(entriesPath, "follower-app/3.1"); code != http.StatusOK || !strings.Contains(string(body), `"sgv":132`) {
+		t.Fatalf("LAN fetch with the token: status = %d, body = %s", code, body)
+	}
+	first := lanReadingClients()
+	if len(first) != 1 || first["follower-app/3.1"].IsZero() {
+		t.Fatalf("lan_reading_clients = %v, want only follower-app/3.1 with a time", first)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	lanGet(entriesPath, "follower-app/3.1")
+	second := lanReadingClients()
+	if !second["follower-app/3.1"].After(first["follower-app/3.1"]) {
+		t.Errorf("a later fetch left the time at %v, want it after %v", second["follower-app/3.1"], first["follower-app/3.1"])
 	}
 }

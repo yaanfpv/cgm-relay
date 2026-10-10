@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/config"
@@ -34,8 +35,9 @@ const maxTrackedUserAgentBytes = 128
 
 // clientTracker records the last time each follower client, identified by
 // its User-Agent header, made an authenticated request to the Nightscout
-// API. trackClients is its only writer; the status handler is its only
-// reader.
+// API. trackClients is its only writer there; trackLANReadings uses a second
+// instance for the clients handed readings over a LAN listener. The status
+// handler is the only reader of either.
 type clientTracker struct {
 	mu   sync.Mutex
 	seen map[string]time.Time
@@ -126,6 +128,48 @@ func trackClients(next http.Handler, tracker *clientTracker, now func() time.Tim
 	})
 }
 
+// maxLANUserAgentRunes bounds the user agent recorded for a client that
+// fetched readings over a LAN listener.
+const maxLANUserAgentRunes = 120
+
+// lanUserAgent returns the User-Agent a LAN reading fetch is recorded
+// under: as sent, minus control characters, cut to maxLANUserAgentRunes
+// characters, or unknownUserAgent when nothing is left.
+func lanUserAgent(raw string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, raw)
+	if runes := []rune(cleaned); len(runes) > maxLANUserAgentRunes {
+		cleaned = string(runes[:maxLANUserAgentRunes])
+	}
+	if cleaned == "" {
+		return unknownUserAgent
+	}
+	return cleaned
+}
+
+// trackLANReadings wraps the Nightscout API handler served on the LAN
+// listeners. It records the requesting client's User-Agent and the time in
+// tracker only when the request was answered with 200 and at least one
+// reading, which can only happen after the credential check passed. A
+// refused request, an empty list, and the status and profile endpoints all
+// leave tracker untouched, so an entry means a follower app was actually
+// handed glucose data over the encrypted address, no more.
+func trackLANReadings(next http.Handler, tracker *clientTracker, now func() time.Time) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r, served := nightscout.ObserveReadings(r)
+		sw := &statusCapturingWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		if sw.status != http.StatusOK || !served() {
+			return
+		}
+		tracker.record(lanUserAgent(r.UserAgent()), now())
+	})
+}
+
 // statusResponse is the shape GET /status reports: enough for the menu
 // bar app, or a person on a VPS, to see at a glance whether readings are
 // fresh and which follower clients are actually polling.
@@ -144,6 +188,10 @@ type statusResponse struct {
 	// Clients maps each follower client's User-Agent to the last time it
 	// made an authenticated request.
 	Clients map[string]time.Time `json:"clients,omitempty"`
+	// LANReadingClients maps the User-Agent of each client that was handed
+	// at least one reading over an encrypted LAN listener to the time of its
+	// latest such request.
+	LANReadingClients map[string]time.Time `json:"lan_reading_clients,omitempty"`
 }
 
 // pollerStatus is the subset of *poller.Poller the status handler needs:
@@ -154,7 +202,7 @@ type pollerStatus interface {
 }
 
 // newStatusHandler builds the local status endpoint: GET /status
-// reporting the poller's health and the clients tracker has seen, and
+// reporting the poller's health and the clients the trackers have seen, and
 // POST /pairing minting a pairing code for the Mac app.
 //
 // Binding the listener to loopback is not enough on its own. A page open in
@@ -169,16 +217,17 @@ type pollerStatus interface {
 // headless install reading its config from a file or the environment, which
 // has no Mac app), /status stays open on loopback as documented and
 // /pairing does not exist, since only the Mac app mints pairing codes.
-func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.Store, statusSecret string) http.Handler {
+func newStatusHandler(p pollerStatus, tracker, lanReadings *clientTracker, pairings *pairing.Store, statusSecret string) http.Handler {
 	mux := http.NewServeMux()
 	statusRoute := func(w http.ResponseWriter, r *http.Request) {
 		s := p.Status()
 		resp := statusResponse{
-			Running:         true,
-			SignInFailing:   s.SignInFailing,
-			LastError:       s.LastError,
-			LastReadingMgDl: s.LastReadingMgDl,
-			Clients:         tracker.snapshot(),
+			Running:           true,
+			SignInFailing:     s.SignInFailing,
+			LastError:         s.LastError,
+			LastReadingMgDl:   s.LastReadingMgDl,
+			Clients:           tracker.snapshot(),
+			LANReadingClients: lanReadings.snapshot(),
 		}
 		if !s.LastFetchTime.IsZero() {
 			resp.LastFetchTime = &s.LastFetchTime

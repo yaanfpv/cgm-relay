@@ -154,6 +154,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 
 	tracker := newClientTracker()
+	lanReadings := newClientTracker()
 	pairings := pairing.NewStore(nil)
 	nsAPI := withPairingPage(trackClients(nsHandler, tracker, time.Now), pairings, cfg.Token)
 	nsServer, err := startServer(cfg.ListenAddr, nsAPI)
@@ -165,9 +166,10 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 	defer nsServer.shutdown()
 
+	lanAPI := trackLANReadings(nsAPI, lanReadings, time.Now)
 	var lanServers []*runningServer
 	for _, addr := range cfg.LANListenAddrs {
-		lan, err := startListening(addr, nsAPI, lanTLS, logger)
+		lan, err := startListening(addr, lanAPI, lanTLS, logger)
 		if err != nil {
 			return fmt.Errorf("relay: listen on %s: %w", addr, err)
 		}
@@ -175,7 +177,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 		lanServers = append(lanServers, lan)
 	}
 
-	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings, cfg.StatusSecret))
+	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, lanReadings, pairings, cfg.StatusSecret))
 	if err != nil {
 		return fmt.Errorf("relay: listen on %s: %w", cfg.StatusAddr, err)
 	}
