@@ -208,7 +208,7 @@ final class DownloadCapability: @unchecked Sendable {
     private var phase = Phase.live
     private var closing = false
     private var reservationID: UInt64 = 0
-    private var onEnded: (@Sendable () -> Void)?
+    private var onClosed: (@Sendable () -> Void)?
     private var timer: Task<Void, Never>?
 
     init(token: String, response: DownloadResponse, lifetime: Duration) {
@@ -223,12 +223,13 @@ final class DownloadCapability: @unchecked Sendable {
         }
     }
 
-    /// whenEnded runs `action` once the link has ended, at once if it
-    /// already has.
-    func whenEnded(_ action: @escaping @Sendable () -> Void) {
+    /// whenClosed runs `action` once the link stops taking new requests,
+    /// which is when it is told to end, even if a request still holds the
+    /// token. It runs at once if that already happened.
+    func whenClosed(_ action: @escaping @Sendable () -> Void) {
         let runNow = lock.withLock {
-            if phase == .ended { return true }
-            onEnded = action
+            if closing || phase == .ended { return true }
+            onClosed = action
             return false
         }
         if runNow { action() }
@@ -280,24 +281,31 @@ final class DownloadCapability: @unchecked Sendable {
     }
 
     /// end stops the link: a token nobody holds is dead at once, a reserved
-    /// one stays with its request until that request is done.
+    /// one stays with its request until that request is done. Either way the
+    /// closed-callback runs now, so no new connection is accepted.
     func end() {
-        let ended: (@Sendable () -> Void)? = lock.withLock {
+        let closed: (@Sendable () -> Void)? = lock.withLock {
             closing = true
-            return phase == .reserved ? nil : finishLocked()
+            return phase == .reserved ? takeClosedLocked() : finishLocked()
         }
-        ended?()
+        closed?()
+    }
+
+    /// takeClosedLocked must be called with the lock held. It hands out the
+    /// closed-callback once.
+    private func takeClosedLocked() -> (@Sendable () -> Void)? {
+        defer { onClosed = nil }
+        return onClosed
     }
 
     /// finishLocked must be called with the lock held. It returns the
-    /// ended-callback for the caller to run after unlocking.
+    /// closed-callback for the caller to run after unlocking.
     private func finishLocked() -> (@Sendable () -> Void)? {
         guard phase != .ended else { return nil }
         phase = .ended
         timer?.cancel()
         timer = nil
-        defer { onEnded = nil }
-        return onEnded
+        return takeClosedLocked()
     }
 
     /// tokensMatch compares without stopping at the first difference.
@@ -375,8 +383,9 @@ private final class ListenerGate: @unchecked Sendable {
 
 /// ListenerBox owns the one listener and the link it currently serves. A new
 /// link takes over the same listener, so the previous link's URL keeps
-/// getting an empty 404 until the listener closes; the listener closes when
-/// the current link ends or is closed.
+/// getting an empty 404 until the listener closes; the listener closes as
+/// soon as the current link ends or is closed, while a request already under
+/// way keeps its own connection.
 private final class ListenerBox: @unchecked Sendable {
     private let listener: NWListener
     private let gate = ListenerGate()
@@ -426,7 +435,7 @@ private final class ListenerBox: @unchecked Sendable {
             current = capability
             return previous
         }
-        capability.whenEnded { [weak self, id = ObjectIdentifier(capability)] in
+        capability.whenClosed { [weak self, id = ObjectIdentifier(capability)] in
             self?.linkEnded(id)
         }
         previous?.end()
