@@ -41,15 +41,35 @@ final class AppModel: ObservableObject {
     @Published private(set) var tailnetAvailable = false
     @Published private(set) var localNetworkAvailable = false
     @Published private(set) var connectAddressAvailability: ReachAddressAvailability = .available("127.0.0.1")
-    /// impliedBindHost is the host the current reach implies for this
-    /// Mac's current network interfaces (ReachAddressResolver.bindHost's
-    /// own answer). Published beside connectAddressAvailability, rather
-    /// than recomputed by connectPaneAddressState, so the Connect pane
+    /// impliedBindHost is what the current reach implies the engine is
+    /// started against for this Mac's current network interfaces
+    /// (EngineListenPlan.identity: the listen host, and on the local
+    /// network route the private addresses and name too). Published beside
+    /// connectAddressAvailability, rather than recomputed by
+    /// connectPaneAddressState, so the Connect pane
     /// compares boundHost against the exact same answer that decides
     /// whether the engine needs restarting at all.
     @Published private(set) var impliedBindHost = "127.0.0.1"
-    /// boundHost is the host the running engine was actually started
-    /// against -- nil whenever nothing is currently running -- so the
+    /// privateIPv4Addresses is every private IPv4 address this Mac has on a
+    /// Wi-Fi or wired interface right now, the ones the local network route
+    /// listens on and names in its certificate; primaryPrivateIPv4 is the
+    /// one on the default route. localHostName is this Mac's `.local` name.
+    @Published private(set) var privateIPv4Addresses: [String] = []
+    @Published private(set) var primaryPrivateIPv4: String?
+    @Published private(set) var localHostName = LocalHostName.fallback
+    /// isCertificateStepPresented is true while the person is giving a phone
+    /// the certificate; the Connect pane that asked shows the stepper while
+    /// it is.
+    @Published private(set) var isCertificateStepPresented = false
+    /// certificateNotice is the sentence the menu shows after the
+    /// certificate was made again, until the step is finished.
+    @Published private(set) var certificateNotice: String?
+    /// lanReadingClients mirrors the latest status's report of the apps that
+    /// fetched readings over the encrypted local network address, published
+    /// so a view watching for the first such fetch redraws when one lands.
+    @Published private(set) var lanReadingClients: [String: Date] = [:]
+    /// boundHost is the EngineListenPlan.identity the running engine was
+    /// actually started against -- nil whenever nothing is currently running -- so the
     /// Connect pane can show the address the engine is really listening
     /// on rather than a freshly recomputed guess that could differ from
     /// it until the next restart.
@@ -100,6 +120,14 @@ final class AppModel: ObservableObject {
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
     private let portBinder: any PortBinding
+    private let certificateAuthority: LocalCertificateAuthority
+    /// certificateServer is the one live certificate download link's server,
+    /// with the address and certificate it was made for.
+    private var certificateServer: (server: CertificateDownloadServer, address: String, certificate: Data)?
+    /// certificateLinkEpoch counts the times a certificate link was ended on
+    /// purpose (the step closed or finished, or the app quitting), so a link
+    /// still being made can tell it was asked for before one of those.
+    private var certificateLinkEpoch = 0
 
     private var latestStatus: EngineStatus?
 
@@ -214,6 +242,7 @@ final class AppModel: ObservableObject {
         self.tailscale = tailscale
         self.portBinder = portBinder
         self.credentialStore = credentialStore
+        certificateAuthority = LocalCertificateAuthority(store: credentialStore)
         self.settingsStore = settingsStore
         // notificationDelivering has no throwaway Debug counterpart the
         // way credentialStore and settingsStore do (notification permission
@@ -367,6 +396,8 @@ final class AppModel: ObservableObject {
     /// for the engine process to be gone, so a relaunch never meets a store
     /// the old engine still holds.
     func shutDown() async {
+        certificateLinkEpoch += 1
+        await endCertificateLink()
         await statusPoller.stop()
         await supervisor.stopAndWait(timeout: .seconds(3))
         boundHost = nil
@@ -438,33 +469,67 @@ final class AppModel: ObservableObject {
     /// mintPairingCode asks the running engine for a pairing code whose page
     /// carries the instructions for the address a phone reaches this Mac at;
     /// nil while the engine is not answering. A new code replaces the last.
+    /// While the local network route still needs the certificate step, no
+    /// page is made, since it would carry the token to a phone that cannot
+    /// yet reach this Mac over https.
     func mintPairingCode(address: String) async -> PairingCode? {
-        try? await pairingMinter.mint(apps: FollowerAppEntry.pairingApps(address: address))
+        guard !settings.needsCertificateStep else { return nil }
+        let route = localRoute
+        return try? await pairingMinter.mint(apps: FollowerAppEntry.pairingApps { route?.address(for: $0) ?? address })
     }
 
     /// currentToken reads the follower-facing bearer token for the
     /// Connect pane to display; nil only if bootstrapping has somehow not
-    /// run yet.
+    /// run yet, or while the local network route still needs the
+    /// certificate step.
     func currentToken() -> String? {
-        try? credentialStore.string(for: .token)
+        guard !settings.needsCertificateStep else { return nil }
+        return try? credentialStore.string(for: .token)
+    }
+
+    /// localRoute is how a follower app is given this Mac on the local
+    /// network route, nil on every other route and while this Mac has no
+    /// private address.
+    var localRoute: LocalFollowerRoute? {
+        guard settings.effectiveReach == .myLocalNetwork, let ipv4 = primaryPrivateIPv4 else { return nil }
+        return LocalFollowerRoute(hostName: localHostName, ipv4: ipv4, port: settings.port)
+    }
+
+    /// followerAddress is the address app is given: readyAddress, or on the
+    /// local network route the form that app takes.
+    func followerAddress(for app: FollowerApp, readyAddress: String) -> String {
+        localRoute?.address(for: app) ?? readyAddress
+    }
+
+    /// lanReadingFetch is the newest fetch of readings over the encrypted
+    /// local network address at or after since, nil when there was none.
+    func lanReadingFetch(since: Date) -> (userAgent: String, at: Date)? {
+        latestStatus?.lanReadingFetch(since: since)
     }
 
     /// refreshNetworkAddresses re-reads this Mac's own network
     /// interfaces: called when the menu opens and from the Connect and
     /// Advanced panes' onAppear, since Tailscale connecting or a network
     /// change can happen at any time, never only when a setting does.
-    /// When the address the chosen reach implies has since changed from
-    /// whatever the engine is actually bound to, it restarts the engine
-    /// once onto the new one, rather than leaving the Connect pane
-    /// showing an address nothing is listening on.
+    /// When what the chosen reach implies (its address, or on the local
+    /// network route the set of private addresses and this Mac's name) has
+    /// since changed from whatever the engine is actually started against,
+    /// it restarts the engine once onto the new one, which makes the
+    /// certificate again, rather than leaving the Connect pane showing an
+    /// address nothing is listening on.
     func refreshNetworkAddresses() {
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
         let primaryInterfaceName = SystemNetworkInterfaces.primaryInterfaceName()
 
+        let hostName = SystemNetworkInterfaces.localHostName()
+
         tailnetAvailable = ReachAddressResolver.tailscaleIPv4(among: interfaces) != nil
-        localNetworkAvailable = ReachAddressResolver.primaryLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) != nil
+        privateIPv4Addresses = ReachAddressResolver.privateLANIPv4s(among: interfaces)
+        primaryPrivateIPv4 = ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName)
+        localHostName = hostName
+        localNetworkAvailable = primaryPrivateIPv4 != nil
         connectAddressAvailability = ReachAddressResolver.displayHostAvailability(for: settings.effectiveReach, interfaces: interfaces, primaryInterfaceName: primaryInterfaceName)
-        impliedBindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+        impliedBindHost = EngineListenPlan.make(reach: settings.effectiveReach, interfaces: interfaces, hostName: hostName).identity
 
         if BoundAddressDecision.decide(currentBoundHost: boundHost, impliedBindHost: impliedBindHost) == .restartNeeded {
             Task { await restartEngineIfRunning() }
@@ -488,7 +553,9 @@ final class AppModel: ObservableObject {
             boundHost: boundHost,
             impliedBindHost: impliedBindHost,
             port: settings.port,
-            displayHostAvailability: connectAddressAvailability
+            displayHostAvailability: connectAddressAvailability,
+            localHostName: localHostName,
+            certificateStepFinished: settings.localCertificateStepFinished
         )
     }
 
@@ -532,7 +599,7 @@ final class AppModel: ObservableObject {
     /// relay's own status listener uses, nil when it is free. A typed port is
     /// never moved to another.
     func typedPortInUseMessage(_ port: Int) -> String? {
-        let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
+        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
         return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr))
     }
 
@@ -542,6 +609,7 @@ final class AppModel: ObservableObject {
         settings.tailscaleHTTPSEnabled = false
         settings.reach = reach
         persistSettings()
+        recomputeMenuState()
         // refreshNetworkAddresses() is the one and only restart trigger
         // here: with the new reach already in settings, it detects the
         // implied bind host has changed from whatever is currently
@@ -560,6 +628,103 @@ final class AppModel: ObservableObject {
         settings.units = units
         persistSettings()
         recomputeMenuState()
+    }
+
+    // MARK: - Certificate step
+
+    /// CertificateLinkError is why a certificate link could not be made.
+    enum CertificateLinkError: Error {
+        /// This Mac has no private network address a phone could fetch it from.
+        case noNetworkAddress
+    }
+
+    /// beginCertificateStep asks for the certificate stepper to be shown.
+    func beginCertificateStep() {
+        isCertificateStepPresented = true
+    }
+
+    /// finishCertificateStep records the person's word that their phone has
+    /// the certificate, so the local network route shows its address, token
+    /// and code, and ends the download link. The stepper stays open, so the
+    /// person can set up their app and watch it connect.
+    func finishCertificateStep() {
+        certificateLinkEpoch += 1
+        settings.localCertificateStepFinished = true
+        persistSettings()
+        certificateNotice = nil
+        recomputeMenuState()
+        Task { await endCertificateLink() }
+    }
+
+    /// closeCertificateStep closes the stepper, finished or not, and ends the
+    /// download link.
+    func closeCertificateStep() {
+        certificateLinkEpoch += 1
+        isCertificateStepPresented = false
+        Task { await endCertificateLink() }
+    }
+
+    /// mintCertificateLink makes the one link a phone opens to get CGM
+    /// Relay's certificate, served from this Mac's primary private address.
+    /// A newer link ends the previous one; the link works once, for a
+    /// couple of minutes. A link still being made when the step is closed,
+    /// or the app quits, is ended and the call throws CancellationError. A
+    /// cancelled caller does not end the link, since the phone may still be
+    /// downloading it.
+    func mintCertificateLink(format: CertificateDownloadFormat) async throws -> URL {
+        let epoch = certificateLinkEpoch
+        func stillWanted() -> Bool { isCertificateStepPresented && certificateLinkEpoch == epoch }
+        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+        let primaryInterfaceName = SystemNetworkInterfaces.primaryInterfaceName()
+        guard let address = ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: primaryInterfaceName) else {
+            throw CertificateLinkError.noNetworkAddress
+        }
+        let material = try certificateAuthority.currentMaterial(
+            name: SystemNetworkInterfaces.localHostName(),
+            ipv4s: ReachAddressResolver.privateLANIPv4s(among: interfaces)
+        )
+        if material.authorityChange != .unchanged {
+            applyAuthorityChange(material.authorityChange)
+            await restartEngineIfRunning()
+            guard stillWanted() else { throw CancellationError() }
+        }
+
+        let server: CertificateDownloadServer
+        if let live = certificateServer, live.address == address, live.certificate == material.authorityCertificateDER {
+            server = live.server
+        } else {
+            await endCertificateLink()
+            guard stillWanted() else { throw CancellationError() }
+            server = try CertificateDownloadServer(authorityCertificateDER: material.authorityCertificateDER, address: address)
+            certificateServer = (server, address, material.authorityCertificateDER)
+        }
+        let url: URL
+        do {
+            url = try await server.mint(format: format)
+        } catch {
+            if !stillWanted() { await endCertificateLink(ifServing: server) }
+            throw error
+        }
+        guard stillWanted() else {
+            await endCertificateLink(ifServing: server)
+            throw CancellationError()
+        }
+        return url
+    }
+
+    /// endCertificateLink(ifServing:) ends the link only while `server` is
+    /// still the one being served, so a newer link is left alone.
+    private func endCertificateLink(ifServing server: CertificateDownloadServer) async {
+        guard let live = certificateServer, live.server === server else { return }
+        await endCertificateLink()
+    }
+
+    /// endCertificateLink stops serving the certificate; called when the step
+    /// finishes or is cancelled and when the app quits.
+    func endCertificateLink() async {
+        guard let live = certificateServer else { return }
+        certificateServer = nil
+        await live.server.close()
     }
 
     // MARK: - Tailscale HTTPS and setup
@@ -900,22 +1065,26 @@ final class AppModel: ObservableObject {
             return
         }
         guard
-            let config = try? SettingsEngineConfigurationBuilder.build(
+            let start = try? SettingsEngineConfigurationBuilder.start(
                 settings: settings,
                 from: credentialStore,
                 interfaces: interfaces,
                 statusAddr: statusAddr,
                 databasePath: databasePath,
-                librelinkupBaseURL: librelinkupBaseURL
+                librelinkupBaseURL: librelinkupBaseURL,
+                hostName: SystemNetworkInterfaces.localHostName()
             )
         else {
             boundHost = nil
             await supervisor.fail(.configurationUnreadable)
             return
         }
-        boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+        boundHost = start.plan.identity
+        if let change = start.authorityChange {
+            applyAuthorityChange(change)
+        }
         await alertEngine.resumeAfterEngineStart()
-        await supervisor.start(configuration: config)
+        await supervisor.start(configuration: start.configuration)
     }
 
     /// choosePortBeforeStart settles the follower port before the engine
@@ -930,7 +1099,7 @@ final class AppModel: ObservableObject {
     /// candidate is taken. A check reserves nothing, so an engine that still
     /// cannot listen is reported by its exit code.
     private func choosePortBeforeStart(interfaces: [NetworkInterfaceAddress]) -> EngineSupervisor.FailureReason? {
-        let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: interfaces)
         let decision = PortAvailability.startPort(
             current: settings.port,
             default: AppSettings.defaultPort,
@@ -956,6 +1125,20 @@ final class AppModel: ObservableObject {
         case .statusPortLocked:
             return .httpsOnStatusPort
         }
+    }
+
+    /// applyAuthorityChange asks for the certificate step again when the
+    /// certificate authority was made anew, and keeps the menu's sentence
+    /// about it until the step is finished.
+    private func applyAuthorityChange(_ change: LocalCertificateMaterial.AuthorityChange) {
+        let finishedBefore = settings.localCertificateStepFinished
+        if let notice = settings.noteAuthorityChange(change) {
+            certificateNotice = notice
+        }
+        if settings.localCertificateStepFinished != finishedBefore {
+            persistSettings()
+        }
+        recomputeMenuState()
     }
 
     private func refreshCredentialsConfigured() {
@@ -996,6 +1179,8 @@ final class AppModel: ObservableObject {
     private func handleStatusUpdate(_ status: EngineStatus?) {
         if let status {
             latestStatus = status
+            let lanClients = status.lanReadingClients ?? [:]
+            if lanClients != lanReadingClients { lanReadingClients = lanClients }
         }
         recomputeMenuState()
 
@@ -1032,7 +1217,8 @@ final class AppModel: ObservableObject {
             status: latestStatus,
             now: Date(),
             units: settings.units,
-            port: settings.port
+            port: settings.port,
+            certificateNotice: settings.needsCertificateStep ? certificateNotice : nil
         )
         if next != menuState {
             menuState = next

@@ -133,13 +133,38 @@ public struct MenuDisplayState: Sendable, Equatable {
     ///   mg/dL so every existing caller keeps its current behaviour.
     /// - port: the follower port the engine was asked to listen on, named
     ///   in the explanation when another app already holds it.
+    /// - certificateNotice: a sentence about the local network certificate
+    ///   to show on the detail line when no other detail is there.
     public static func make(
         credentialsConfigured: Bool,
         engineState: EngineSupervisor.RunState,
         status: EngineStatus?,
         now: Date,
         units: GlucoseUnit = .mgDl,
-        port: Int? = nil
+        port: Int? = nil,
+        certificateNotice: String? = nil
+    ) -> MenuDisplayState {
+        var state = makeWithoutNotice(
+            credentialsConfigured: credentialsConfigured,
+            engineState: engineState,
+            status: status,
+            now: now,
+            units: units,
+            port: port
+        )
+        if let certificateNotice, state.showsStatusLine, state.statusDetail == nil {
+            state.statusDetail = certificateNotice
+        }
+        return state
+    }
+
+    private static func makeWithoutNotice(
+        credentialsConfigured: Bool,
+        engineState: EngineSupervisor.RunState,
+        status: EngineStatus?,
+        now: Date,
+        units: GlucoseUnit,
+        port: Int?
     ) -> MenuDisplayState {
         guard credentialsConfigured else {
             return MenuDisplayState(

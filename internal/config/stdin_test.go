@@ -144,6 +144,27 @@ func TestLoadFromReader(t *testing.T) {
 		}
 	})
 
+	t.Run("listen_addr on a tailnet address stays plain http and needs no certificate", func(t *testing.T) {
+		input := fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "listen_addr": "100.64.12.34:1337",
+  "key": %q
+}`, testKeyBase64('K'))
+
+		got, err := config.LoadFromReader(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.ListenAddr != "100.64.12.34:1337" {
+			t.Errorf("ListenAddr = %q, want the tailnet address kept", got.ListenAddr)
+		}
+		if len(got.LANListenAddrs) != 0 {
+			t.Errorf("LANListenAddrs = %v, want none", got.LANListenAddrs)
+		}
+	})
+
 	t.Run("key_path is ignored even when it names a real file with a different key", func(t *testing.T) {
 		keyFile := filepath.Join(t.TempDir(), "key")
 		if err := os.WriteFile(keyFile, []byte(testKeyBase64('D')+"\n"), 0o600); err != nil {
@@ -349,6 +370,11 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 			name:    "status_secret too short to be a secret",
 			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "status_secret": %q, "key": %q}`, email, password, shortSecret, goodKey),
 			wantErr: "status_secret",
+		},
+		{
+			name:    "lan_listen_addrs entry that is not a private IPv4 address",
+			input:   fmt.Sprintf(`{"librelinkup_email": %q, "librelinkup_password": %q, "token": "some-token", "lan_listen_addrs": ["192.168.1.5:8443", "100.64.1.2:8443"], "key": %q}`, email, password, goodKey),
+			wantErr: "lan_listen_addrs",
 		},
 		{
 			name:    "retention zero",

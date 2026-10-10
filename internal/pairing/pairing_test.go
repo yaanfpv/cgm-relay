@@ -2,6 +2,7 @@ package pairing_test
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -39,7 +40,8 @@ func sampleApps() []pairing.App {
 			Name:  "First App",
 			Steps: []string{"Open Settings <b>now</b>.", "Leave the secret blank."},
 			Fields: []pairing.Field{
-				{Label: "URL", Value: "https://relay.example.net"},
+				{Label: "URL", Value: "https://relay-mac.local"},
+				{Label: "Port", Value: "1337"},
 				{Label: "Token", Value: "{token}"},
 			},
 			Links: []pairing.Link{{Label: "Open First App", URL: "xdripswift://open"}},
@@ -47,7 +49,7 @@ func sampleApps() []pairing.App {
 		{
 			Name:   "Second App",
 			Steps:  []string{"Paste the address."},
-			Fields: []pairing.Field{{Label: "Follow URL", Value: "https://{token}@relay.example.net:8443"}},
+			Fields: []pairing.Field{{Label: "Follow URL", Value: "https://{token}@192.168.1.42:1337"}},
 			Links:  []pairing.Link{{Label: "Get Second App", URL: "https://apps.example.com/second"}},
 		},
 	}
@@ -100,9 +102,10 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 
 	for _, want := range []string{
 		">First App</h2>", ">Second App</h2>",
-		">https://relay.example.net</code>",
+		">https://relay-mac.local</code>",
+		">1337</code>",
 		">" + testToken + "</code>",
-		">https://" + testToken + "@relay.example.net:8443</code>",
+		">https://" + testToken + "@192.168.1.42:1337</code>",
 		"Leave the secret blank.",
 		`href="xdripswift://open"`, `href="https://apps.example.com/second"`,
 	} {
@@ -113,9 +116,12 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 	if strings.Contains(body, "{token}") {
 		t.Error("a token placeholder was left unfilled")
 	}
+	if strings.Contains(body, "http://") {
+		t.Error("the page offers a plain http address")
+	}
 	// An app's steps come before its values, and the values keep the order
 	// the Mac sent them in.
-	order := []string{"Leave the secret blank.", ">URL</div>", ">Token</div>", ">Second App</h2>"}
+	order := []string{"Leave the secret blank.", ">URL</div>", ">Port</div>", ">Token</div>", ">Second App</h2>"}
 	last := -1
 	for _, want := range order {
 		at := strings.Index(body, want)
@@ -126,6 +132,29 @@ func TestPageShowsExactlyTheMintedAppsAndInsertsTheTokenWhereAskedOnly(t *testin
 	}
 	if strings.Contains(body, "<b>now</b>") || !strings.Contains(body, "&lt;b&gt;now&lt;/b&gt;") {
 		t.Error("app wording was not HTML-escaped")
+	}
+}
+
+// TestPageRemindsEachPhoneOnlyOverTheLocalNetworkRoute checks the
+// once-per-phone certificate reminder is on a page served over the relay's
+// own TLS listener, and absent from one served in plain http (loopback, the
+// tailnet, or Tailscale Serve's proxy), where no certificate step exists.
+func TestPageRemindsEachPhoneOnlyOverTheLocalNetworkRoute(t *testing.T) {
+	t.Parallel()
+	const reminder = "Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi."
+	store, _ := newTestStore()
+	code := mustMint(t, store)
+	h := pairing.PageHandler(store, testToken)
+
+	overTLS := httptest.NewRequest(http.MethodGet, "/connect/"+code, nil)
+	overTLS.TLS = &tls.ConnectionState{}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, overTLS)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), reminder) {
+		t.Errorf("over TLS: status %d, reminder shown = %v", rec.Code, strings.Contains(rec.Body.String(), reminder))
+	}
+	if plain := get(h, "/connect/"+code).Body.String(); strings.Contains(plain, "certificate once") {
+		t.Error("a page served in plain http carries the certificate reminder")
 	}
 }
 
@@ -275,8 +304,8 @@ func TestEveryCopyButtonHasAnAccessibleNameAndItsValue(t *testing.T) {
 	body := get(pairing.PageHandler(store, testToken), "/connect/"+code).Body.String()
 
 	buttons := regexp.MustCompile(`<button[^>]*class="btn copy"[^>]*>`).FindAllString(body, -1)
-	if len(buttons) != 3 {
-		t.Fatalf("found %d Copy buttons, want 3: one per minted field", len(buttons))
+	if len(buttons) != 4 {
+		t.Fatalf("found %d Copy buttons, want 4: one per minted field", len(buttons))
 	}
 	for _, b := range buttons {
 		id := regexp.MustCompile(`data-for="([^"]+)"`).FindStringSubmatch(b)

@@ -27,6 +27,11 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
     /// clients maps each follower app's User-Agent to the last time it
     /// made an authenticated request to the Nightscout API.
     public var clients: [String: Date]?
+    /// lanReadingClients maps the User-Agent of each app that was handed at
+    /// least one reading over the engine's encrypted local-network address
+    /// to the time of its latest such request. It is nil when none has been,
+    /// and when the engine is older than the field.
+    public var lanReadingClients: [String: Date]?
 
     private enum CodingKeys: String, CodingKey {
         case running
@@ -37,6 +42,7 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         case signInFailing = "sign_in_failing"
         case lastError = "last_error"
         case clients
+        case lanReadingClients = "lan_reading_clients"
     }
 
     public init(
@@ -47,7 +53,8 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         lastReadingTrend: String? = nil,
         signInFailing: Bool = false,
         lastError: String? = nil,
-        clients: [String: Date]? = nil
+        clients: [String: Date]? = nil,
+        lanReadingClients: [String: Date]? = nil
     ) {
         self.running = running
         self.lastFetchTime = lastFetchTime
@@ -57,6 +64,16 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         self.signInFailing = signInFailing
         self.lastError = lastError
         self.clients = clients
+        self.lanReadingClients = lanReadingClients
+    }
+
+    /// The most recent request that fetched readings over the encrypted
+    /// local-network address at or after `since`, or nil when there is none.
+    public func lanReadingFetch(since: Date) -> (userAgent: String, at: Date)? {
+        guard let latest = lanReadingClients?.filter({ $0.value >= since }).max(by: { $0.value < $1.value }) else {
+            return nil
+        }
+        return (userAgent: latest.key, at: latest.value)
     }
 }
 

@@ -120,6 +120,12 @@ public enum FollowerAppEntry {
     /// pairingApps is every app's instructions, in the order the pane offers
     /// them: what the Mac sends to the engine for the pairing page.
     public static func pairingApps(address: String) -> [Instructions] {
-        FollowerApp.allCases.map { instructions(for: $0, address: address) }
+        pairingApps { _ in address }
+    }
+
+    /// pairingApps(addressFor:) is the same list where each app is given its
+    /// own address, as on the local network route.
+    public static func pairingApps(addressFor address: (FollowerApp) -> String) -> [Instructions] {
+        FollowerApp.allCases.map { instructions(for: $0, address: address($0)) }
     }
 }

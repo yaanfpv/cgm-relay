@@ -119,6 +119,7 @@ func (h *handler) handleEntries(w http.ResponseWriter, r *http.Request) {
 	for _, rd := range readings {
 		entries = append(entries, entryOf(rd))
 	}
+	noteReadings(r, len(entries))
 	writeJSON(w, r, entries)
 }
 
@@ -231,6 +232,7 @@ func (h *handler) handleCurrent(w http.ResponseWriter, r *http.Request) {
 	for _, rd := range readings {
 		entries = append(entries, entryOf(rd))
 	}
+	noteReadings(r, len(entries))
 	writeJSON(w, r, entries)
 }
 
