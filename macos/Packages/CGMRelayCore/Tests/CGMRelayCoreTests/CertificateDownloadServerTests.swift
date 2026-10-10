@@ -235,6 +235,10 @@ struct CertificateDownloadServerTests {
         try await Task.sleep(for: .milliseconds(300))
 
         await fixture.server.close()
+        // The held request does not keep the listener open.
+        await #expect(throws: (any Error).self) {
+            _ = try await RawClient.connect(port: port)
+        }
         try await slow.send("Host: x\r\n\r\n")
         let reply = HTTPReply(parsing: await slow.readToEnd())
         #expect(reply?.status == 200)
@@ -243,6 +247,27 @@ struct CertificateDownloadServerTests {
         await #expect(throws: (any Error).self) {
             _ = try await HTTPReply.get(url)
         }
+    }
+
+    @Test("a link that expires while a response is held stops accepting connections at once and lets it finish")
+    func expiryLetsHeldResponseFinish() async throws {
+        let fixture = try Self.makeFixture(lifetime: .milliseconds(800))
+        let url = try await fixture.server.mint(format: .android)
+        let port = url.port!
+        let slow = try await RawClient.connect(port: port)
+        try await slow.send("GET \(url.path) HTTP/1.1\r\n")
+        try await Task.sleep(for: .milliseconds(300))
+
+        // Well past the lifetime, and well inside the request timeout.
+        try await Task.sleep(for: .milliseconds(1200))
+        await #expect(throws: (any Error).self) {
+            _ = try await RawClient.connect(port: port)
+        }
+        try await slow.send("Host: x\r\n\r\n")
+        let reply = HTTPReply(parsing: await slow.readToEnd())
+        await fixture.server.close()
+        #expect(reply?.status == 200)
+        #expect(reply?.body == fixture.material.authorityCertificateDER)
     }
 
     @Test("a new link while a response is held lets it finish, and the old token is gone afterwards")
