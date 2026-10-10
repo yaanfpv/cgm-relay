@@ -6,6 +6,7 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -46,7 +47,7 @@ const (
 	idleTimeout       = 60 * time.Second
 )
 
-// Addresses reports where Run actually bound its two listeners, which
+// Addresses reports where Run actually bound its listeners, which
 // matters when a caller configures an ephemeral port ("host:0") rather
 // than a fixed one.
 type Addresses struct {
@@ -54,6 +55,9 @@ type Addresses struct {
 	Nightscout string
 	// Status is the address the local status endpoint is reachable at.
 	Status string
+	// LAN holds the addresses the TLS listeners cfg.LANListenAddrs asked
+	// for are bound to, in the same order.
+	LAN []string
 }
 
 // Option configures a Run call.
@@ -80,8 +84,8 @@ func WithLogOutput(w io.Writer) Option {
 	return func(st *settings) { st.logOutput = w }
 }
 
-// WithReady registers a callback invoked exactly once, after both
-// listeners are bound and before Run blocks waiting for ctx. Tests use it
+// WithReady registers a callback invoked exactly once, after every
+// listener is bound and before Run blocks waiting for ctx. Tests use it
 // to learn the actual bound addresses when a config asks for an
 // ephemeral port; production code has no need to call it.
 func WithReady(fn func(Addresses)) Option {
@@ -89,8 +93,9 @@ func WithReady(fn func(Addresses)) Option {
 }
 
 // Run signs in to the configured CGM account, polls it once a minute, and
-// serves the stored readings over the Nightscout API (cfg.ListenAddr) and
-// a local status endpoint (cfg.StatusAddr), until ctx is done. It returns
+// serves the stored readings over the Nightscout API (cfg.ListenAddr, plain
+// http, and each of cfg.LANListenAddrs, TLS only) and a local status
+// endpoint (cfg.StatusAddr), until ctx is done. It returns
 // ctx's own error once ctx is done and every component has stopped
 // cleanly, or a non-nil error naming whichever piece of the wiring failed
 // to start.
@@ -103,6 +108,15 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 
 	if !config.IsLoopbackAddr(cfg.StatusAddr) {
 		return fmt.Errorf("relay: status address %q is not loopback-only", cfg.StatusAddr)
+	}
+
+	// Refused before the store opens or anything binds, so a bad certificate
+	// can never leave a plain-http listener behind. The addresses' own
+	// private-IPv4 rule is config.ValidateLANListenAddrs, applied where the
+	// configuration is read; Run binds what it is handed.
+	lanTLS, err := cfg.LANTLSConfig()
+	if err != nil {
+		return fmt.Errorf("relay: %w", err)
 	}
 
 	if err := ensureDatabaseDir(cfg.DatabasePath); err != nil {
@@ -134,11 +148,22 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 
 	tracker := newClientTracker()
 	pairings := pairing.NewStore(nil)
-	nsServer, err := startServer(cfg.ListenAddr, withPairingPage(trackClients(nsHandler, tracker, time.Now), pairings, cfg.Token))
+	nsAPI := withPairingPage(trackClients(nsHandler, tracker, time.Now), pairings, cfg.Token)
+	nsServer, err := startServer(cfg.ListenAddr, nsAPI)
 	if err != nil {
 		return fmt.Errorf("relay: listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer nsServer.shutdown()
+
+	var lanServers []*runningServer
+	for _, addr := range cfg.LANListenAddrs {
+		lan, err := startListening(addr, nsAPI, lanTLS, logger)
+		if err != nil {
+			return fmt.Errorf("relay: listen on %s: %w", addr, err)
+		}
+		defer lan.shutdown()
+		lanServers = append(lanServers, lan)
+	}
 
 	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings, cfg.StatusSecret))
 	if err != nil {
@@ -147,10 +172,17 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	defer statusServer.shutdown()
 
 	logger.Printf("serving the Nightscout API on %s", nsServer.addr())
+	for _, lan := range lanServers {
+		logger.Printf("serving the Nightscout API over TLS on %s", lan.addr())
+	}
 	logger.Printf("serving the status endpoint on %s", statusServer.addr())
 
 	if st.ready != nil {
-		st.ready(Addresses{Nightscout: nsServer.addr(), Status: statusServer.addr()})
+		addrs := Addresses{Nightscout: nsServer.addr(), Status: statusServer.addr()}
+		for _, lan := range lanServers {
+			addrs.LAN = append(addrs.LAN, lan.addr())
+		}
+		st.ready(addrs)
 	}
 
 	// runCtx is derived from ctx rather than used interchangeably with it:
@@ -166,10 +198,23 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	go func() { pollErr <- p.Run(runCtx) }()
 	go watchPollerStatus(runCtx, p, logger)
 
+	// A LAN listener that dies is as fatal as the loopback one: the process
+	// would otherwise keep running with phones silently unable to connect.
+	lanErr := make(chan error, 1)
+	for _, lan := range lanServers {
+		go func() {
+			if err := <-lan.errCh; err != nil {
+				lanErr <- err
+			}
+		}()
+	}
+
 	var runErr error
 	select {
 	case <-ctx.Done():
 		runErr = ctx.Err()
+	case err := <-lanErr:
+		runErr = fmt.Errorf("relay: LAN server stopped: %w", err)
 	case err := <-nsServer.errCh:
 		if err != nil {
 			runErr = fmt.Errorf("relay: nightscout server stopped: %w", err)
@@ -240,6 +285,16 @@ type runningServer struct {
 // listener is bound, so a caller can learn the actual address
 // immediately, including when addr asks for an ephemeral port.
 func startServer(addr string, handler http.Handler) (*runningServer, error) {
+	return startListening(addr, handler, nil, nil)
+}
+
+// startListening is startServer with an optional TLS configuration. A
+// non-nil tlsConfig makes the listener speak TLS only: every connection must
+// complete a handshake under it, with no plain-http fallback on the same
+// port. Nil means plain http. A non-nil errorLog receives the server's own
+// connection-level errors, such as a failed handshake, in place of the
+// process-wide logger.
+func startListening(addr string, handler http.Handler, tlsConfig *tls.Config, errorLog *log.Logger) (*runningServer, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -250,10 +305,17 @@ func startServer(addr string, handler http.Handler) (*runningServer, error) {
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
+		TLSConfig:         tlsConfig,
+		ErrorLog:          errorLog,
 	}
 	rs := &runningServer{srv: srv, ln: ln, errCh: make(chan error, 1)}
 	go func() {
-		serveErr := srv.Serve(ln)
+		var serveErr error
+		if tlsConfig != nil {
+			serveErr = srv.ServeTLS(ln, "", "")
+		} else {
+			serveErr = srv.Serve(ln)
+		}
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			rs.errCh <- serveErr
 		} else {
