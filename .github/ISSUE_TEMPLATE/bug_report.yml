@@ -47,7 +47,7 @@ body:
     id: app_version
     attributes:
       label: CGM Relay version
-      placeholder: e.g. 0.1.0
+      placeholder: e.g. 1.0.0
     validations:
       required: true
   - type: input
