@@ -2,6 +2,29 @@ import AppKit
 import CGMRelayCore
 import SwiftUI
 
+extension View {
+    /// certificateStepSheet shows the HTTPS step as a sheet on this view while
+    /// this view opened it (isPresenting) and the step is open, so only the
+    /// window the person pressed the button in shows it. Dismissing the sheet
+    /// closes the step, and a step closed elsewhere clears isPresenting.
+    func certificateStepSheet(isPresenting: Binding<Bool>, model: AppModel) -> some View {
+        sheet(isPresented: Binding(
+            get: { isPresenting.wrappedValue && model.isCertificateStepPresented },
+            set: { presented in
+                if !presented {
+                    isPresenting.wrappedValue = false
+                    model.closeCertificateStep()
+                }
+            }
+        )) {
+            CertificateStepView(model: model)
+        }
+        .onChange(of: model.isCertificateStepPresented) { _, presented in
+            if !presented { isPresenting.wrappedValue = false }
+        }
+    }
+}
+
 /// CertificateStepView walks a person through giving one phone CGM Relay's
 /// certificate, so a follower app can reach this Mac over https on the
 /// local network: which phone, a code to scan, the phone's own install

@@ -88,7 +88,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
 <main>
 <h1>Connect your follower app</h1>
 <p class="lede">Find your app below. Tap Copy next to each value and paste it into the app.</p>
-{{if .LocalNetwork}}<p class="lede note">Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi. For another phone, choose Set Up HTTPS on a Phone in CGM Relay's Connect settings on your Mac.</p>{{end}}
+{{if .LocalNetwork}}<p class="lede note">Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi. To add another phone, choose Set Up a Phone in CGM Relay's Advanced settings on your Mac.</p>{{end}}
 {{range .Apps}}
 <section class="card" aria-labelledby="{{.ID}}-h">
 <h2 id="{{.ID}}-h">{{.Name}}</h2>

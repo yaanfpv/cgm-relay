@@ -13,8 +13,9 @@ import SwiftUI
 /// right now. Setup's connect step is this same view, laid out more compactly,
 /// with its own way out of the blocked state and its own trailing sections.
 /// On the local network route, until a phone has CGM Relay's certificate,
-/// it offers the certificate stepper instead, as a sheet on this pane, and
-/// afterwards leads with the same step for each further phone.
+/// it offers the certificate stepper instead, as a sheet on this pane; after
+/// that, a further phone is set up from Advanced, which the steps' footer
+/// says.
 /// The token is read from the Keychain when the view appears, after a
 /// rotation and when the certificate step changes, and held in state.
 struct ConnectPaneView<Extra: View>: View {
@@ -77,7 +78,6 @@ struct ConnectPaneView<Extra: View>: View {
                     action: openCertificateStep
                 )
             case .ready(let address):
-                if !isCompact, model.localRoute != nil { addPhoneSection }
                 readySection(address: address)
                 if !isCompact { stepsSection(address: address) }
                 extra(token)
@@ -96,20 +96,7 @@ struct ConnectPaneView<Extra: View>: View {
                 pairingCode = nil
             }
         }
-        .sheet(isPresented: Binding(
-            get: { isPresentingCertificateStep && model.isCertificateStepPresented },
-            set: { presented in
-                if !presented {
-                    isPresentingCertificateStep = false
-                    model.closeCertificateStep()
-                }
-            }
-        )) {
-            CertificateStepView(model: model)
-        }
-        .onChange(of: model.isCertificateStepPresented) { _, presented in
-            if !presented { isPresentingCertificateStep = false }
-        }
+        .certificateStepSheet(isPresenting: $isPresentingCertificateStep, model: model)
         .onChange(of: model.settings.needsCertificateStep) {
             token = model.currentToken() ?? ""
         }
@@ -164,23 +151,6 @@ struct ConnectPaneView<Extra: View>: View {
     private func openCertificateStep() {
         isPresentingCertificateStep = true
         model.beginCertificateStep()
-    }
-
-    /// addPhoneSection leads the local network route once a phone has the
-    /// certificate: the app cannot tell phones apart, so every further phone
-    /// is offered the same step, and nothing here claims which phones have it.
-    private var addPhoneSection: some View {
-        Section {
-            HStack {
-                Text("Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 12)
-                AccessibleButton("Set Up HTTPS on a Phone…", action: openCertificateStep)
-                    .fixedSize()
-            }
-        }
     }
 
     private var readyAddress: String? {
@@ -270,12 +240,19 @@ struct ConnectPaneView<Extra: View>: View {
     }
 
     /// stepsSection is where the chosen app keeps its fields, in its own
-    /// names, and the one-tap copy for an app that takes a single address.
+    /// names, and the one-tap copy for an app that takes a single address. On
+    /// the local network route its footer says a further phone needs the
+    /// certificate first; the app cannot tell phones apart, so it never
+    /// claims which phones have it.
     private func stepsSection(address: String) -> some View {
         Section {
             stepsBlock(address: address)
         } header: {
             Text("In \(followerApp.displayName)")
+        } footer: {
+            if model.localRoute != nil {
+                Text("Each phone needs CGM Relay's certificate once. Set up another phone in Advanced.")
+            }
         }
     }
 

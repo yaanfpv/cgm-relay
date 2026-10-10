@@ -13,6 +13,10 @@ struct ReachChoicesView: View {
     /// showsAvailabilityNotes is false where the surrounding screen already
     /// says, once, why the person cannot go on.
     var showsAvailabilityNotes = true
+    /// setUpPhone, where given, is offered beside the local network's
+    /// certificate note as the way to set up a phone. Setup leaves it out,
+    /// since its next step is that very step.
+    var setUpPhone: (() -> Void)?
 
     /// isLocked is true while Tailscale HTTPS is set up: the relay then
     /// serves this Mac only and Tailscale does the reaching, so the choice
@@ -46,11 +50,25 @@ struct ReachChoicesView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("Each phone installs CGM Relay's certificate once, then reads over HTTPS.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let setUpPhone {
+                    HStack {
+                        certificateNote
+                        Spacer(minLength: 12)
+                        AccessibleButton("Set Up a Phone…", accessibleName: "Set Up HTTPS on a Phone", action: setUpPhone)
+                            .fixedSize()
+                    }
+                } else {
+                    certificateNote
+                }
             }
         }
+    }
+
+    private var certificateNote: some View {
+        Text("Each phone installs CGM Relay's certificate once, then reads over HTTPS.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// reachRow is one of the three reach options, hand-built rather than

@@ -9,6 +9,8 @@ struct AdvancedPaneView: View {
     @State private var portText = ""
     @State private var portErrorMessage: String?
     @FocusState private var portFieldFocused: Bool
+    /// isPresentingCertificateStep is whether this pane opened the HTTPS step.
+    @State private var isPresentingCertificateStep = false
 
     private var isTailscaleRunning: Bool {
         if case .running = model.tailscaleStatus { return true }
@@ -55,13 +57,17 @@ struct AdvancedPaneView: View {
             }
 
             Section {
-                ReachChoicesView(model: model)
+                ReachChoicesView(model: model, setUpPhone: {
+                    isPresentingCertificateStep = true
+                    model.beginCertificateStep()
+                })
             } header: {
                 Text("Who can reach it")
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+        .certificateStepSheet(isPresenting: $isPresentingCertificateStep, model: model)
         .onAppear {
             model.refreshNetworkAddresses()
             portText = String(model.settings.port)
