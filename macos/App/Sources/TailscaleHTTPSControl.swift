@@ -42,7 +42,7 @@ struct TailscaleHTTPSControl: View {
         case .unreadable:
             row("Couldn't read Tailscale's settings.", .action("Check Again") { Task { await model.refreshTailscale() } })
         case .noFreePort:
-            row("Every port CGM Relay can use is taken.", .unavailable("Not available"))
+            row("Every port from 443 up is taken.", .unavailable("Not available"))
         case .off(let port):
             row(
                 model.settings.tailscaleHTTPSEnabled ? "Turned off in Tailscale. Turn it on again." : Self.offCaption,
@@ -78,7 +78,7 @@ struct TailscaleHTTPSControl: View {
         case .unknown, .unavailable, .unreadable:
             EmptyView()
         case .noFreePort:
-            note("Tailscale already serves on every port CGM Relay can use (\(portList)), so it can't turn on HTTPS. Use one of the other ways below.")
+            note("Tailscale already serves something on every port from 443 up, so it can't turn on HTTPS. Use one of the other ways below.")
         case .off(let port):
             // A failure takes the command's place, so the step stays inside
             // its window height.
@@ -94,11 +94,6 @@ struct TailscaleHTTPSControl: View {
 
     private func row(_ caption: String, _ slot: SetupStatusRow.Slot) -> some View {
         SetupStatusRow(name: "tailscale-https", title: Self.title, caption: caption, slot: slot)
-    }
-
-    private var portList: String {
-        let ports = TailscaleHTTPSState.candidatePorts.map(String.init)
-        return ports.dropLast().joined(separator: ", ") + " and " + (ports.last ?? "")
     }
 
     private func note(_ text: String) -> some View {

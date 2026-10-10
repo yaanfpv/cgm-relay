@@ -166,19 +166,27 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
     /// unreadable: Tailscale runs but its serve settings could not be read.
     case unreadable
     /// off: the app's handler is not serving; HTTPS can be turned on at
-    /// `port`, the first listed port with no entry of any kind.
+    /// `port`, 443 or the nearest port above it with no entry of any kind.
     case off(port: Int)
-    /// noFreePort: every port CGM Relay may use is taken by something else.
+    /// noFreePort: every port from 443 up is taken by something else.
     case noFreePort
     /// on: this Mac's own name serves the relay at "/" over HTTPS on `port`.
     case on(port: Int)
 
-    /// candidatePorts are the tailnet ports CGM Relay may serve HTTPS on,
-    /// in order: 443, so the address needs no port, then 8443 and 10000.
-    /// Tailscale's serve command accepts any HTTPS port up to 65535
-    /// (srvTypeAndPortFromFlags in cmd/tailscale/cli/serve_v2.go); these
-    /// are the ones Tailscale's own serve and funnel documentation uses.
-    public static let candidatePorts = [443, 8443, 10000]
+    /// preferredPort is where CGM Relay serves HTTPS when it can: 443, so the
+    /// address needs no port. When something else holds it, the nearest free
+    /// port above it is used. Tailscale's serve command accepts any HTTPS port
+    /// up to 65535 (srvTypeAndPortFromFlags in cmd/tailscale/cli/serve_v2.go);
+    /// only Funnel, which CGM Relay never uses, is limited to 443, 8443 and
+    /// 10000.
+    public static let preferredPort = 443
+    static let highestPort = 65535
+
+    /// nearestFreePort is preferredPort, or the first port above it that
+    /// nothing in occupied holds.
+    static func nearestFreePort(occupied: Set<Int>) -> Int? {
+        (preferredPort...highestPort).first { !occupied.contains($0) }
+    }
 
     /// isOn is whether the app's handler is serving.
     public var isOn: Bool {
@@ -194,10 +202,10 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
             return .unavailable
         case .running(let name):
             guard let config else { return .unreadable }
-            if let ours = candidatePorts.first(where: { config.isOurs(host: name, httpsPort: $0, relayPort: relayPort) }) {
+            if let ours = config.httpsPorts.sorted().first(where: { config.isOurs(host: name, httpsPort: $0, relayPort: relayPort) }) {
                 return .on(port: ours)
             }
-            if let free = candidatePorts.first(where: { !config.occupiedPorts.contains($0) }) {
+            if let free = nearestFreePort(occupied: config.occupiedPorts) {
                 return .off(port: free)
             }
             return .noFreePort
