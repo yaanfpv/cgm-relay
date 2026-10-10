@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The disk image opens to a designed window: CGM Relay on the left, Applications on the right, and an arrow showing where to drag it.
 - README lists what's coming next: Windows, a Docker image and systemd unit, more CGM clouds.
 - The relay can serve a phone on your local network over TLS only, on private IPv4 addresses with a certificate you supply, at TLS 1.2 or newer; the loopback address stays plain http.
+- Your phone can reach the relay over HTTPS on your home Wi-Fi without a public certificate: CGM Relay keeps its own small certificate authority, limited to your Mac's .local name and private network addresses, and issues the relay's certificate from it.
 
 ### Added
 
