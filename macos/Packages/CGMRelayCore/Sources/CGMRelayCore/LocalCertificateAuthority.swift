@@ -157,8 +157,10 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
     }
 
     /// keptServer returns the stored server certificate only when it is
-    /// whole, issued by authority, names exactly host and addresses, and has
-    /// more than the renewal window left.
+    /// whole, issued by authority, names exactly host and addresses, ends no
+    /// later than authority, and has more than the renewal window left (a
+    /// certificate already ending with its authority can not be extended, so
+    /// it is kept until the authority itself is replaced).
     private static func keptServer(
         _ stored: [CredentialKey: String],
         authority: Authority,
@@ -175,7 +177,9 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
             authority.certificate.publicKey.isValidSignature(certificate.signature, for: certificate),
             let names = try? certificate.extensions.subjectAlternativeNames,
             Set(names) == Set(serverNames(host: host, addresses: addresses)),
+            certificate.notValidAfter <= authority.certificate.notValidAfter,
             certificate.notValidAfter.timeIntervalSince(now) > renewalWindow
+                || certificate.notValidAfter == authority.certificate.notValidAfter
         else { return nil }
         return Server(key: key, certificate: certificate)
     }
@@ -204,7 +208,7 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
             host: host,
             addresses: addresses,
             notBefore: notBefore,
-            notAfter: notBefore.addingTimeInterval(serverLifetime)
+            notAfter: min(notBefore.addingTimeInterval(serverLifetime), authority.certificate.notValidAfter)
         )
         return Server(key: key, certificate: certificate)
     }

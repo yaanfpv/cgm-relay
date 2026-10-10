@@ -191,6 +191,29 @@ struct LocalCertificateAuthorityTests {
         #expect(server.notValidAfter.timeIntervalSinceNow > 800 * Self.day)
         let issuer = try Certificate(derEncoded: Array(renewed.authorityCertificateDER))
         #expect(issuer.publicKey.isValidSignature(server.signature, for: server))
+
+        // Near the end of the authority's own life the new certificate stops
+        // with it, is then kept, and a stored one that outlives it is replaced.
+        let agingStore = FakeCredentialStore()
+        let agingKey = P256.Signing.PrivateKey()
+        let agingEnd = LocalCertificateAuthority.whole(Date().addingTimeInterval(100 * Self.day))
+        let agingAuthority = try LocalCertificateAuthority.issueAuthorityCertificate(
+            key: agingKey, host: Self.host, notBefore: LocalCertificateAuthority.whole(Date() - 3600), notAfter: agingEnd)
+        try agingStore.setStrings([
+            .authorityKey: agingKey.pemRepresentation,
+            .authorityCertificate: try agingAuthority.serializeAsPEM().pemString,
+        ])
+        let aging = LocalCertificateAuthority(store: agingStore)
+        let clamped = try aging.currentMaterial(name: Self.host, ipv4s: addresses)
+        #expect(try Certificate(pemEncoded: clamped.serverCertificatePEM).notValidAfter == agingEnd)
+        #expect(try aging.currentMaterial(name: Self.host, ipv4s: addresses).serverCertificatePEM == clamped.serverCertificatePEM)
+
+        let outliving = try Self.storeServerFixture(
+            in: agingStore, authorityKey: agingKey, authorityCertificate: agingAuthority,
+            addresses: addresses, expiresIn: 400 * Self.day)
+        let replaced = try aging.currentMaterial(name: Self.host, ipv4s: addresses)
+        #expect(replaced.serverCertificatePEM != outliving)
+        #expect(try Certificate(pemEncoded: replaced.serverCertificatePEM).notValidAfter <= agingEnd)
     }
 
     @Test("a server certificate that no longer chains to the stored authority is re-issued")
