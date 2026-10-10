@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Add a phone by pointing its camera at a code on your Mac: CGM Relay hands the phone its certificate once, over your home network, from a link that works for two minutes, so you can trust the relay without typing anything.
 - Your phone can reach the relay over HTTPS on your home Wi-Fi without a public certificate: CGM Relay keeps its own small certificate authority, limited to your Mac's .local name and private network addresses, and issues the relay's certificate from it.
 
 ### Added
