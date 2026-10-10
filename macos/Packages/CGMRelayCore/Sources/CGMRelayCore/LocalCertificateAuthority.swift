@@ -23,9 +23,10 @@ public struct LocalCertificateMaterial: Sendable, Equatable {
 
     /// ReplacementReason is why an earlier authority was not kept.
     public enum ReplacementReason: Sendable, Equatable {
-        /// It was whole and still valid, but made for another `.local` name:
-        /// this Mac's name changed.
-        case renamed
+        /// It was whole and still valid, but made for another `.local` name
+        /// than the one this Mac has now. That is what a rename leaves, but
+        /// the stored authority alone cannot show the Mac was renamed.
+        case madeForAnotherName
         /// It was whole but past its end date.
         case expired
         /// It could not be read or did not fit together: a key missing,
@@ -175,7 +176,7 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
     /// replacementReason says why a stored authority that keptAuthority
     /// refused was not kept. Only an authority that is whole, unexpired and
     /// made exactly as CGM Relay makes one for a different `.local` name counts
-    /// as a rename.
+    /// as made for another name.
     private static func replacementReason(_ stored: [CredentialKey: String], host: String, now: Date) -> LocalCertificateMaterial.ReplacementReason {
         guard let keyPEM = stored[.authorityKey],
             let certificatePEM = stored[.authorityCertificate],
@@ -189,7 +190,7 @@ public final class LocalCertificateAuthority: @unchecked Sendable {
             certificate.subject == earlierSubject
         else { return .unusable }
         if certificate.notValidAfter <= now { return .expired }
-        return earlierHost == host ? .unusable : .renamed
+        return earlierHost == host ? .unusable : .madeForAnotherName
     }
 
     /// keptServer returns the stored server certificate only when it is

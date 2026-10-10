@@ -105,8 +105,8 @@ extension AppSettings {
     /// certificate authority was replaced, naming the real reason.
     public static func authorityReplacedNotice(_ reason: LocalCertificateMaterial.ReplacementReason) -> String {
         switch reason {
-        case .renamed:
-            "This Mac's name changed, so each phone needs the HTTPS step again."
+        case .madeForAnotherName:
+            "This Mac's name no longer matches CGM Relay's certificate, so each phone needs the HTTPS step again."
         case .expired:
             "CGM Relay's certificate expired and was replaced, so each phone needs the HTTPS step again."
         case .unusable:

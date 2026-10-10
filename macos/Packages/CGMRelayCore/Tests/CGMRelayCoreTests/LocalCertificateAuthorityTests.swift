@@ -295,7 +295,7 @@ struct LocalCertificateAuthorityTests {
         let oldAuthority = try Certificate(derEncoded: Array(old.authorityCertificateDER))
 
         let renamed = try authority.currentMaterial(name: newHost, ipv4s: ["192.168.1.20"])
-        #expect(renamed.authorityChange == .replaced(.renamed))
+        #expect(renamed.authorityChange == .replaced(.madeForAnotherName))
         #expect(renamed.phonesMustInstallCertificate)
         #expect(renamed.authorityCertificateDER != old.authorityCertificateDER)
 
@@ -507,7 +507,7 @@ struct LocalCertificateAuthoritySecrecyTests {
         }
 
         #expect(authorityKeys[0] == authorityKeys[1] && authorityKeys[1] != authorityKeys[2], "renewing keeps the authority key and a rename makes a new one")
-        #expect(handedBack.map(\.authorityChange) == [.created, .unchanged, .replaced(.renamed)])
+        #expect(handedBack.map(\.authorityChange) == [.created, .unchanged, .replaced(.madeForAnotherName)])
 
         // Every authority key that was made, including the one whose write failed.
         let attempted = store.attemptedAuthorityKeys

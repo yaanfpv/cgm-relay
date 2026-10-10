@@ -115,7 +115,7 @@ struct SettingsEngineConfigurationBuilderTests {
             settings: localReach(), from: store, interfaces: Self.lan, statusAddr: "127.0.0.1:1338",
             databasePath: "/tmp/readings.db", hostName: "new-name.local"
         ))
-        #expect(renamed.authorityChange == .replaced(.renamed))
+        #expect(renamed.authorityChange == .replaced(.madeForAnotherName))
     }
 
     @Test("This Mac only and My tailnet send no LAN listener, no certificate and no key, and do no certificate work")
