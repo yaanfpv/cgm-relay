@@ -246,14 +246,27 @@ for f in "$APP/Contents/MacOS/CGM Relay" "$APP/Contents/Resources/cgm-relay"; do
   case " $ARCHS_FOUND " in *" x86_64 "*) ;; *) die "${f##*/} has no x86_64 slice (${ARCHS_FOUND})" "rebuild" ;; esac
 done
 # No file in the app may carry the path it was built at, or the builder's home folder. Only a
-# Release build maps those paths away, so a test run in another configuration skips this.
+# Release build maps those paths away, so a test run in another configuration skips this. A file
+# that cannot be read is a refusal too: an unread file is not a clean one.
 if [ "$CONFIGURATION" = "Release" ]; then
-  for p in "$REPO_ROOT/" "$HOME/"; do
-    LEAKED="$(find "$APP" -type f -exec env LC_ALL=C grep -l -a -F "$p" {} + || true)"
-    [ -z "$LEAKED" ] ||
-      die "the app contains the build machine's path ${p} in: ${LEAKED//"$APP"\//}" \
-        "check that the build above still strips the app's debug symbols, and that macos/scripts/build.sh still maps source paths and builds the engine with -trimpath"
-  done
+  find "$APP" -type f -print0 >"$WORK_DIR/app-files" || die "could not list the files in the app" "read the message above and run again"
+  LEAKED=""
+  UNREAD=""
+  while IFS= read -r -d '' file; do
+    for p in "$REPO_ROOT/" "$HOME/"; do
+      rc=0
+      LC_ALL=C grep -q -a -F "$p" "$file" || rc=$?
+      case "$rc" in
+        0) LEAKED+=" ${file#"$APP"/}"; break ;;
+        1) ;;
+        *) UNREAD+=" ${file#"$APP"/}"; break ;;
+      esac
+    done
+  done <"$WORK_DIR/app-files"
+  [ -z "$UNREAD" ] || die "these files in the app could not be read to check for build paths:${UNREAD}" "read the messages above; a file the check cannot read is not shipped"
+  [ -z "$LEAKED" ] ||
+    die "the app contains the build machine's path (${REPO_ROOT}/ or ${HOME}/) in:${LEAKED}" \
+      "check that the build above still strips the app's debug symbols, and that macos/scripts/build.sh still maps source paths and builds the engine with -trimpath"
 fi
 
 # ---------------------------------------------------------------- notarize
