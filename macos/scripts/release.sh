@@ -76,7 +76,7 @@ is_test_mode && TEST_MODE=yes
 SKIP_NOTARIZE=no
 [ "${CGMRELAY_RELEASE_SKIP_NOTARIZE:-}" = "1" ] && SKIP_NOTARIZE=yes
 
-for t in git go xcodegen xcodebuild lipo codesign hdiutil ditto tiffutil osascript xmllint plutil shasum curl awk sed tar; do
+for t in git go xcodegen xcodebuild lipo codesign hdiutil ditto tiffutil osascript xmllint plutil shasum curl awk sed tar perl; do
   need_tool "$t"
 done
 if [ "$SKIP_NOTARIZE" = no ]; then
@@ -245,29 +245,42 @@ for f in "$APP/Contents/MacOS/CGM Relay" "$APP/Contents/Resources/cgm-relay"; do
   case " $ARCHS_FOUND " in *" arm64 "*) ;; *) die "${f##*/} has no arm64 slice (${ARCHS_FOUND})" "rebuild" ;; esac
   case " $ARCHS_FOUND " in *" x86_64 "*) ;; *) die "${f##*/} has no x86_64 slice (${ARCHS_FOUND})" "rebuild" ;; esac
 done
-# No file in the app may carry the path it was built at, or the builder's home folder. Only a
-# Release build maps those paths away, so a test run in another configuration skips this. A file
-# that cannot be read is a refusal too: an unread file is not a clean one.
-if [ "$CONFIGURATION" = "Release" ]; then
-  find "$APP" -type f -print0 >"$WORK_DIR/app-files" || die "could not list the files in the app" "read the message above and run again"
-  LEAKED=""
-  UNREAD=""
+# refuse_build_identity <dir> <what> <hint> dies when any file under <dir> holds the checkout's
+# path or the builder's user name, in any form a file can carry it: a plain path, the colon form of
+# a Finder alias, a bookmark's separate components, or UTF-16. A file that cannot be read is a
+# refusal too: an unread file is not a clean one. Only a Release build maps the paths away, so a
+# test run in another configuration skips this.
+BUILD_USER="$(id -un)"
+refuse_build_identity() {
+  local dir="$1" what="$2" hint="$3" list="$WORK_DIR/identity-files" file rc leaked="" unread=""
+  [ "$CONFIGURATION" = "Release" ] || return 0
+  find "$dir" -type f -print0 >"$list" || die "could not list the files in ${what}" "read the message above and run again"
   while IFS= read -r -d '' file; do
-    for p in "$REPO_ROOT/" "$HOME/"; do
-      rc=0
-      LC_ALL=C grep -q -a -F "$p" "$file" || rc=$?
-      case "$rc" in
-        0) LEAKED+=" ${file#"$APP"/}"; break ;;
-        1) ;;
-        *) UNREAD+=" ${file#"$APP"/}"; break ;;
-      esac
-    done
-  done <"$WORK_DIR/app-files"
-  [ -z "$UNREAD" ] || die "these files in the app could not be read to check for build paths:${UNREAD}" "read the messages above; a file the check cannot read is not shipped"
-  [ -z "$LEAKED" ] ||
-    die "the app contains the build machine's path (${REPO_ROOT}/ or ${HOME}/) in:${LEAKED}" \
-      "check that the build above still strips the app's debug symbols, and that macos/scripts/build.sh still maps source paths and builds the engine with -trimpath"
-fi
+    rc=0
+    perl -e '
+      my $f = shift;
+      open(my $h, "<:raw", $f) or exit 2;
+      local $/;
+      my $b = <$h>;
+      exit 2 unless defined $b;
+      for my $s (@ARGV) {
+        for my $n ($s, join("", map { $_ . "\0" } split //, $s), join("", map { "\0" . $_ } split //, $s)) {
+          exit 0 if index($b, $n) >= 0;
+        }
+      }
+      exit 1;
+    ' "$file" "$REPO_ROOT" "$BUILD_USER" || rc=$?
+    case "$rc" in
+      0) leaked+=" ${file#"$dir"/}" ;;
+      1) ;;
+      *) unread+=" ${file#"$dir"/}" ;;
+    esac
+  done <"$list"
+  [ -z "$unread" ] || die "these files in ${what} could not be read to check for build paths:${unread}" "read the messages above; a file the check cannot read is not shipped"
+  [ -z "$leaked" ] || die "${what} holds the build machine's path (${REPO_ROOT}) or user name (${BUILD_USER}) in:${leaked}" "$hint"
+}
+refuse_build_identity "$APP" "the app" \
+  "check that the build above still strips the app's debug symbols, and that macos/scripts/build.sh still maps source paths and builds the engine with -trimpath"
 
 # ---------------------------------------------------------------- notarize
 notarize() {
@@ -304,10 +317,16 @@ tiffutil -cathidpicheck "$SCRIPT_DIR/dmg/background.png" "$SCRIPT_DIR/dmg/backgr
 # The window layout is written by Finder into a writable image, which is then
 # compressed into the read-only one that ships. Finder finds the volume by
 # name, so a mounted volume already called "CGM Relay" would take its place.
+# Finder also records where that writable image lives in the window's
+# background alias, so it is made in a folder under /tmp whose path names no
+# person and no checkout.
 [ ! -e "/Volumes/CGM Relay" ] || die "a volume named CGM Relay is already mounted" "eject it and run again"
-hdiutil create -quiet -volname "CGM Relay" -srcfolder "$STAGING" -fs HFS+ -format UDRW -ov "$WORK_DIR/layout.dmg" ||
+LAYOUT_DIR="$(mktemp -d /tmp/cgm-relay-dmg.XXXXXX)" || die "could not make a folder for the disk image layout" "check /tmp and run again"
+SCRATCH_DIRS+=("$LAYOUT_DIR")
+LAYOUT_DMG="$LAYOUT_DIR/layout.dmg"
+hdiutil create -quiet -volname "CGM Relay" -srcfolder "$STAGING" -fs HFS+ -format UDRW -ov "$LAYOUT_DMG" ||
   die "hdiutil could not create the disk image" "run again; check free disk space"
-hdiutil attach -quiet -noautoopen "$WORK_DIR/layout.dmg" || die "could not mount the disk image to lay out its window" "run again"
+hdiutil attach -quiet -noautoopen "$LAYOUT_DMG" || die "could not mount the disk image to lay out its window" "run again"
 MOUNT_POINT="/Volumes/CGM Relay"
 osascript "$SCRIPT_DIR/dmg/layout.applescript" "CGM Relay" >/dev/null ||
   die "Finder could not lay out the installer window" "allow this terminal to control Finder in System Settings > Privacy & Security > Automation, then run again"
@@ -315,9 +334,9 @@ osascript "$SCRIPT_DIR/dmg/layout.applescript" "CGM Relay" >/dev/null ||
 sync
 hdiutil detach -quiet "$MOUNT_POINT" || die "could not unmount the disk image after laying it out" "eject CGM Relay and run again"
 MOUNT_POINT=""
-hdiutil convert -quiet "$WORK_DIR/layout.dmg" -format ULFO -ov -o "$WORK_DIR/archives/${DMG_FILE}" ||
+hdiutil convert -quiet "$LAYOUT_DMG" -format ULFO -ov -o "$WORK_DIR/archives/${DMG_FILE}" ||
   die "hdiutil could not compress the disk image" "run again; check free disk space"
-rm -f "$WORK_DIR/layout.dmg"
+rm -f "$LAYOUT_DMG"
 if ! DMG_SIGN_OUT="$(codesign --force --timestamp --sign "$IDENTITY" "$WORK_DIR/archives/${DMG_FILE}" 2>&1)"; then
   echo "$DMG_SIGN_OUT" >&2
   die "codesign could not sign the DMG" "read the message above; a timestamp failure means the network or Apple's timestamp server"
@@ -336,6 +355,8 @@ MOUNT_POINT="$SCRATCH"
 attach_dmg "$WORK_DIR/archives/${DMG_FILE}" "$MOUNT_POINT" ||
   die "could not mount the finished DMG" "run again"
 codesign --verify --deep --strict "$MOUNT_POINT/CGM Relay.app" || die "the app inside the DMG fails codesign verification" "run again"
+refuse_build_identity "$MOUNT_POINT" "the DMG" \
+  "a file the window layout wrote (its .DS_Store) or the app carries it; check where the layout image is made"
 [ -z "$(find "$MOUNT_POINT/CGM Relay.app" -name '*.xpc' -print -quit)" ] || die "an XPC service is inside the app on the DMG" "remove it and run again"
 if [ "$SKIP_NOTARIZE" = no ]; then
   spctl --assess --type open --context context:primary-signature -vv "$WORK_DIR/archives/${DMG_FILE}" ||
