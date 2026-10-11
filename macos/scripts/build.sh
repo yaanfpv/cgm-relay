@@ -30,9 +30,10 @@ mkdir -p "${ENGINE_DIR}"
   # running them side by side and waiting on each by its own PID is safe.
   # Both PIDs are always waited on, even when one fails first, so a
   # failure never leaves the other build running past this subshell.
-  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
+  # -trimpath keeps the paths of this checkout and the module cache out of the binary.
+  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
   arm64_pid=$!
-  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
+  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
   amd64_pid=$!
 
   arm64_status=0
@@ -78,13 +79,24 @@ else
   esac
 fi
 
+# In a Release build, the source file names that the compilers embed (Swift's #filePath, C's
+# __FILE__ in the packages the app links) are written relative to the repository, so a shipped app
+# never carries the path it was built at. Debug builds keep full paths for the debugger.
+PREFIX_MAP_ARGS=()
+if [ "${CONFIGURATION}" = "Release" ]; then
+  PREFIX_MAP_ARGS+=(
+    "OTHER_CFLAGS=\$(inherited) -ffile-prefix-map=${REPO_ROOT}/="
+    "OTHER_SWIFT_FLAGS=\$(inherited) -file-prefix-map ${REPO_ROOT}/="
+  )
+fi
+
 echo "==> Building CGM Relay.app (configuration: ${CONFIGURATION})"
 xcodebuild \
   -project "${MACOS_DIR}/CGMRelay.xcodeproj" \
   -scheme CGMRelay \
   -configuration "${CONFIGURATION}" \
   -derivedDataPath "${DERIVED_DATA_DIR}" \
-  build ${SIGNING_ARGS[@]+"${SIGNING_ARGS[@]}"} "$@"
+  build ${PREFIX_MAP_ARGS[@]+"${PREFIX_MAP_ARGS[@]}"} ${SIGNING_ARGS[@]+"${SIGNING_ARGS[@]}"} "$@"
 
 APP_PATH="${DERIVED_DATA_DIR}/Build/Products/${CONFIGURATION}/CGM Relay.app"
 echo "==> Built app bundle:"

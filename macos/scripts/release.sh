@@ -181,6 +181,8 @@ if ! CONFIGURATION="$CONFIGURATION" DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" CODE_SI
   "ARCHS=arm64 x86_64" \
   "ONLY_ACTIVE_ARCH=NO" \
   "CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO" \
+  "DEPLOYMENT_POSTPROCESSING=YES" \
+  "STRIP_INSTALLED_PRODUCT=YES" \
   ${BUILD_SETTINGS[@]+"${BUILD_SETTINGS[@]}"} >"$WORK_DIR/build.log" 2>&1; then
   tail -40 "$WORK_DIR/build.log" >&2
   die "the build failed (last lines above)" "fix the build; the same command works standalone: bash macos/scripts/build.sh"
@@ -243,6 +245,16 @@ for f in "$APP/Contents/MacOS/CGM Relay" "$APP/Contents/Resources/cgm-relay"; do
   case " $ARCHS_FOUND " in *" arm64 "*) ;; *) die "${f##*/} has no arm64 slice (${ARCHS_FOUND})" "rebuild" ;; esac
   case " $ARCHS_FOUND " in *" x86_64 "*) ;; *) die "${f##*/} has no x86_64 slice (${ARCHS_FOUND})" "rebuild" ;; esac
 done
+# No file in the app may carry the path it was built at, or the builder's home folder. Only a
+# Release build maps those paths away, so a test run in another configuration skips this.
+if [ "$CONFIGURATION" = "Release" ]; then
+  for p in "$REPO_ROOT/" "$HOME/"; do
+    LEAKED="$(find "$APP" -type f -exec env LC_ALL=C grep -l -a -F "$p" {} + || true)"
+    [ -z "$LEAKED" ] ||
+      die "the app contains the build machine's path ${p} in: ${LEAKED//"$APP"\//}" \
+        "check that the build above still strips the app's debug symbols, and that macos/scripts/build.sh still maps source paths and builds the engine with -trimpath"
+  done
+fi
 
 # ---------------------------------------------------------------- notarize
 notarize() {
