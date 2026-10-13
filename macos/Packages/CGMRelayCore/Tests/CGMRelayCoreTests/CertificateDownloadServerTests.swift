@@ -332,6 +332,41 @@ struct CertificateDownloadServerTests {
         #expect(served.value?.body == fixture.material.authorityCertificateDER)
     }
 
+    @Test("only a handful of connections are served at once, the rest are dropped, and a slot frees when one ends")
+    func connectionsAreCapped() async throws {
+        let fixture = try Self.makeFixture()
+        let url = try await fixture.server.mint(format: .android)
+        let port = url.port!
+
+        // Idle connections that never send a request hold their slot until
+        // the server's own request timeout or until the client leaves.
+        var idle: [RawClient] = []
+        let closedByServer = ServedCount()
+        for _ in 0..<40 {
+            let client = try await RawClient.connect(port: port)
+            idle.append(client)
+            Task {
+                _ = await client.readToEnd()
+                closedByServer.add()
+            }
+        }
+        try await Task.sleep(for: .milliseconds(1500))
+        let held = idle.count - closedByServer.value
+        #expect(held >= 1 && held <= 8, "held \(held) of \(idle.count) idle connections")
+
+        // Once the idle clients leave, their slots free and the genuine
+        // download is served.
+        for client in idle { client.cancel() }
+        let served = ServedBox()
+        _ = await waitUntil(timeout: .seconds(5), pollInterval: .milliseconds(50)) {
+            guard let reply = try? await HTTPReply.get(url), reply.status == 200 else { return false }
+            served.set(reply)
+            return true
+        }
+        await fixture.server.close()
+        #expect(served.value?.body == fixture.material.authorityCertificateDER)
+    }
+
     // MARK: Token state
 
     @Test("a failed send gives the token back until the link ends, a finished one uses it up")
@@ -583,6 +618,14 @@ private final class FlakyRandomBytes: RandomBytesGenerating, @unchecked Sendable
         if failing { throw RandomBytesError.generationFailed(-1) }
         return try SecureRandomBytesGenerator().randomBytes(count: count)
     }
+}
+
+/// ServedCount is a count that tasks on any thread can add to.
+private final class ServedCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func add() { lock.withLock { count += 1 } }
 }
 
 /// RawClient is a plain TCP client: connect, write bytes, read until the
