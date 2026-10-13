@@ -194,26 +194,24 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
         return false
     }
 
-    /// locksReach is whether the port and the reach choices must not change:
-    /// only for a person who chose Tailscale HTTPS, while the app's handler
-    /// is serving and while Tailscale cannot be asked, since changing the
-    /// port then would strand the handler they set up. A handler the person
-    /// never chose locks nothing.
-    public func locksReach(chosen: Bool) -> Bool {
-        guard chosen else { return false }
+    /// portLockNote is why the port must not change, nil when it may. Only
+    /// the port is ever fixed, never the choice of a way: while the app's
+    /// handler is serving, whatever way is chosen, and, for a person who
+    /// chose Tailscale HTTPS, while Tailscale cannot be asked, since changing
+    /// the port then would strand the handler already set up.
+    public func portLockNote(chosen: Bool) -> String? {
         switch self {
-        case .on, .unknown, .unavailable, .unreadable:
-            return true
+        case .on:
+            return "Turn off Tailscale HTTPS to change the port."
+        case .unknown, .unavailable, .unreadable:
+            return chosen ? "Connect Tailscale to change the port." : nil
         case .off, .noFreePort:
-            return false
+            return nil
         }
     }
 
-    /// isExistingHandler is whether the app's handler is already serving
-    /// without the person having chosen it, so setup offers it rather than
-    /// taking it.
-    public func isExistingHandler(chosen: Bool) -> Bool {
-        !chosen && isOn
+    public func locksPort(chosen: Bool) -> Bool {
+        portLockNote(chosen: chosen) != nil
     }
 
     public static func evaluate(status: TailscaleStatus, config: TailscaleServeConfig?, relayPort: Int) -> TailscaleHTTPSState {
@@ -555,7 +553,7 @@ extension ConnectPaneAddressState {
         case .unreadable:
             return .unavailable(reason: "Couldn't read Tailscale's settings right now.")
         case .off, .noFreePort:
-            return .unavailable(reason: "Tailscale HTTPS is off right now.")
+            return .unavailable(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way.")
         case .on(let port):
             guard case .running(let name) = tailscale else {
                 return .unavailable(reason: "Waiting for Tailscale to connect.")

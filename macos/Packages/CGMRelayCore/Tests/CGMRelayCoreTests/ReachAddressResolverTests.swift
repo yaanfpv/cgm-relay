@@ -211,26 +211,31 @@ struct ConnectPaneAddressStateTests {
 
 @Suite("PhoneReachability")
 struct PhoneReachabilityTests {
-    static let cases: [(name: String, reach: NetworkReach, chosen: Bool, serving: Bool, tailnet: Bool, lan: Bool, reachable: Bool)] = [
-        ("Tailscale HTTPS serving", .thisMacOnly, true, true, false, false, true),
-        ("Tailscale HTTPS serving, reach left at another choice", .myLocalNetwork, true, true, false, false, true),
-        ("Tailscale HTTPS chosen but not serving, a network up", .myLocalNetwork, true, false, true, true, false),
-        ("A handler serving that was not chosen, reach left at This Mac only", .thisMacOnly, false, true, false, false, false),
-        ("A handler serving that was not chosen, no address for the chosen tailnet", .myTailnet, false, true, false, true, false),
-        ("A handler serving that was not chosen, My local network with an address", .myLocalNetwork, false, true, false, true, true),
-        ("This Mac only, everything available", .thisMacOnly, false, false, true, true, false),
-        ("My tailnet with a Tailscale address", .myTailnet, false, false, true, false, true),
-        ("My tailnet with no Tailscale address", .myTailnet, false, false, false, true, false),
-        ("My local network with an address", .myLocalNetwork, false, false, false, true, true),
-        ("My local network with no address", .myLocalNetwork, false, false, true, false, false),
+    static let cases: [(name: String, reach: NetworkReach, chosen: Bool, https: TailscaleHTTPSState, tailnet: Bool, lan: Bool, reachable: Bool)] = [
+        ("Tailscale HTTPS serving", .thisMacOnly, true, .on(port: 443), false, false, true),
+        ("Tailscale HTTPS serving, reach left at another choice", .myLocalNetwork, true, .on(port: 443), false, false, true),
+        ("Tailscale HTTPS chosen but turned off, a network up", .myLocalNetwork, true, .off(port: 443), true, true, false),
+        ("Tailscale HTTPS chosen, Tailscale stopped, a network up", .myLocalNetwork, true, .unavailable, false, true, false),
+        ("Tailscale HTTPS chosen, settings unreadable", .myLocalNetwork, true, .unreadable, false, true, false),
+        ("Tailscale HTTPS chosen, not read yet", .myLocalNetwork, true, .unknown, false, true, false),
+        ("A handler serving, another way chosen: My local network with an address", .myLocalNetwork, false, .on(port: 443), false, true, true),
+        ("A handler serving, another way chosen: no address for My tailnet", .myTailnet, false, .on(port: 443), false, true, false),
+        ("A handler serving, This Mac only chosen", .thisMacOnly, false, .on(port: 443), false, false, false),
+        ("A handler serving, My tailnet chosen with an address", .myTailnet, false, .on(port: 443), true, false, true),
+        ("Tailscale stopped, My local network with an address", .myLocalNetwork, false, .unavailable, false, true, true),
+        ("This Mac only, everything available", .thisMacOnly, false, .off(port: 443), true, true, false),
+        ("My tailnet with a Tailscale address", .myTailnet, false, .off(port: 443), true, false, true),
+        ("My tailnet with no Tailscale address", .myTailnet, false, .off(port: 443), false, true, false),
+        ("My local network with an address", .myLocalNetwork, false, .off(port: 443), false, true, true),
+        ("My local network with no address", .myLocalNetwork, false, .off(port: 443), true, false, false),
     ]
 
     @Test("a phone can be reached only through chosen and serving HTTPS, or a tailnet or local network choice with an address", arguments: cases)
-    func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, chosen: Bool, serving: Bool, tailnet: Bool, lan: Bool, reachable: Bool)) {
+    func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, chosen: Bool, https: TailscaleHTTPSState, tailnet: Bool, lan: Bool, reachable: Bool)) {
         let got = PhoneReachability.decide(
             reach: testCase.reach,
             httpsChosen: testCase.chosen,
-            httpsServing: testCase.serving,
+            https: testCase.https,
             tailnetAvailable: testCase.tailnet,
             localNetworkAvailable: testCase.lan
         )
@@ -239,6 +244,38 @@ struct PhoneReachabilityTests {
             #expect(!reason.isEmpty)
         }
         #expect(SetupCompletion.mayFinish(reachability: got) == testCase.reachable, Comment(rawValue: testCase.name))
+    }
+
+    @Test("a chosen Tailscale HTTPS that is turned off says followers can't reach this Mac and what to do")
+    func chosenButOffSaysSo() {
+        let got = PhoneReachability.decide(reach: .myLocalNetwork, httpsChosen: true, https: .off(port: 443), tailnetAvailable: true, localNetworkAvailable: true)
+        #expect(got == .blocked(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way."))
+    }
+}
+
+@Suite("ReachWay")
+struct ReachWayTests {
+    static let allStates: [TailscaleHTTPSState] = [.unknown, .unavailable, .unreadable, .off(port: 443), .noFreePort, .on(port: 443)]
+
+    @Test("no way is unavailable because Tailscale HTTPS is on: with it on, every way can be picked", arguments: [true, false])
+    func httpsOnLocksNothing(tailnetAvailable: Bool) {
+        for way in ReachWay.allCases where way != .myTailnet || tailnetAvailable {
+            #expect(way.pickability(https: .on(port: 443), tailnetAvailable: tailnetAvailable) == .pickable, "\(way)")
+        }
+    }
+
+    @Test("a way that cannot work right now is shown with its reason, whatever Tailscale HTTPS is doing", arguments: allStates)
+    func unavailableWaysCarryAReason(_ state: TailscaleHTTPSState) {
+        #expect(ReachWay.thisMacOnly.pickability(https: state, tailnetAvailable: false) == .pickable)
+        #expect(ReachWay.myLocalNetwork.pickability(https: state, tailnetAvailable: false) == .pickable)
+        #expect(ReachWay.myTailnet.pickability(https: state, tailnetAvailable: true) == .pickable)
+        #expect(ReachWay.myTailnet.pickability(https: state, tailnetAvailable: false) == .unavailable(reason: "This Mac has no Tailscale address right now."))
+        if case .on = state { return }
+        guard case .unavailable(let reason) = ReachWay.tailscaleHTTPS.pickability(https: state, tailnetAvailable: true) else {
+            Issue.record("Tailscale HTTPS must not be pickable unless its handler is serving: \(state)")
+            return
+        }
+        #expect(!reason.isEmpty)
     }
 }
 
@@ -267,8 +304,8 @@ struct FollowerAddressTests {
         ("Tailscale serves ours on 443: the https name with no port", "127.0.0.1", .running(name: name), .on(port: 443), .ready(address: "https://relay-mac.example-tailnet.ts.net")),
         ("Tailscale serves ours on 8443: the port is in the address", "127.0.0.1", .running(name: name), .on(port: 8443), .ready(address: "https://relay-mac.example-tailnet.ts.net:8443")),
         ("serving, engine stopped", nil, .running(name: name), .on(port: 443), .unavailable(reason: "The engine isn't running right now.")),
-        ("chosen but Tailscale no longer serves it: never a ready address", "127.0.0.1", .running(name: name), .off(port: 443), .unavailable(reason: "Tailscale HTTPS is off right now.")),
-        ("chosen but every port is taken", "127.0.0.1", .running(name: name), .noFreePort, .unavailable(reason: "Tailscale HTTPS is off right now.")),
+        ("chosen but Tailscale no longer serves it: never a ready address", "127.0.0.1", .running(name: name), .off(port: 443), .unavailable(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way.")),
+        ("chosen but every port is taken", "127.0.0.1", .running(name: name), .noFreePort, .unavailable(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way.")),
         ("serve settings unreadable", "127.0.0.1", .running(name: name), .unreadable, .unavailable(reason: "Couldn't read Tailscale's settings right now.")),
         ("Tailscale stopped: never an http address in its place", "127.0.0.1", .stopped, .unavailable, .unavailable(reason: "Waiting for Tailscale to connect.")),
         ("Tailscale absent", "127.0.0.1", .absent, .unavailable, .unavailable(reason: "Waiting for Tailscale to connect.")),

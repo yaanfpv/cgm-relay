@@ -33,7 +33,7 @@ struct AdvancedPaneView: View {
                         .multilineTextAlignment(.trailing)
                         .focused($portFieldFocused)
                         .onSubmit { commitPort() }
-                        .disabled(model.httpsLocked)
+                        .disabled(model.isPortLocked)
                 }
                 if let portErrorMessage {
                     Text(portErrorMessage)
@@ -41,8 +41,8 @@ struct AdvancedPaneView: View {
                         .foregroundStyle(.red)
                 }
             } footer: {
-                if model.httpsLocked {
-                    Text("Turn off Tailscale HTTPS to change the port.")
+                if let note = model.portLockNote {
+                    Text(note)
                 } else {
                     Text("From \(AppSettings.portRange.lowerBound) to \(AppSettings.portRange.upperBound). Press Return to save.")
                 }

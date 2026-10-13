@@ -156,24 +156,24 @@ struct TailscaleServeTests {
         #expect(TailscaleHTTPSState.evaluate(status: testCase.status, config: config, relayPort: 1337) == testCase.want)
     }
 
-    static let lockCases: [(name: String, state: TailscaleHTTPSState, chosen: Bool, locks: Bool, existing: Bool)] = [
-        ("serving and chosen", .on(port: 443), true, true, false),
-        ("serving but never chosen", .on(port: 443), false, false, true),
-        ("stopped Tailscale, chosen", .unavailable, true, true, false),
-        ("stopped Tailscale, never chosen", .unavailable, false, false, false),
-        ("unreadable settings, chosen", .unreadable, true, true, false),
-        ("unreadable settings, never chosen", .unreadable, false, false, false),
-        ("not read yet, chosen", .unknown, true, true, false),
-        ("not read yet, never chosen", .unknown, false, false, false),
-        ("not serving, chosen: turned off in Tailscale", .off(port: 443), true, false, false),
-        ("not serving, never chosen", .off(port: 443), false, false, false),
-        ("no free port, never chosen", .noFreePort, false, false, false),
+    static let lockCases: [(name: String, state: TailscaleHTTPSState, chosen: Bool, locks: Bool)] = [
+        ("serving and chosen", .on(port: 443), true, true),
+        ("serving but another way is chosen", .on(port: 443), false, true),
+        ("stopped Tailscale, chosen", .unavailable, true, true),
+        ("stopped Tailscale, another way chosen", .unavailable, false, false),
+        ("unreadable settings, chosen", .unreadable, true, true),
+        ("unreadable settings, another way chosen", .unreadable, false, false),
+        ("not read yet, chosen", .unknown, true, true),
+        ("not read yet, another way chosen", .unknown, false, false),
+        ("not serving, chosen: turned off in Tailscale", .off(port: 443), true, false),
+        ("not serving, another way chosen", .off(port: 443), false, false),
+        ("no free port, another way chosen", .noFreePort, false, false),
     ]
 
-    @Test("only a chosen Tailscale HTTPS locks the port and reach, and an unchosen serving handler is only offered", arguments: lockCases)
-    func lockAndOffer(_ testCase: (name: String, state: TailscaleHTTPSState, chosen: Bool, locks: Bool, existing: Bool)) {
-        #expect(testCase.state.locksReach(chosen: testCase.chosen) == testCase.locks, Comment(rawValue: testCase.name))
-        #expect(testCase.state.isExistingHandler(chosen: testCase.chosen) == testCase.existing, Comment(rawValue: testCase.name))
+    @Test("the port is fixed while the app's handler is serving whatever way is chosen, and never when none serves", arguments: lockCases)
+    func portLock(_ testCase: (name: String, state: TailscaleHTTPSState, chosen: Bool, locks: Bool)) {
+        #expect(testCase.state.locksPort(chosen: testCase.chosen) == testCase.locks, Comment(rawValue: testCase.name))
+        #expect((testCase.state.portLockNote(chosen: testCase.chosen) != nil) == testCase.locks, Comment(rawValue: testCase.name))
     }
 
     @Test("with every port from 443 up taken there is no free port, and one free port anywhere above is found")

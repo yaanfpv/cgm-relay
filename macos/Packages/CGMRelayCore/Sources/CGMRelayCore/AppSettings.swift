@@ -89,6 +89,40 @@ public struct AppSettings: Equatable, Sendable {
         tailscaleHTTPSEnabled ? .thisMacOnly : reach
     }
 
+    /// chosenWay is the way the person has picked, as the list shows it: a
+    /// saved Tailscale HTTPS choice reads as Tailscale HTTPS whatever reach
+    /// was saved beside it, and otherwise the saved reach.
+    public var chosenWay: ReachWay {
+        if tailscaleHTTPSEnabled { return .tailscaleHTTPS }
+        switch reach {
+        case .thisMacOnly: return .thisMacOnly
+        case .myTailnet: return .myTailnet
+        case .myLocalNetwork: return .myLocalNetwork
+        }
+    }
+
+    /// choosing is these settings with way chosen, and nothing else changed.
+    /// Choosing another way only moves the choice: whether Tailscale holds
+    /// the app's handler is Tailscale's, not a setting, and is never touched
+    /// from here.
+    public func choosing(_ way: ReachWay) -> AppSettings {
+        var next = self
+        switch way {
+        case .tailscaleHTTPS:
+            next.tailscaleHTTPSEnabled = true
+        case .thisMacOnly:
+            next.tailscaleHTTPSEnabled = false
+            next.reach = .thisMacOnly
+        case .myTailnet:
+            next.tailscaleHTTPSEnabled = false
+            next.reach = .myTailnet
+        case .myLocalNetwork:
+            next.tailscaleHTTPSEnabled = false
+            next.reach = .myLocalNetwork
+        }
+        return next
+    }
+
     public static let defaultPort = RelayDefaults.followerPort
     public static let portRange = 1024...65535
     public static let defaultRetentionDays = 30

@@ -80,6 +80,43 @@ struct AppSettingsTests {
         #expect(settings.reach == .myLocalNetwork, "the earlier choice comes back when HTTPS is turned off")
     }
 
+    @Test("settings saved before Tailscale HTTPS was one of the ways load unchanged: true reads as Tailscale HTTPS chosen, false as the saved reach")
+    func savedChoiceReadsAsTheSameWay() throws {
+        let on = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach":"myTailnet","tailscaleHTTPSEnabled":true}"#.utf8))
+        #expect(on.chosenWay == .tailscaleHTTPS)
+        #expect(on.reach == .myTailnet)
+        let off = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach":"myLocalNetwork","tailscaleHTTPSEnabled":false}"#.utf8))
+        #expect(off.chosenWay == .myLocalNetwork)
+        #expect(AppSettings.default.chosenWay == .thisMacOnly)
+    }
+
+    @Test("choosing any way from any other changes only the choice, and the relay binds as that way implies", arguments: ReachWay.allCases)
+    func choosingAWay(_ way: ReachWay) {
+        for start in ReachWay.allCases {
+            var settings = AppSettings.default.choosing(start)
+            settings.port = 5001
+            settings.setupFinished = true
+            let next = settings.choosing(way)
+            #expect(next.chosenWay == way, "from \(start) to \(way)")
+            var expected = settings
+            expected.tailscaleHTTPSEnabled = way == .tailscaleHTTPS
+            switch way {
+            case .tailscaleHTTPS:
+                #expect(next.effectiveReach == .thisMacOnly, "Tailscale does the reaching, so the relay stays on this Mac")
+            case .thisMacOnly:
+                expected.reach = .thisMacOnly
+                #expect(next.effectiveReach == .thisMacOnly)
+            case .myTailnet:
+                expected.reach = .myTailnet
+                #expect(next.effectiveReach == .myTailnet)
+            case .myLocalNetwork:
+                expected.reach = .myLocalNetwork
+                #expect(next.effectiveReach == .myLocalNetwork)
+            }
+            #expect(next == expected, "only the choice changes, from \(start) to \(way)")
+        }
+    }
+
     @Test("setup and Tailscale HTTPS default off and survive a round trip")
     func setupFieldsRoundTrip() throws {
         #expect(AppSettings.default.setupFinished == false)
