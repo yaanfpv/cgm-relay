@@ -16,8 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- A port another app holds is refused when you type it, whichever address that app listens on, including loopback only and IPv6.
-- The port can be changed again once Tailscale HTTPS is off, even while Tailscale is stopped. It stays fixed only while CGM Relay's Tailscale HTTPS is on, or was on when CGM Relay last checked.
+- A port another app holds is refused when you press Return, whichever address that app listens on, including loopback only and IPv6.
+- After you turn off Tailscale HTTPS in CGM Relay, the port stays editable even if Tailscale then stops.
 
 ## [1.0.0] - 2026-10-11
 
