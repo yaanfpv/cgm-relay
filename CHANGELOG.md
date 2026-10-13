@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+The phone HTTPS setup now asks which phone you have, drops the Tailscale prompt, and lists the steps an iPhone actually shows.
+
 ## [1.0.0] - 2026-10-11
 
 ### Added
