@@ -173,7 +173,7 @@ struct CertificateStepView: View {
                 SetupInfoRow(
                     symbol: "hand.raised",
                     title: "What it can't do",
-                    caption: "It only works for this Mac's own name and your home network's addresses, never for websites.",
+                    caption: "It is made only for this Mac's own name and private network addresses, and its key never leaves this Mac.",
                     wrapsCaption: true
                 )
                 SetupInfoRow(symbol: "trash", title: "Removing it later", caption: removalCaption, wrapsCaption: true)
