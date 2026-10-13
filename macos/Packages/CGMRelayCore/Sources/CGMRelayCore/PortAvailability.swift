@@ -10,22 +10,17 @@ public protocol PortBinding: Sendable {
     func canBind(host: String, port: Int) -> Bool
 }
 
-/// SystemPortBinder binds a real listening socket on host:port, then closes
-/// it at once. By default it sets the same address-reuse option the engine's
-/// own listener sets. With reuseAddress off it is strict: macOS then refuses
-/// a bind that any listener on an overlapping address holds (a loopback-only
-/// listener under an all-addresses probe, an all-addresses one under a
-/// loopback probe), which a reusing bind lets through. The price is that a
-/// port with connections still closing also reads as taken for a short while.
-/// A successful bind reserves nothing: another program can take the port the
-/// moment this returns, which is why a failed bind by the engine itself is
-/// still reported separately (EngineSupervisor.FailureReason.portInUse).
+/// SystemPortBinder binds a real listening socket on host:port with the
+/// same address-reuse option the engine's own listener sets, then closes it
+/// at once. The option keeps a port whose only state is connections still
+/// closing reading as free, but it also lets a bind succeed beside a listener
+/// on a different, overlapping address, which is why PortAvailability asks
+/// about every overlapping address separately. A successful bind reserves
+/// nothing: another program can take the port the moment this returns, which
+/// is why a failed bind by the engine itself is still reported separately
+/// (EngineSupervisor.FailureReason.portInUse).
 public struct SystemPortBinder: PortBinding {
-    private let reuseAddress: Bool
-
-    public init(reuseAddress: Bool = true) {
-        self.reuseAddress = reuseAddress
-    }
+    public init() {}
 
     public func canBind(host: String, port: Int) -> Bool {
         guard (1...65535).contains(port) else { return false }
@@ -49,9 +44,7 @@ public struct SystemPortBinder: PortBinding {
         defer { close(descriptor) }
 
         var enabled: Int32 = 1
-        if reuseAddress {
-            _ = setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size))
-        }
+        _ = setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size))
         if isIPv6 {
             // Only the IPv6 address itself is being tested: a dual-stack
             // wildcard would also claim the IPv4 one.
@@ -112,23 +105,25 @@ public enum PortAvailability {
     }
 
     /// hostsToCheck is every address a port must be free on for the engine
-    /// to bind bindHost: the IPv4 address itself and, for the loopback and
-    /// all-interfaces hosts, the IPv6 counterpart a listener elsewhere on
-    /// this Mac could hold. A tailnet address has no IPv6 counterpart here.
-    public static func hostsToCheck(bindHost: String) -> [String] {
-        switch bindHost {
-        case "127.0.0.1": return ["127.0.0.1", "::1"]
-        case "0.0.0.0": return ["0.0.0.0", "::"]
-        default: return [bindHost]
+    /// to bind bindHost. A bind with address reuse only collides with a
+    /// listener on the very same address, so each address that overlaps one
+    /// the engine uses is asked separately: bindHost, loopback and all
+    /// addresses on both IP versions, and every IPv4 address this Mac has
+    /// (localIPv4s), whichever of those another app holds the port on.
+    public static func hostsToCheck(bindHost: String, localIPv4s: [String] = []) -> [String] {
+        var hosts = [bindHost]
+        for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] + localIPv4s where !hosts.contains(host) {
+            hosts.append(host)
         }
+        return hosts
     }
 
     /// isFree is whether the engine could listen on port at bindHost. The
     /// reserved port, the relay's own status listener, is never free: both
     /// listeners cannot hold it.
-    public static func isFree(port: Int, bindHost: String, binder: any PortBinding, reserved: Int? = nil) -> Bool {
+    public static func isFree(port: Int, bindHost: String, binder: any PortBinding, reserved: Int? = nil, localIPv4s: [String] = []) -> Bool {
         guard port != reserved else { return false }
-        return hostsToCheck(bindHost: bindHost).allSatisfy { binder.canBind(host: $0, port: port) }
+        return hostsToCheck(bindHost: bindHost, localIPv4s: localIPv4s).allSatisfy { binder.canBind(host: $0, port: port) }
     }
 
     /// port(inAddress:) is the port of a host:port listen address, nil when
@@ -140,9 +135,9 @@ public enum PortAvailability {
     /// typedPortRefusal is the sentence refusing a typed follower port, nil
     /// when it is usable: the relay's own status port is refused as its own,
     /// and one another app holds as that app's.
-    public static func typedPortRefusal(port: Int, bindHost: String, binder: any PortBinding, reserved: Int?) -> String? {
+    public static func typedPortRefusal(port: Int, bindHost: String, binder: any PortBinding, reserved: Int?, localIPv4s: [String] = []) -> String? {
         if port == reserved { return reservedMessage(port: port) }
-        return isFree(port: port, bindHost: bindHost, binder: binder) ? nil : inUseMessage(port: port)
+        return isFree(port: port, bindHost: bindHost, binder: binder, localIPv4s: localIPv4s) ? nil : inUseMessage(port: port)
     }
 
     /// firstFreePort tries start, then each next port, for candidates ports
@@ -153,11 +148,12 @@ public enum PortAvailability {
         bindHost: String,
         binder: any PortBinding,
         candidates: Int = candidateCount,
-        reserved: Int? = nil
+        reserved: Int? = nil,
+        localIPv4s: [String] = []
     ) -> SetupPortChoice {
         let last = min(start + candidates - 1, AppSettings.portRange.upperBound)
         if start <= last {
-            for port in start...last where isFree(port: port, bindHost: bindHost, binder: binder, reserved: reserved) {
+            for port in start...last where isFree(port: port, bindHost: bindHost, binder: binder, reserved: reserved, localIPv4s: localIPv4s) {
                 return .free(port)
             }
         }
@@ -174,12 +170,13 @@ public enum PortAvailability {
         bindHost: String,
         binder: any PortBinding,
         candidates: Int = candidateCount,
-        reserved: Int? = nil
+        reserved: Int? = nil,
+        localIPv4s: [String] = []
     ) -> SetupPortChoice {
-        if AppSettings.portRange.contains(current), isFree(port: current, bindHost: bindHost, binder: binder, reserved: reserved) {
+        if AppSettings.portRange.contains(current), isFree(port: current, bindHost: bindHost, binder: binder, reserved: reserved, localIPv4s: localIPv4s) {
             return .free(current)
         }
-        return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved)
+        return firstFreePort(from: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved, localIPv4s: localIPv4s)
     }
 
     /// startPort decides the follower port before an engine start. While
@@ -196,13 +193,14 @@ public enum PortAvailability {
         bindHost: String,
         binder: any PortBinding,
         candidates: Int = candidateCount,
-        reserved: Int?
+        reserved: Int?,
+        localIPv4s: [String] = []
     ) -> StartPortDecision {
         if locked {
             return current == reserved ? .statusPortLocked : .keep
         }
         guard searching || current == reserved else { return .keep }
-        switch setupPort(current: current, default: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved) {
+        switch setupPort(current: current, default: defaultPort, bindHost: bindHost, binder: binder, candidates: candidates, reserved: reserved, localIPv4s: localIPv4s) {
         case .free(let port):
             return .use(port)
         case .exhausted(let first, let last):

@@ -129,7 +129,7 @@ private final class HeldListener {
     let port: Int
     private let descriptor: Int32
 
-    init?(host: String, port requested: Int = 0) {
+    init?(host: String, port requested: Int = 0, dualStack: Bool = false) {
         let isIPv6 = host.contains(":")
         let descriptor = socket(isIPv6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else { return nil }
@@ -141,7 +141,7 @@ private final class HeldListener {
             address6.sin6_family = sa_family_t(AF_INET6)
             address6.sin6_port = in_port_t(requested).bigEndian
             inet_pton(AF_INET6, host, &address6.sin6_addr)
-            var only: Int32 = 1
+            var only: Int32 = dualStack ? 0 : 1
             _ = setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &only, socklen_t(MemoryLayout<Int32>.size))
             bound = withUnsafePointer(to: &address6) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) }
@@ -192,6 +192,40 @@ private final class HeldListener {
     }
 }
 
+/// A port whose only state is a closed connection waiting out its time: a
+/// reusing listener accepts one client and closes the server side first.
+/// Nothing listens on the port afterwards.
+private func portInTimeWait() -> Int? {
+    let listener = socket(AF_INET, SOCK_STREAM, 0)
+    guard listener >= 0 else { return nil }
+    defer { close(listener) }
+    var on: Int32 = 1
+    _ = setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+    let bound = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listener, $0, &length) }
+    }
+    guard bound == 0, named == 0, listen(listener, 1) == 0 else { return nil }
+    let client = socket(AF_INET, SOCK_STREAM, 0)
+    guard client >= 0 else { return nil }
+    defer { close(client) }
+    let connected = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard connected == 0 else { return nil }
+    let accepted = accept(listener, nil, nil)
+    guard accepted >= 0 else { return nil }
+    close(accepted)
+    return Int(UInt16(bigEndian: address.sin_port))
+}
+
 private struct TableBinder: PortBinding {
     var taken: [String: Set<Int>] = [:]
     var allTaken = false
@@ -225,34 +259,31 @@ struct PortAvailabilityTests {
         return probe.port
     }
 
-    @Test("the addresses checked are the IPv4 host and its IPv6 counterpart where there is one")
+    @Test("the addresses checked are the reach's own, loopback and all addresses on both IP versions, and each local IPv4 address once")
     func hostsChecked() {
-        #expect(PortAvailability.hostsToCheck(bindHost: "127.0.0.1") == ["127.0.0.1", "::1"])
-        #expect(PortAvailability.hostsToCheck(bindHost: "0.0.0.0") == ["0.0.0.0", "::"])
-        #expect(PortAvailability.hostsToCheck(bindHost: "100.101.102.103") == ["100.101.102.103"])
+        #expect(PortAvailability.hostsToCheck(bindHost: "127.0.0.1") == ["127.0.0.1", "::1", "0.0.0.0", "::"])
+        #expect(PortAvailability.hostsToCheck(bindHost: "0.0.0.0") == ["0.0.0.0", "127.0.0.1", "::1", "::"])
+        #expect(PortAvailability.hostsToCheck(bindHost: "100.101.102.103", localIPv4s: ["100.101.102.103", "192.168.1.5", "127.0.0.1"]) == ["100.101.102.103", "127.0.0.1", "::1", "0.0.0.0", "::", "192.168.1.5"])
     }
 
-    @Test("a typed port another app holds is refused whichever address it holds it on, for each address the relay checks")
+    @Test("a port another app holds is refused whichever address it holds it on, under every reach, and one only closing connections is free")
     func typedPortHeldOnAnyAddress() throws {
-        let strict = SystemPortBinder(reuseAddress: false)
-        let cases: [(holder: String, bindHost: String)] = [
-            ("127.0.0.1", "127.0.0.1"),
-            ("0.0.0.0", "127.0.0.1"),
-            ("::", "127.0.0.1"),
-            ("::1", "127.0.0.1"),
-            ("127.0.0.1", "0.0.0.0"),
-            ("0.0.0.0", "0.0.0.0"),
-            ("::", "0.0.0.0"),
-        ]
-        for (holder, bindHost) in cases {
-            let held = try #require(HeldListener(host: holder))
-            #expect(
-                PortAvailability.typedPortRefusal(port: held.port, bindHost: bindHost, binder: strict, reserved: nil) == PortAvailability.inUseMessage(port: held.port),
-                "a listener on \(holder) should refuse a port for \(bindHost)"
-            )
+        let hosts = ["127.0.0.1", "0.0.0.0", "::", "::1"]
+        for holder in hosts {
+            for bindHost in ["127.0.0.1", "0.0.0.0", "100.101.102.103"] {
+                let held = try #require(HeldListener(host: holder))
+                #expect(
+                    PortAvailability.typedPortRefusal(port: held.port, bindHost: bindHost, binder: binder, reserved: nil) == PortAvailability.inUseMessage(port: held.port),
+                    "a listener on \(holder) should refuse a port for \(bindHost)"
+                )
+            }
         }
+        let dual = try #require(HeldListener(host: "::", dualStack: true))
+        #expect(PortAvailability.typedPortRefusal(port: dual.port, bindHost: "127.0.0.1", binder: binder, reserved: nil) != nil, "a dual-stack holder is refused")
         let free = try freePort()
-        #expect(PortAvailability.typedPortRefusal(port: free, bindHost: "0.0.0.0", binder: strict, reserved: nil) == nil)
+        #expect(PortAvailability.typedPortRefusal(port: free, bindHost: "0.0.0.0", binder: binder, reserved: nil) == nil)
+        let closing = try #require(portInTimeWait())
+        #expect(PortAvailability.typedPortRefusal(port: closing, bindHost: "0.0.0.0", binder: binder, reserved: nil) == nil, "connections still closing do not hold a port")
     }
 
     // Another suite running alongside can take a released port between the
@@ -283,7 +314,7 @@ struct PortAvailabilityTests {
         }
         #expect(chosen > held[0].port)
         let answers = recorder.answers.filter { $0.port == chosen }
-        #expect(Set(answers.map { $0.host }) == ["127.0.0.1", "::1"])
+        #expect(Set(answers.map { $0.host }) == ["127.0.0.1", "::1", "0.0.0.0", "::"])
         #expect(answers.allSatisfy { $0.free }, "the search saw the chosen port free on both address families")
     }
 
@@ -375,8 +406,10 @@ struct PortAvailabilityTests {
 
     @Test("every address the reach binds is asked, and one taken makes the port taken")
     func everyAddressAsked() {
-        let table = TableBinder(taken: ["::": [4000]])
+        let table = TableBinder(taken: ["::": [4000], "192.168.1.5": [4001]])
         #expect(!PortAvailability.isFree(port: 4000, bindHost: "0.0.0.0", binder: table))
-        #expect(PortAvailability.isFree(port: 4000, bindHost: "127.0.0.1", binder: table))
+        #expect(!PortAvailability.isFree(port: 4000, bindHost: "127.0.0.1", binder: table), "a loopback reach is blocked by an all-addresses holder too")
+        #expect(PortAvailability.isFree(port: 4001, bindHost: "127.0.0.1", binder: table), "a local address not asked about is not")
+        #expect(!PortAvailability.isFree(port: 4001, bindHost: "127.0.0.1", binder: table, localIPv4s: ["192.168.1.5"]))
     }
 }

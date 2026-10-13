@@ -124,9 +124,6 @@ final class AppModel: ObservableObject {
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
     private let portBinder: any PortBinding
-    /// typedPortBinder tests a port the person typed. It is strict about
-    /// addresses another app holds, which the reusing binder above lets through.
-    private let typedPortBinder: any PortBinding
     private let certificateAuthority: LocalCertificateAuthority
     /// certificateServer is the one live certificate download link's server,
     /// with the address and certificate it was made for.
@@ -244,12 +241,10 @@ final class AppModel: ObservableObject {
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
         loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
-        portBinder: any PortBinding = SystemPortBinder(),
-        typedPortBinder: any PortBinding = SystemPortBinder(reuseAddress: false)
+        portBinder: any PortBinding = SystemPortBinder()
     ) {
         self.tailscale = tailscale
         self.portBinder = portBinder
-        self.typedPortBinder = typedPortBinder
         self.credentialStore = credentialStore
         certificateAuthority = LocalCertificateAuthority(store: credentialStore)
         self.settingsStore = settingsStore
@@ -616,8 +611,9 @@ final class AppModel: ObservableObject {
     /// relay's own status listener uses, nil when it is free. A typed port is
     /// never moved to another.
     func typedPortInUseMessage(_ port: Int) -> String? {
-        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
-        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: typedPortBinder, reserved: PortAvailability.port(inAddress: statusAddr))
+        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: interfaces)
+        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr), localIPv4s: interfaces.map(\.address))
     }
 
     func updateReach(_ reach: NetworkReach) {
@@ -1124,7 +1120,8 @@ final class AppModel: ObservableObject {
             locked: httpsLocked,
             bindHost: bindHost,
             binder: portBinder,
-            reserved: PortAvailability.port(inAddress: statusAddr)
+            reserved: PortAvailability.port(inAddress: statusAddr),
+            localIPv4s: interfaces.map(\.address)
         )
         switch decision {
         case .keep:
