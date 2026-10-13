@@ -829,3 +829,61 @@ func TestRunStatusReportsReadingsFetchedOverTheLANListener(t *testing.T) {
 		t.Errorf("a later fetch left the time at %v, want it after %v", second["follower-app/3.1"], first["follower-app/3.1"])
 	}
 }
+
+// TestLANHandshakeFailuresKeepRemoteAddressesOutOfTheLog checks that a
+// local network host which connects to the TLS port and fails the
+// handshake leaves neither its address nor Go's handshake line in the log,
+// while the relay's own lines are still written.
+func TestLANHandshakeFailuresKeepRemoteAddressesOutOfTheLog(t *testing.T) {
+	t.Parallel()
+	logs := &syncBuffer{}
+	cfg := testConfig(t)
+	cfg.LANListenAddrs = []string{"127.0.0.1:0"}
+	cfg.TLSCertPEM, cfg.TLSKeyPEM = selfSignedLeaf(t)
+	addrs, stop := runRelay(t, cfg, relay.WithLogOutput(logs))
+	defer stop()
+
+	var clientAddrs []string
+	for _, payload := range []string{"not a tls hello at all\r\n\r\n", "GET / HTTP/1.1\r\nHost: x\r\n\r\n", ""} {
+		conn, err := net.Dial("tcp", addrs.LAN[0])
+		if err != nil {
+			t.Fatalf("dial the LAN listener: %v", err)
+		}
+		clientAddrs = append(clientAddrs, conn.LocalAddr().String())
+		if payload != "" {
+			if _, err := conn.Write([]byte(payload)); err != nil {
+				t.Fatalf("write junk: %v", err)
+			}
+		}
+		if payload == "" {
+			conn.Close()
+			continue
+		}
+		// The server logs a failed handshake before it closes the
+		// connection, so reading to the end means any line is already out.
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		io.Copy(io.Discard, conn)
+		conn.Close()
+	}
+	// A completed request after the failures is the last word on ordering.
+	lan := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	resp, err := lan.Get("https://" + addrs.LAN[0] + "/api/v1/status.json")
+	if err != nil {
+		t.Fatalf("GET over TLS: %v", err)
+	}
+	resp.Body.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	out := logs.String()
+	if strings.Contains(out, "TLS handshake error") {
+		t.Errorf("log carries a handshake error line:\n%s", out)
+	}
+	for _, addr := range clientAddrs {
+		if strings.Contains(out, addr) {
+			t.Errorf("log carries the remote address %s:\n%s", addr, out)
+		}
+	}
+	if !strings.Contains(out, "serving the Nightscout API over TLS on") {
+		t.Errorf("the relay's own lines are missing from the log:\n%s", out)
+	}
+}

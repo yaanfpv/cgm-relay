@@ -5,6 +5,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -169,7 +171,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	lanAPI := trackLANReadings(nsAPI, lanReadings, time.Now)
 	var lanServers []*runningServer
 	for _, addr := range cfg.LANListenAddrs {
-		lan, err := startListening(addr, lanAPI, lanTLS, logger)
+		lan, err := startListening(addr, lanAPI, lanTLS, newLANErrorLog(logger, time.Now))
 		if err != nil {
 			return fmt.Errorf("relay: listen on %s: %w", addr, err)
 		}
@@ -281,6 +283,52 @@ func watchPollerStatus(ctx context.Context, p *poller.Poller, logger *log.Logger
 	}
 }
 
+// handshakeErrorMarker starts every line net/http writes when a TLS
+// handshake fails. The line ends with the remote address, which for a
+// listener on the local network is another device's.
+const handshakeErrorMarker = "http: TLS handshake error from "
+
+// handshakeReportInterval is the least time between two lines reporting how
+// many handshakes failed.
+const handshakeReportInterval = time.Minute
+
+// lanErrorWriter is the writer behind the local network servers' error log.
+// It drops each failed-handshake line, so a device on the network can not
+// put its address in the log or fill it, and passes every other line
+// through. It reports the number of dropped lines, without any address, at
+// most once per handshakeReportInterval.
+type lanErrorWriter struct {
+	out *log.Logger
+	now func() time.Time
+
+	mu       sync.Mutex
+	dropped  int
+	reported time.Time
+}
+
+func (w *lanErrorWriter) Write(p []byte) (int, error) {
+	if !bytes.Contains(p, []byte(handshakeErrorMarker)) {
+		return w.out.Writer().Write(p)
+	}
+	w.mu.Lock()
+	w.dropped++
+	var count int
+	if now := w.now(); w.reported.IsZero() || now.Sub(w.reported) >= handshakeReportInterval {
+		count, w.dropped, w.reported = w.dropped, 0, now
+	}
+	w.mu.Unlock()
+	if count > 0 {
+		w.out.Printf("%d TLS connections to the local network port did not complete a handshake", count)
+	}
+	return len(p), nil
+}
+
+// newLANErrorLog returns the error log for a local network server, writing
+// through out's destination and format.
+func newLANErrorLog(out *log.Logger, now func() time.Time) *log.Logger {
+	return log.New(&lanErrorWriter{out: out, now: now}, out.Prefix(), out.Flags())
+}
+
 // runningServer is one of the two HTTP servers Run starts.
 type runningServer struct {
 	srv *http.Server
@@ -305,7 +353,7 @@ func startServer(addr string, handler http.Handler) (*runningServer, error) {
 // non-nil tlsConfig makes the listener speak TLS only: every connection must
 // complete a handshake under it, with no plain-http fallback on the same
 // port. Nil means plain http. A non-nil errorLog receives the server's own
-// connection-level errors, such as a failed handshake, in place of the
+// connection-level errors, such as an accept failure, in place of the
 // process-wide logger.
 func startListening(addr string, handler http.Handler, tlsConfig *tls.Config, errorLog *log.Logger) (*runningServer, error) {
 	ln, err := net.Listen("tcp", addr)

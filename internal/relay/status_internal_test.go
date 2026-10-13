@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -687,5 +688,40 @@ func TestLANReadingTrackerMovesForwardAndCleansTheUserAgent(t *testing.T) {
 	}
 	if len(got.LANReadingClients) != 4 {
 		t.Errorf("lan_reading_clients = %v, want 4 entries", got.LANReadingClients)
+	}
+}
+
+// TestLANErrorLogDropsHandshakeLinesAndKeepsTheRest checks the writer behind
+// the LAN servers' error log: handshake failures never reach the output
+// with an address, a count is reported at most once a minute, and every
+// other line the server logs passes through untouched.
+func TestLANErrorLogDropsHandshakeLinesAndKeepsTheRest(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	logger := log.New(&out, "", 0)
+	errorLog := newLANErrorLog(logger, func() time.Time { return now })
+
+	errorLog.Printf("http: TLS handshake error from 192.168.1.50:51234: EOF")
+	errorLog.Printf("http: TLS handshake error from 192.168.1.51:40000: tls: first record does not look like a TLS handshake")
+	errorLog.Printf("http: Accept error: too many open files; retrying in 5ms")
+	got := out.String()
+	if strings.Contains(got, "192.168.1.5") {
+		t.Errorf("output carries a remote address: %q", got)
+	}
+	if strings.Count(got, "handshake") != 1 {
+		t.Errorf("want one count line for the two failures inside a minute, got %q", got)
+	}
+	if !strings.Contains(got, "http: Accept error: too many open files; retrying in 5ms") {
+		t.Errorf("an unrelated server error was lost: %q", got)
+	}
+
+	now = now.Add(time.Minute)
+	errorLog.Printf("http: TLS handshake error from 192.168.1.52:1: EOF")
+	if strings.Count(out.String(), "handshake") != 2 {
+		t.Errorf("want a second count line after a minute, got %q", out.String())
+	}
+	if strings.Contains(out.String(), "192.168.1.5") {
+		t.Errorf("output carries a remote address: %q", out.String())
 	}
 }
