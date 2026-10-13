@@ -154,14 +154,32 @@ struct CertificateDownloadServerTests {
         let lifetime = Duration.seconds(3)
         let clock = ContinuousClock()
 
-        let early = try Self.makeFixture(lifetime: lifetime)
-        let earlyURL = try await early.server.mint(format: .android)
-        let started = clock.now
-        try await Task.sleep(for: .milliseconds(1500))
-        let before = try await HTTPReply.get(earlyURL)
-        #expect(clock.now - started < lifetime)
-        #expect(before.status == 200)
-        await early.server.close()
+        // The half of the test that needs the link to be alive is only
+        // meaningful if the host did not stall past the lifetime on the
+        // way; a stall that long ends the link before anything can ask it,
+        // so that attempt is repeated. A failure inside the lifetime is
+        // not repeated.
+        var before: HTTPReply?
+        for attempt in 1...3 {
+            let early = try Self.makeFixture(lifetime: lifetime)
+            let began = clock.now
+            let earlyURL = try await early.server.mint(format: .android)
+            try await Task.sleep(for: .milliseconds(1500))
+            do {
+                before = try await HTTPReply.get(earlyURL)
+                #expect(clock.now - began < lifetime)
+                await early.server.close()
+                break
+            } catch {
+                await early.server.close()
+                let elapsed = clock.now - began
+                if elapsed < lifetime || attempt == 3 {
+                    Issue.record("the link did not answer \(elapsed) into a \(lifetime) lifetime: \(error)")
+                    break
+                }
+            }
+        }
+        #expect(before?.status == 200)
 
         let late = try Self.makeFixture(lifetime: lifetime)
         let lateURL = try await late.server.mint(format: .android)
@@ -577,7 +595,17 @@ private final class RawClient: @unchecked Sendable {
         connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!, using: .tcp)
     }
 
-    struct ConnectFailed: Error {}
+    /// ConnectFailed keeps the states the connection went through and the
+    /// error that ended the attempt, so a failure says why.
+    struct ConnectFailed: Error, CustomStringConvertible {
+        let timeline: [String]
+        var description: String { "connect failed: " + timeline.joined(separator: " -> ") }
+    }
+
+    /// A refused connection settles at once: nothing is listening, which is
+    /// the answer tests ask for when a link has ended. Any other waiting
+    /// state may pass, so it gets this long to become ready.
+    private static let patience: DispatchTimeInterval = .seconds(5)
 
     static func connect(port: Int) async throws -> RawClient {
         let client = RawClient(port: port)
@@ -586,24 +614,41 @@ private final class RawClient: @unchecked Sendable {
     }
 
     private func start() async throws {
-        let resumed = NSLock()
-        nonisolated(unsafe) var done = false
+        let lock = NSLock()
+        nonisolated(unsafe) var settled = false
+        nonisolated(unsafe) var timeline: [String] = []
+        let connection = connection
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.stateUpdateHandler = { state in
-                let result: Result<Void, Error>?
-                switch state {
-                case .ready: result = .success(())
-                case .failed, .waiting, .cancelled: result = .failure(ConnectFailed())
-                default: result = nil
-                }
-                guard let result else { return }
-                let first = resumed.withLock {
-                    defer { done = true }
-                    return !done
+            let settle: @Sendable (Result<Void, Error>) -> Void = { result in
+                let first = lock.withLock {
+                    defer { settled = true }
+                    return !settled
                 }
                 if first { continuation.resume(with: result) }
             }
+            let failure: @Sendable () -> Error = { ConnectFailed(timeline: lock.withLock { timeline }) }
+            connection.stateUpdateHandler = { state in
+                lock.withLock { timeline.append("\(state)") }
+                switch state {
+                case .ready:
+                    settle(.success(()))
+                case .waiting(let error):
+                    if case .posix(.ECONNREFUSED) = error {
+                        settle(.failure(failure()))
+                        connection.cancel()
+                    }
+                case .failed, .cancelled:
+                    settle(.failure(failure()))
+                default:
+                    break
+                }
+            }
             connection.start(queue: Self.queue)
+            Self.queue.asyncAfter(deadline: .now() + Self.patience) {
+                guard lock.withLock({ !settled }) else { return }
+                settle(.failure(failure()))
+                connection.cancel()
+            }
         }
     }
 
