@@ -8,6 +8,12 @@ struct AdvancedPaneView: View {
     @ObservedObject var model: AppModel
     @State private var portText = ""
     @State private var portErrorMessage: String?
+    /// portChanged is whether the port was just saved as a new one, so the
+    /// pane says follower apps need the new address.
+    @State private var portChanged = false
+    /// openConnectPane brings the Connect pane forward, where the new
+    /// address is.
+    var openConnectPane: () -> Void = {}
     @FocusState private var portFieldFocused: Bool
     /// isPresentingCertificateStep is whether this pane opened the HTTPS step.
     @State private var isPresentingCertificateStep = false
@@ -39,6 +45,16 @@ struct AdvancedPaneView: View {
                     Text(portErrorMessage)
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+                if portChanged {
+                    HStack {
+                        Text("Follower apps using the old address stop reading until they get the new one.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        AccessibleButton("Show New Address…", action: openConnectPane)
+                    }
                 }
             } footer: {
                 if model.httpsLocked {
@@ -94,15 +110,18 @@ struct AdvancedPaneView: View {
         switch PortCommitValidation.validate(portText) {
         case .invalid(let message):
             portErrorMessage = message
+            portChanged = false
         case .valid(let value):
             portErrorMessage = nil
             portText = String(value)
             guard value != model.settings.port else { return }
             if let inUse = model.typedPortInUseMessage(value) {
                 portErrorMessage = inUse
+                portChanged = false
                 return
             }
             model.updatePort(value)
+            portChanged = model.settings.port == value
         }
     }
 }

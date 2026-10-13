@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+A port another app holds is now refused as soon as it is typed, whichever address that app listens on, and a saved port change says follower apps need the new address.
+
 ## [1.0.0] - 2026-10-11
 
 ### Added

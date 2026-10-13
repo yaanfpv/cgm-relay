@@ -98,6 +98,10 @@ final class AppModel: ObservableObject {
     /// starting from the default only when the saved port is taken, on the
     /// addresses the chosen reach binds.
     private var portIsPersonChosen: Bool
+    /// portChangeMenuNotice is whether the menu panel still owes the person
+    /// a word that follower apps on the old address stop reading. It is
+    /// shown while the panel is open and ends when the panel closes.
+    @Published private(set) var portChangeMenuNotice = false
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
     /// did not work, with Tailscale's own page where one helps.
@@ -120,6 +124,9 @@ final class AppModel: ObservableObject {
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
     private let portBinder: any PortBinding
+    /// typedPortBinder tests a port the person typed. It is strict about
+    /// addresses another app holds, which the reusing binder above lets through.
+    private let typedPortBinder: any PortBinding
     private let certificateAuthority: LocalCertificateAuthority
     /// certificateServer is the one live certificate download link's server,
     /// with the address and certificate it was made for.
@@ -237,10 +244,12 @@ final class AppModel: ObservableObject {
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
         loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
-        portBinder: any PortBinding = SystemPortBinder()
+        portBinder: any PortBinding = SystemPortBinder(),
+        typedPortBinder: any PortBinding = SystemPortBinder(reuseAddress: false)
     ) {
         self.tailscale = tailscale
         self.portBinder = portBinder
+        self.typedPortBinder = typedPortBinder
         self.credentialStore = credentialStore
         certificateAuthority = LocalCertificateAuthority(store: credentialStore)
         self.settingsStore = settingsStore
@@ -578,7 +587,9 @@ final class AppModel: ObservableObject {
         // Tailscale serves to the port it was set up with, so the port is
         // fixed while HTTPS is on.
         guard !httpsLocked else { return }
+        let previous = settings.port
         settings.port = port.clamped(to: AppSettings.portRange)
+        if settings.port != previous { portChangeMenuNotice = true }
         portIsPersonChosen = true
         setupPortNotice = nil
         persistSettings()
@@ -594,13 +605,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// portChangeNoticeShown ends the menu panel's word about the new
+    /// address; it is called as the panel closes.
+    func portChangeNoticeShown() {
+        portChangeMenuNotice = false
+    }
+
     /// typedPortInUseMessage is the refusal for a typed port another app
     /// already holds on the addresses the chosen reach binds, or the one the
     /// relay's own status listener uses, nil when it is free. A typed port is
     /// never moved to another.
     func typedPortInUseMessage(_ port: Int) -> String? {
         let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
-        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr))
+        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: typedPortBinder, reserved: PortAvailability.port(inAddress: statusAddr))
     }
 
     func updateReach(_ reach: NetworkReach) {

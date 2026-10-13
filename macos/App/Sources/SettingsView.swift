@@ -42,7 +42,7 @@ struct SettingsView: View {
                 .measuringHeight(for: .general, into: $paneHeights)
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(SettingsTab.general)
-            AdvancedPaneView(model: model)
+            AdvancedPaneView(model: model, openConnectPane: { navigation.tab = .connect })
                 .measuringHeight(for: .advanced, into: $paneHeights)
                 .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
                 .tag(SettingsTab.advanced)

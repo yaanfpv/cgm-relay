@@ -232,6 +232,29 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.hostsToCheck(bindHost: "100.101.102.103") == ["100.101.102.103"])
     }
 
+    @Test("a typed port another app holds is refused whichever address it holds it on, for each address the relay checks")
+    func typedPortHeldOnAnyAddress() throws {
+        let strict = SystemPortBinder(reuseAddress: false)
+        let cases: [(holder: String, bindHost: String)] = [
+            ("127.0.0.1", "127.0.0.1"),
+            ("0.0.0.0", "127.0.0.1"),
+            ("::", "127.0.0.1"),
+            ("::1", "127.0.0.1"),
+            ("127.0.0.1", "0.0.0.0"),
+            ("0.0.0.0", "0.0.0.0"),
+            ("::", "0.0.0.0"),
+        ]
+        for (holder, bindHost) in cases {
+            let held = try #require(HeldListener(host: holder))
+            #expect(
+                PortAvailability.typedPortRefusal(port: held.port, bindHost: bindHost, binder: strict, reserved: nil) == PortAvailability.inUseMessage(port: held.port),
+                "a listener on \(holder) should refuse a port for \(bindHost)"
+            )
+        }
+        let free = try freePort()
+        #expect(PortAvailability.typedPortRefusal(port: free, bindHost: "0.0.0.0", binder: strict, reserved: nil) == nil)
+    }
+
     // Another suite running alongside can take a released port between the
     // probe and the search, so a port lost that way is retried; one still
     // free after the search but not chosen is the failure.

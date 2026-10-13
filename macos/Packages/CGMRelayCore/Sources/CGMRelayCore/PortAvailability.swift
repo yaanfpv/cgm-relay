@@ -10,13 +10,22 @@ public protocol PortBinding: Sendable {
     func canBind(host: String, port: Int) -> Bool
 }
 
-/// SystemPortBinder binds a real listening socket on host:port with the
-/// same address-reuse option the engine's own listener sets, then closes it
-/// at once. A successful bind reserves nothing: another program can take the
-/// port the moment this returns, which is why a failed bind by the engine
-/// itself is still reported separately (EngineSupervisor.FailureReason.portInUse).
+/// SystemPortBinder binds a real listening socket on host:port, then closes
+/// it at once. By default it sets the same address-reuse option the engine's
+/// own listener sets. With reuseAddress off it is strict: macOS then refuses
+/// a bind that any listener on an overlapping address holds (a loopback-only
+/// listener under an all-addresses probe, an all-addresses one under a
+/// loopback probe), which a reusing bind lets through. The price is that a
+/// port with connections still closing also reads as taken for a short while.
+/// A successful bind reserves nothing: another program can take the port the
+/// moment this returns, which is why a failed bind by the engine itself is
+/// still reported separately (EngineSupervisor.FailureReason.portInUse).
 public struct SystemPortBinder: PortBinding {
-    public init() {}
+    private let reuseAddress: Bool
+
+    public init(reuseAddress: Bool = true) {
+        self.reuseAddress = reuseAddress
+    }
 
     public func canBind(host: String, port: Int) -> Bool {
         guard (1...65535).contains(port) else { return false }
@@ -40,7 +49,9 @@ public struct SystemPortBinder: PortBinding {
         defer { close(descriptor) }
 
         var enabled: Int32 = 1
-        _ = setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        if reuseAddress {
+            _ = setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        }
         if isIPv6 {
             // Only the IPv6 address itself is being tested: a dual-stack
             // wildcard would also claim the IPv4 one.
