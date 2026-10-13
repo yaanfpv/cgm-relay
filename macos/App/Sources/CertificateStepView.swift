@@ -83,8 +83,8 @@ struct CertificateStepView: View {
         .cgmWindowBackground()
         .onAppear { startedAt = Date() }
         .onChange(of: model.settings.needsCertificateStep) { _, needed in
-            // Tailscale HTTPS turned on from the first screen, or the reach
-            // changed elsewhere: this phone no longer needs the step here.
+            // The reach changed elsewhere: this phone no longer needs the
+            // step here.
             if !needed, !model.settings.localCertificateStepFinished { model.closeCertificateStep() }
         }
     }
@@ -147,14 +147,15 @@ struct CertificateStepView: View {
     private var whichPhoneScreen: some View {
         Form {
             Section {
-                Picker("Phone", selection: $phone) {
+                Picker("Which phone will read your glucose?", selection: $phone) {
                     Text("iPhone").tag(Phone?.some(.iPhone))
                     Text("Android").tag(Phone?.some(.android))
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
-                .accessibilityLabel("Phone")
+            } header: {
+                Text("Which phone will read your glucose?")
             }
             Section {
                 SetupInfoRow(
@@ -180,16 +181,8 @@ struct CertificateStepView: View {
                 Text("On a shared or public Wi-Fi, use Tailscale instead: it's encrypted end to end.")
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if case .running = model.tailscaleStatus {
-                Section {
-                    TailscaleHTTPSControl(model: model, part: .statusRow)
-                } footer: {
-                    TailscaleHTTPSControl(model: model, part: .notes)
-                }
-            }
         }
         .formStyle(.grouped)
-        .task { await model.refreshTailscale() }
     }
 
     private var removalCaption: String {
@@ -304,11 +297,12 @@ struct CertificateStepView: View {
 
     private var iPhoneInstallSteps: [Text] {
         [
-            Text("If your iPhone asks ") + bold("\u{201C}Choose a Device\u{201D}") + Text(", tap ") + bold("iPhone") + Text("."),
-            Text("Safari says ") + bold("\u{201C}Profile Downloaded. Review the profile in the Settings app if you want to install it.\u{201D}") + Text(" Tap ") + bold("Close") + Text("."),
+            Text("Safari asks whether to allow a configuration profile to download. Tap ") + bold("Allow") + Text("."),
+            Text("If it asks ") + bold("\u{201C}Choose a Device\u{201D}") + Text(", tap ") + bold("iPhone") + Text("."),
+            Text("Safari says ") + bold("\u{201C}Profile Downloaded\u{201D}") + Text(". Tap ") + bold("Close") + Text("."),
             Text("Open ") + bold("Settings") + Text(". Tap ") + bold("Profile Downloaded") + Text(" near the top (or General, VPN & Device Management, CGM Relay)."),
-            Text("Tap ") + bold("Install") + Text(", enter your passcode, then ") + bold("Install") + Text(" again on ") + bold("\u{201C}Installing this profile will change settings on your iPhone\u{201D}") + Text(". That warning is expected for any certificate you add yourself."),
-            Text("Tap ") + bold("Done") + Text("."),
+            Text("Tap ") + bold("Install") + Text(", enter your passcode, then tap ") + bold("Install") + Text(" again. A popup says ") + bold("\u{201C}Install Profile: Installing this profile will change settings on your iPhone\u{201D}") + Text(". That warning is expected for any certificate you add yourself. Tap ") + bold("Install") + Text(" on the popup."),
+            Text("Tap the ") + bold("check mark") + Text(" at the top right."),
         ]
     }
 
