@@ -836,11 +836,13 @@ func TestRunStatusReportsReadingsFetchedOverTheLANListener(t *testing.T) {
 // while the relay's own lines are still written.
 func TestLANHandshakeFailuresKeepRemoteAddressesOutOfTheLog(t *testing.T) {
 	t.Parallel()
+	fake := llufake.New(t)
+	source := librelinkup.New("person@example.test", "handshake-test-password", librelinkup.WithBaseURL(fake.URL))
 	logs := &syncBuffer{}
 	cfg := testConfig(t)
 	cfg.LANListenAddrs = []string{"127.0.0.1:0"}
 	cfg.TLSCertPEM, cfg.TLSKeyPEM = selfSignedLeaf(t)
-	addrs, stop := runRelay(t, cfg, relay.WithLogOutput(logs))
+	addrs, stop := runRelay(t, cfg, relay.WithSource(source), relay.WithLogOutput(logs))
 	defer stop()
 
 	var clientAddrs []string
