@@ -218,9 +218,11 @@ struct SetupView: View {
     }
 
     /// offersTailscaleHTTPS is true while step 2's own primary action, the
-    /// Tailscale HTTPS button, is on screen: Continue then steps back so
-    /// the screen has one primary action.
+    /// Tailscale HTTPS button, is on screen: only while no chosen way works
+    /// yet, so Continue then steps back and the screen has one primary
+    /// action. Once the chosen way works, Continue is the primary action.
     private var offersTailscaleHTTPS: Bool {
+        guard !isPhoneReachable else { return false }
         if case .off = model.httpsState { return true }
         return false
     }

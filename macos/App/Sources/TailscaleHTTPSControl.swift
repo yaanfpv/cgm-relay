@@ -30,6 +30,8 @@ struct TailscaleHTTPSControl: View {
     }
 
     private static let title = "Tailscale HTTPS"
+    // The turn-on button is the screen's primary action only while no chosen
+    // way works yet; once one does, it is a plain button and never a nudge.
     private static let offCaption = "A private address that works at home and away."
 
     @ViewBuilder
@@ -48,7 +50,7 @@ struct TailscaleHTTPSControl: View {
                 model.settings.tailscaleHTTPSEnabled ? "Turned off in Tailscale. Turn it on again." : Self.offCaption,
                 model.isChangingTailscale
                     ? .checking
-                    : .action("Use Tailscale HTTPS", style: .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
+                    : .action("Use Tailscale HTTPS", style: model.phoneReachability.isReachable ? .secondary : .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
             )
         case .on(let port):
             row(
