@@ -98,6 +98,10 @@ final class AppModel: ObservableObject {
     /// starting from the default only when the saved port is taken, on the
     /// addresses the chosen reach binds.
     private var portIsPersonChosen: Bool
+    /// portChangeMenuNotice is whether the menu panel still owes the person
+    /// a word that follower apps on the old address stop reading. It is
+    /// shown while the panel is open and ends when the panel closes.
+    @Published private(set) var portChangeMenuNotice = false
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
     /// did not work, with Tailscale's own page where one helps.
@@ -571,7 +575,9 @@ final class AppModel: ObservableObject {
         // Tailscale serves to the port it was set up with, so the port is
         // fixed while the handler is serving.
         guard !isPortLocked else { return }
+        let previous = settings.port
         settings.port = port.clamped(to: AppSettings.portRange)
+        if settings.port != previous { portChangeMenuNotice = true }
         portIsPersonChosen = true
         setupPortNotice = nil
         persistSettings()
@@ -587,13 +593,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// portChangeNoticeShown ends the menu panel's word about the new
+    /// address; it is called as the panel closes.
+    func portChangeNoticeShown() {
+        portChangeMenuNotice = false
+    }
+
     /// typedPortInUseMessage is the refusal for a typed port another app
     /// already holds on the addresses the chosen reach binds, or the one the
     /// relay's own status listener uses, nil when it is free. A typed port is
     /// never moved to another.
     func typedPortInUseMessage(_ port: Int) -> String? {
-        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: SystemNetworkInterfaces.currentIPv4Addresses())
-        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr))
+        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: interfaces)
+        return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr), localIPv4s: interfaces.map(\.address))
     }
 
     /// chooseWay moves the choice to way, and nothing else: Tailscale is never
@@ -1095,7 +1108,8 @@ final class AppModel: ObservableObject {
             locked: isPortLocked,
             bindHost: bindHost,
             binder: portBinder,
-            reserved: PortAvailability.port(inAddress: statusAddr)
+            reserved: PortAvailability.port(inAddress: statusAddr),
+            localIPv4s: interfaces.map(\.address)
         )
         switch decision {
         case .keep:
