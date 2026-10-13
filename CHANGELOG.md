@@ -6,8 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Changed
-
 - The certificate sheet now says the certificate is made only for your Mac's own name and private network addresses, without promising what your phone will enforce. The page that hands a phone the certificate serves a few connections at a time, so a busy network can't hold the app up while it is open, and failed connection attempts to the relay's Wi-Fi address no longer fill the log with other devices' addresses.
 
 ## [1.0.1] - 2026-10-13
