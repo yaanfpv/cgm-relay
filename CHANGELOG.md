@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Pick how your phone reaches your Mac at any time, in setup and in Settings: Tailscale HTTPS is one of the ways beside your tailnet and your local network, nothing is greyed out because Tailscale HTTPS is on, and switching away leaves it set up in Tailscale. Turning Tailscale HTTPS off is a separate action that never changes your choice, and CGM Relay never turns it on for you.
+
 ## [1.0.0] - 2026-10-11
 
 ### Added

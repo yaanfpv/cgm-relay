@@ -15,6 +15,53 @@ public enum NetworkReach: String, Codable, Sendable, CaseIterable {
     case myLocalNetwork
 }
 
+/// ReachWay is one entry in the list of ways a phone can reach this Mac, as
+/// the person sees and picks it: the three NetworkReach choices and Tailscale
+/// HTTPS, which keeps the relay on this Mac only while Tailscale does the
+/// reaching. Exactly one is chosen at a time (AppSettings.chosenWay).
+public enum ReachWay: Sendable, Equatable, CaseIterable {
+    case tailscaleHTTPS
+    case thisMacOnly
+    case myTailnet
+    case myLocalNetwork
+
+    /// Pickability is whether a way can be picked right now. An unavailable
+    /// way carries the one line that says why. Nothing about another way
+    /// being chosen, or Tailscale HTTPS being on, ever makes a way
+    /// unavailable.
+    public enum Pickability: Sendable, Equatable {
+        case pickable
+        case unavailable(reason: String)
+    }
+
+    /// pickability is the one answer for the list. Tailscale HTTPS is picked
+    /// only while the app's handler is already serving, since picking it
+    /// never runs a Tailscale command: turning it on is its own button.
+    public func pickability(https: TailscaleHTTPSState, tailnetAvailable: Bool) -> Pickability {
+        switch self {
+        case .thisMacOnly, .myLocalNetwork:
+            return .pickable
+        case .myTailnet:
+            return tailnetAvailable ? .pickable : .unavailable(reason: "This Mac has no Tailscale address right now.")
+        case .tailscaleHTTPS:
+            switch https {
+            case .on:
+                return .pickable
+            case .off:
+                return .unavailable(reason: "Not turned on yet. Use the button above to turn it on.")
+            case .noFreePort:
+                return .unavailable(reason: "Every port from 443 up is taken.")
+            case .unavailable:
+                return .unavailable(reason: "Connect Tailscale to use this.")
+            case .unreadable:
+                return .unavailable(reason: "Couldn't read Tailscale's settings right now.")
+            case .unknown:
+                return .unavailable(reason: "Checking Tailscale…")
+            }
+        }
+    }
+}
+
 /// NetworkInterfaceAddress is one IPv4 address this Mac currently has, on
 /// one named interface -- the input ReachAddressResolver's own mapping
 /// takes, kept separate from SystemNetworkInterfaces's real
@@ -157,21 +204,33 @@ public enum PhoneReachability: Sendable, Equatable {
     public var isReachable: Bool { self == .reachable }
 
     /// decide is the one pure answer: Tailscale HTTPS reaches a phone only
-    /// while Tailscale itself reports it serving (httpsServing); otherwise
-    /// only My tailnet or My local network with an address right now do.
-    /// This Mac only never does. httpsChosen is the saved Tailscale HTTPS
-    /// choice, so a choice Tailscale no longer backs is blocked rather than
-    /// treated as reachable.
+    /// when the person chose it and Tailscale itself reports it serving
+    /// (https); otherwise only My tailnet or My local network with an
+    /// address right now do. This Mac only never does. httpsChosen is the
+    /// saved Tailscale HTTPS choice, so a choice Tailscale no longer backs is
+    /// blocked, with a sentence that says followers can't reach this Mac and
+    /// what to do, rather than treated as reachable; a handler serving that
+    /// the person did not choose does not count.
     public static func decide(
         reach: NetworkReach,
         httpsChosen: Bool,
-        httpsServing: Bool,
+        https: TailscaleHTTPSState,
         tailnetAvailable: Bool,
         localNetworkAvailable: Bool
     ) -> PhoneReachability {
-        if httpsServing { return .reachable }
         if httpsChosen {
-            return .blocked(reason: "Tailscale HTTPS isn't serving right now. Connect Tailscale, or set up later.")
+            switch https {
+            case .on:
+                return .reachable
+            case .off, .noFreePort:
+                return .blocked(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way.")
+            case .unavailable:
+                return .blocked(reason: "Tailscale isn't connected, so followers can't reach this Mac. Connect Tailscale, or choose another way.")
+            case .unreadable:
+                return .blocked(reason: "Couldn't read Tailscale's settings, so followers may not reach this Mac. Check again, or choose another way.")
+            case .unknown:
+                return .blocked(reason: "Checking Tailscale. Choose another way if you don't want to wait.")
+            }
         }
         switch reach {
         case .thisMacOnly:

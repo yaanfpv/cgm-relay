@@ -162,20 +162,15 @@ final class AppModel: ObservableObject {
         TailscaleHTTPSState.evaluate(status: tailscaleStatus, config: tailscaleServe, relayPort: settings.port)
     }
 
-    /// httpsLocked is whether the port and the reach choices must not change:
-    /// while this app's handler is serving, and while the saved choice says
-    /// HTTPS is on but Tailscale cannot be asked, since changing the port
-    /// then would strand the handler already set up.
-    var httpsLocked: Bool {
-        switch httpsState {
-        case .on:
-            return true
-        case .off, .noFreePort:
-            return false
-        case .unknown, .unavailable, .unreadable:
-            return settings.tailscaleHTTPSEnabled
-        }
+    /// portLockNote is why the port must not change, nil when it may: while
+    /// this app's handler is serving, whatever way is chosen, since changing
+    /// the port then would strand the handler already set up. The choice of
+    /// a way is never locked.
+    var portLockNote: String? {
+        httpsState.portLockNote(chosen: settings.tailscaleHTTPSEnabled)
     }
+
+    var isPortLocked: Bool { portLockNote != nil }
 
     var canStart: Bool { credentialsConfigured && engineState == .stopped }
 
@@ -305,7 +300,7 @@ final class AppModel: ObservableObject {
         await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
         async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
-        async let tailscaleRead: Void = settings.tailscaleHTTPSEnabled ? refreshTailscale() : ()
+        async let tailscaleRead: Void = refreshTailscale()
         _ = await (engineStarted, pollerStarted, tailscaleRead)
     }
 
@@ -319,9 +314,7 @@ final class AppModel: ObservableObject {
     func onMenuOpened() {
         refreshCredentialsConfigured()
         refreshNetworkAddresses()
-        if settings.tailscaleHTTPSEnabled {
-            Task { await refreshTailscale() }
-        }
+        Task { await refreshTailscale() }
         if canTryAgain {
             tryAgain()
         }
@@ -545,7 +538,7 @@ final class AppModel: ObservableObject {
     /// (impliedBindHost), the settings port, and the current display-host
     /// availability. No address logic lives here.
     var connectPaneAddressState: ConnectPaneAddressState {
-        if settings.tailscaleHTTPSEnabled || httpsState.isOn {
+        if settings.tailscaleHTTPSEnabled {
             return ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: boundHost, tailscale: tailscaleStatus, https: httpsState)
         }
         return ConnectPaneAddressState.decide(
@@ -566,7 +559,7 @@ final class AppModel: ObservableObject {
         PhoneReachability.decide(
             reach: settings.reach,
             httpsChosen: settings.tailscaleHTTPSEnabled,
-            httpsServing: httpsState.isOn,
+            https: httpsState,
             tailnetAvailable: tailnetAvailable,
             localNetworkAvailable: localNetworkAvailable
         )
@@ -576,8 +569,8 @@ final class AppModel: ObservableObject {
 
     func updatePort(_ port: Int) {
         // Tailscale serves to the port it was set up with, so the port is
-        // fixed while HTTPS is on.
-        guard !httpsLocked else { return }
+        // fixed while the handler is serving.
+        guard !isPortLocked else { return }
         settings.port = port.clamped(to: AppSettings.portRange)
         portIsPersonChosen = true
         setupPortNotice = nil
@@ -603,11 +596,14 @@ final class AppModel: ObservableObject {
         return PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: portBinder, reserved: PortAvailability.port(inAddress: statusAddr))
     }
 
-    func updateReach(_ reach: NetworkReach) {
-        guard !httpsLocked else { return }
-        // Choosing a reach is choosing not to use Tailscale HTTPS.
-        settings.tailscaleHTTPSEnabled = false
-        settings.reach = reach
+    /// chooseWay moves the choice to way, and nothing else: Tailscale is never
+    /// asked to change, so a handler it already serves keeps serving. Tailscale
+    /// HTTPS is chosen only while its handler is serving; turning it on is the
+    /// button's own command.
+    func chooseWay(_ way: ReachWay) {
+        guard settings.chosenWay != way else { return }
+        guard way.pickability(https: httpsState, tailnetAvailable: tailnetAvailable) == .pickable else { return }
+        settings = settings.choosing(way)
         persistSettings()
         recomputeMenuState()
         // refreshNetworkAddresses() is the one and only restart trigger
@@ -731,9 +727,8 @@ final class AppModel: ObservableObject {
 
     /// refreshTailscale reads this Mac's Tailscale state and, while it
     /// runs, what it is serving. Both reads are read-only and are the only
-    /// Tailscale calls that run without a click. When Tailscale shows the
-    /// app's handler serving, the saved choice follows it, so the relay is
-    /// bound to this Mac only.
+    /// Tailscale calls that run without a click. They never change the saved
+    /// choice: a handler already serving is shown as a way to pick, never picked.
     func refreshTailscale() async {
         let status = await tailscale.status()
         var serve: TailscaleServeConfig?
@@ -742,14 +737,9 @@ final class AppModel: ObservableObject {
         }
         tailscaleStatus = status
         tailscaleServe = serve
-        if httpsState.isOn, !settings.tailscaleHTTPSEnabled {
-            settings.tailscaleHTTPSEnabled = true
-            persistSettings()
-            refreshNetworkAddresses()
-        }
         // A start refused while Tailscale's state was unknown can go ahead
         // once Tailscale shows nothing holds the port.
-        if engineState == .failed(.httpsOnStatusPort), !httpsLocked {
+        if engineState == .failed(.httpsOnStatusPort), !isPortLocked {
             tryAgain()
         }
     }
@@ -774,12 +764,10 @@ final class AppModel: ObservableObject {
             wait: { try? await Task.sleep(for: $0) }
         )
         switch result {
-        case .done:
-            settings.tailscaleHTTPSEnabled = true
+        case .done, .unchanged:
+            settings = settings.choosing(.tailscaleHTTPS)
             persistSettings()
             refreshNetworkAddresses()
-        case .unchanged:
-            break
         case .refused:
             reportFailure(.settingsChanged, turningOn: true)
         case .failed(let outcome):
@@ -790,7 +778,10 @@ final class AppModel: ObservableObject {
     /// disableTailscaleHTTPS runs the one matching off command only if
     /// Tailscale's settings read immediately before show this Mac's own
     /// entry on the port shown. The check afterwards asks only whether that
-    /// entry is gone, with the same quiet retries as turning on.
+    /// entry is gone, with the same quiet retries as turning on. It only
+    /// removes the handler: the chosen way is never changed here, so a person
+    /// who chose Tailscale HTTPS stays on it, told that followers can't reach
+    /// this Mac until it is turned on again or another way is chosen.
     func disableTailscaleHTTPS(shownPort: Int) async {
         guard !isChangingTailscale else { return }
         isChangingTailscale = true
@@ -805,9 +796,6 @@ final class AppModel: ObservableObject {
         )
         switch result {
         case .done:
-            settings.tailscaleHTTPSEnabled = false
-            persistSettings()
-            refreshNetworkAddresses()
             // A start refused for Tailscale HTTPS on the status port can move
             // now that nothing holds the port.
             if engineState == .failed(.httpsOnStatusPort) {
@@ -1104,7 +1092,7 @@ final class AppModel: ObservableObject {
             current: settings.port,
             default: AppSettings.defaultPort,
             searching: !settings.setupFinished && !portIsPersonChosen,
-            locked: httpsLocked,
+            locked: isPortLocked,
             bindHost: bindHost,
             binder: portBinder,
             reserved: PortAvailability.port(inAddress: statusAddr)

@@ -194,6 +194,26 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
         return false
     }
 
+    /// portLockNote is why the port must not change, nil when it may. Only
+    /// the port is ever fixed, never the choice of a way: while the app's
+    /// handler is serving, whatever way is chosen, and, for a person who
+    /// chose Tailscale HTTPS, while Tailscale cannot be asked, since changing
+    /// the port then would strand the handler already set up.
+    public func portLockNote(chosen: Bool) -> String? {
+        switch self {
+        case .on:
+            return "Turn off Tailscale HTTPS to change the port."
+        case .unknown, .unavailable, .unreadable:
+            return chosen ? "Connect Tailscale to change the port." : nil
+        case .off, .noFreePort:
+            return nil
+        }
+    }
+
+    public func locksPort(chosen: Bool) -> Bool {
+        portLockNote(chosen: chosen) != nil
+    }
+
     public static func evaluate(status: TailscaleStatus, config: TailscaleServeConfig?, relayPort: Int) -> TailscaleHTTPSState {
         switch status {
         case .unknown:
@@ -533,7 +553,7 @@ extension ConnectPaneAddressState {
         case .unreadable:
             return .unavailable(reason: "Couldn't read Tailscale's settings right now.")
         case .off, .noFreePort:
-            return .unavailable(reason: "Tailscale HTTPS is off right now.")
+            return .unavailable(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way.")
         case .on(let port):
             guard case .running(let name) = tailscale else {
                 return .unavailable(reason: "Waiting for Tailscale to connect.")
