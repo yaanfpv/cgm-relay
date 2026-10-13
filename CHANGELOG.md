@@ -6,10 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-- Pick how your phone reaches your Mac at any time, in setup and in Settings: Tailscale HTTPS is one of the ways beside your tailnet and your local network, nothing is greyed out because Tailscale HTTPS is on, and switching away leaves it set up in Tailscale. Turning Tailscale HTTPS off is a separate action that never changes your choice, and CGM Relay never turns it on for you.
-- The phone HTTPS setup now asks which phone you have, drops the Tailscale prompt, and lists the steps an iPhone actually shows.
-- The port stays fixed only while CGM Relay's Tailscale HTTPS is on, as last confirmed even when Tailscale is stopped; after you turn it off it can be changed again.
-- A port another app holds is now refused as soon as it is typed, whichever address that app listens on, and a saved port change says follower apps need the new address.
+## [1.0.1] - 2026-10-13
+
+### Changed
+
+- Choose how your phone reaches your Mac at any time, in setup and in Settings. Tailscale HTTPS sits in the same list as your tailnet and your local network, and nothing is greyed out while it is on. Switching to another way leaves Tailscale HTTPS set up in Tailscale, turning it off never changes your choice, and CGM Relay never turns it on for you, even when it finds one left by an earlier install.
+- Setting up HTTPS on a phone now asks which phone you have first, leaves Tailscale out of it, and lists the steps an iPhone actually shows, from allowing the download to the check mark at the end.
+- After you change the port, CGM Relay tells you that follower apps on the old address need the new one, in Settings and once in the menu.
+
+### Fixed
+
+- A port another app holds is refused when you press Return, whichever address that app listens on, including loopback only and IPv6.
+- After you turn off Tailscale HTTPS in CGM Relay, the port stays editable even if Tailscale then stops.
 
 ## [1.0.0] - 2026-10-11
 
