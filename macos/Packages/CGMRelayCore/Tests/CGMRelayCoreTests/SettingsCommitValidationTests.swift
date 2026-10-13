@@ -366,7 +366,7 @@ struct PortAvailabilityTests {
             #expect(PortAvailability.setupPort(current: current, default: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) != .free(4001))
         }
         #expect(PortAvailability.typedPortRefusal(port: 4001, bindHost: "127.0.0.1", binder: TableBinder(), reserved: 4001) == "CGM Relay already uses port 4001 for itself. Choose another.")
-        #expect(PortAvailability.typedPortRefusal(port: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == "Port 4000 is in use by another app.")
+        #expect(PortAvailability.typedPortRefusal(port: 4000, bindHost: "127.0.0.1", binder: table, reserved: 4001) == "Port 4000 is in use by another app. Choose another.")
         #expect(PortAvailability.typedPortRefusal(port: 4002, bindHost: "127.0.0.1", binder: table, reserved: 4001) == nil)
         #expect(PortAvailability.port(inAddress: "127.0.0.1:1338") == 1338)
         #expect(PortAvailability.port(inAddress: "nonsense") == nil)
@@ -398,7 +398,7 @@ struct PortAvailabilityTests {
         #expect(!PortAvailability.isFree(port: v4[0].port, bindHost: "127.0.0.1", binder: binder))
         let wide = try #require(HeldListener.run(host: "0.0.0.0", count: 1))
         #expect(!PortAvailability.isFree(port: wide[0].port, bindHost: "0.0.0.0", binder: binder))
-        #expect(PortAvailability.inUseMessage(port: v4[0].port) == "Port \(v4[0].port) is in use by another app.")
+        #expect(PortAvailability.inUseMessage(port: v4[0].port) == "Port \(v4[0].port) is in use by another app. Choose another.")
 
         guard let v6 = HeldListener(host: "::1") else { return }
         #expect(!PortAvailability.isFree(port: v6.port, bindHost: "127.0.0.1", binder: binder), "an IPv6 holder blocks a loopback reach too")

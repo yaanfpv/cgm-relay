@@ -208,9 +208,10 @@ public enum PortAvailability {
         }
     }
 
-    /// inUseMessage is the sentence for a port another app already holds.
+    /// inUseMessage is the sentence for a typed port another app already
+    /// holds.
     public static func inUseMessage(port: Int) -> String {
-        "Port \(port) is in use by another app."
+        "Port \(port) is in use by another app. Choose another."
     }
 
     /// reservedMessage is the sentence for the port the relay's own status
