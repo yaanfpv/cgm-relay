@@ -194,6 +194,28 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
         return false
     }
 
+    /// locksReach is whether the port and the reach choices must not change:
+    /// only for a person who chose Tailscale HTTPS, while the app's handler
+    /// is serving and while Tailscale cannot be asked, since changing the
+    /// port then would strand the handler they set up. A handler the person
+    /// never chose locks nothing.
+    public func locksReach(chosen: Bool) -> Bool {
+        guard chosen else { return false }
+        switch self {
+        case .on, .unknown, .unavailable, .unreadable:
+            return true
+        case .off, .noFreePort:
+            return false
+        }
+    }
+
+    /// isExistingHandler is whether the app's handler is already serving
+    /// without the person having chosen it, so setup offers it rather than
+    /// taking it.
+    public func isExistingHandler(chosen: Bool) -> Bool {
+        !chosen && isOn
+    }
+
     public static func evaluate(status: TailscaleStatus, config: TailscaleServeConfig?, relayPort: Int) -> TailscaleHTTPSState {
         switch status {
         case .unknown:

@@ -215,6 +215,9 @@ struct PhoneReachabilityTests {
         ("Tailscale HTTPS serving", .thisMacOnly, true, true, false, false, true),
         ("Tailscale HTTPS serving, reach left at another choice", .myLocalNetwork, true, true, false, false, true),
         ("Tailscale HTTPS chosen but not serving, a network up", .myLocalNetwork, true, false, true, true, false),
+        ("A handler serving that was not chosen, reach left at This Mac only", .thisMacOnly, false, true, false, false, false),
+        ("A handler serving that was not chosen, no address for the chosen tailnet", .myTailnet, false, true, false, true, false),
+        ("A handler serving that was not chosen, My local network with an address", .myLocalNetwork, false, true, false, true, true),
         ("This Mac only, everything available", .thisMacOnly, false, false, true, true, false),
         ("My tailnet with a Tailscale address", .myTailnet, false, false, true, false, true),
         ("My tailnet with no Tailscale address", .myTailnet, false, false, false, true, false),
@@ -222,7 +225,7 @@ struct PhoneReachabilityTests {
         ("My local network with no address", .myLocalNetwork, false, false, true, false, false),
     ]
 
-    @Test("a phone can be reached only through serving HTTPS, or a tailnet or local network choice with an address", arguments: cases)
+    @Test("a phone can be reached only through chosen and serving HTTPS, or a tailnet or local network choice with an address", arguments: cases)
     func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, chosen: Bool, serving: Bool, tailnet: Bool, lan: Bool, reachable: Bool)) {
         let got = PhoneReachability.decide(
             reach: testCase.reach,

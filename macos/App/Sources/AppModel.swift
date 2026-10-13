@@ -163,18 +163,18 @@ final class AppModel: ObservableObject {
     }
 
     /// httpsLocked is whether the port and the reach choices must not change:
-    /// while this app's handler is serving, and while the saved choice says
-    /// HTTPS is on but Tailscale cannot be asked, since changing the port
-    /// then would strand the handler already set up.
+    /// for a person who chose Tailscale HTTPS, while this app's handler is
+    /// serving and while Tailscale cannot be asked, since changing the port
+    /// then would strand the handler already set up. A handler the person
+    /// never chose locks nothing.
     var httpsLocked: Bool {
-        switch httpsState {
-        case .on:
-            return true
-        case .off, .noFreePort:
-            return false
-        case .unknown, .unavailable, .unreadable:
-            return settings.tailscaleHTTPSEnabled
-        }
+        httpsState.locksReach(chosen: settings.tailscaleHTTPSEnabled)
+    }
+
+    /// existingHandlerOffered is whether this app's handler is already
+    /// serving in Tailscale without the person having chosen it.
+    var existingHandlerOffered: Bool {
+        httpsState.isExistingHandler(chosen: settings.tailscaleHTTPSEnabled)
     }
 
     var canStart: Bool { credentialsConfigured && engineState == .stopped }
@@ -545,7 +545,7 @@ final class AppModel: ObservableObject {
     /// (impliedBindHost), the settings port, and the current display-host
     /// availability. No address logic lives here.
     var connectPaneAddressState: ConnectPaneAddressState {
-        if settings.tailscaleHTTPSEnabled || httpsState.isOn {
+        if settings.tailscaleHTTPSEnabled {
             return ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: boundHost, tailscale: tailscaleStatus, https: httpsState)
         }
         return ConnectPaneAddressState.decide(
@@ -731,9 +731,8 @@ final class AppModel: ObservableObject {
 
     /// refreshTailscale reads this Mac's Tailscale state and, while it
     /// runs, what it is serving. Both reads are read-only and are the only
-    /// Tailscale calls that run without a click. When Tailscale shows the
-    /// app's handler serving, the saved choice follows it, so the relay is
-    /// bound to this Mac only.
+    /// Tailscale calls that run without a click. They never change the saved
+    /// choice: a handler already serving is only offered to the person.
     func refreshTailscale() async {
         let status = await tailscale.status()
         var serve: TailscaleServeConfig?
@@ -742,11 +741,6 @@ final class AppModel: ObservableObject {
         }
         tailscaleStatus = status
         tailscaleServe = serve
-        if httpsState.isOn, !settings.tailscaleHTTPSEnabled {
-            settings.tailscaleHTTPSEnabled = true
-            persistSettings()
-            refreshNetworkAddresses()
-        }
         // A start refused while Tailscale's state was unknown can go ahead
         // once Tailscale shows nothing holds the port.
         if engineState == .failed(.httpsOnStatusPort), !httpsLocked {
@@ -785,6 +779,16 @@ final class AppModel: ObservableObject {
         case .failed(let outcome):
             reportFailure(outcome, turningOn: true)
         }
+    }
+
+    /// useExistingTailscaleHTTPS makes the handler Tailscale already serves
+    /// for this app the person's choice, on their say-so; nothing is run in
+    /// Tailscale.
+    func useExistingTailscaleHTTPS() {
+        guard existingHandlerOffered else { return }
+        settings.tailscaleHTTPSEnabled = true
+        persistSettings()
+        refreshNetworkAddresses()
     }
 
     /// disableTailscaleHTTPS runs the one matching off command only if

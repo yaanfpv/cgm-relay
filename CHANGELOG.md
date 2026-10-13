@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Setup no longer turns on Tailscale HTTPS for you when Tailscale already has it set up on this Mac: you choose how your phone reaches this Mac, and an existing setup is offered to use or leave alone.
+
 ## [1.0.0] - 2026-10-11
 
 ### Added

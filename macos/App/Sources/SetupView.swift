@@ -278,7 +278,7 @@ private struct SetupReachStep: View {
             }
             switch model.tailscaleStatus {
             case .running:
-                if !model.httpsState.isOn {
+                if !(model.settings.tailscaleHTTPSEnabled && model.httpsState.isOn) {
                     Section {
                         ReachChoicesView(model: model, offersThisMacOnly: false, showsAvailabilityNotes: false)
                     } header: {

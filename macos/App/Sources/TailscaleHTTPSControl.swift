@@ -50,6 +50,11 @@ struct TailscaleHTTPSControl: View {
                     ? .checking
                     : .action("Use Tailscale HTTPS", style: .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
             )
+        case .on where model.existingHandlerOffered:
+            row(
+                "Already set up on this Mac. Use it, or pick another way.",
+                .action("Use It", accessibleName: "Use Existing Tailscale HTTPS") { model.useExistingTailscaleHTTPS() }
+            )
         case .on(let port):
             row(
                 port == 443 ? "Followers reach this Mac over https." : "Followers reach this Mac over https, port " + String(port) + ".",

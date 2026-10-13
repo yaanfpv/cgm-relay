@@ -157,11 +157,12 @@ public enum PhoneReachability: Sendable, Equatable {
     public var isReachable: Bool { self == .reachable }
 
     /// decide is the one pure answer: Tailscale HTTPS reaches a phone only
-    /// while Tailscale itself reports it serving (httpsServing); otherwise
-    /// only My tailnet or My local network with an address right now do.
-    /// This Mac only never does. httpsChosen is the saved Tailscale HTTPS
-    /// choice, so a choice Tailscale no longer backs is blocked rather than
-    /// treated as reachable.
+    /// when the person chose it and Tailscale itself reports it serving
+    /// (httpsServing); otherwise only My tailnet or My local network with an
+    /// address right now do. This Mac only never does. httpsChosen is the
+    /// saved Tailscale HTTPS choice, so a choice Tailscale no longer backs is
+    /// blocked rather than treated as reachable, and a handler serving that
+    /// the person did not choose does not count.
     public static func decide(
         reach: NetworkReach,
         httpsChosen: Bool,
@@ -169,9 +170,10 @@ public enum PhoneReachability: Sendable, Equatable {
         tailnetAvailable: Bool,
         localNetworkAvailable: Bool
     ) -> PhoneReachability {
-        if httpsServing { return .reachable }
         if httpsChosen {
-            return .blocked(reason: "Tailscale HTTPS isn't serving right now. Connect Tailscale, or set up later.")
+            return httpsServing
+                ? .reachable
+                : .blocked(reason: "Tailscale HTTPS isn't serving right now. Connect Tailscale, or set up later.")
         }
         switch reach {
         case .thisMacOnly:
