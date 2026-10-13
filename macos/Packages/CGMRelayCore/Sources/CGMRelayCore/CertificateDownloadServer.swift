@@ -408,6 +408,12 @@ private final class ListenerBox: @unchecked Sendable {
     private let lock = NSLock()
     private var current: DownloadCapability?
     private var shut = false
+    private var openConnections = 0
+
+    /// maxOpenConnections is how many connections are served at once. One
+    /// phone needs one or two, so a few more leave room for retries and
+    /// nothing more.
+    private static let maxOpenConnections = 6
 
     init(address: String, queue: DispatchQueue) throws {
         let parameters = NWParameters.tcp
@@ -429,14 +435,26 @@ private final class ListenerBox: @unchecked Sendable {
             gate.update(state, port: listener?.port?.rawValue)
         }
         let lookup: @Sendable () -> DownloadCapability? = { [weak self] in self?.currentCapability() }
-        listener.newConnectionHandler = { connection in
+        listener.newConnectionHandler = { [weak self] connection in
+            let box = self
             // No live link, or one whose lifetime has run out, means the
             // listener is closing: the connection is dropped unanswered.
             guard let live = lookup(), !live.endIfExpired() else {
                 connection.cancel()
                 return
             }
-            DownloadConnection(connection: connection, currentCapability: lookup, queue: queue).start()
+            // Past the limit a connection is dropped before anything is
+            // allocated for it.
+            guard let box, box.takeSlot() else {
+                connection.cancel()
+                return
+            }
+            DownloadConnection(
+                connection: connection,
+                currentCapability: lookup,
+                queue: queue,
+                onFinished: { box.freeSlot() }
+            ).start()
         }
         listener.start(queue: queue)
     }
@@ -473,6 +491,20 @@ private final class ListenerBox: @unchecked Sendable {
         capability?.end()
     }
 
+    /// takeSlot claims one of the open-connection places, or reports that
+    /// all are in use.
+    private func takeSlot() -> Bool {
+        lock.withLock {
+            guard openConnections < Self.maxOpenConnections else { return false }
+            openConnections += 1
+            return true
+        }
+    }
+
+    private func freeSlot() {
+        lock.withLock { openConnections -= 1 }
+    }
+
     private func currentCapability() -> DownloadCapability? {
         lock.withLock { current }
     }
@@ -504,6 +536,8 @@ private final class DownloadConnection: @unchecked Sendable {
     private let connection: NWConnection
     private let currentCapability: @Sendable () -> DownloadCapability?
     private let queue: DispatchQueue
+    private let onFinished: @Sendable () -> Void
+    private var finished = false
     /// capability is the link this request was matched against, looked up
     /// when its request line arrived rather than when it connected.
     private var capability: DownloadCapability?
@@ -512,10 +546,16 @@ private final class DownloadConnection: @unchecked Sendable {
     private var decided = false
     private var reservation: DownloadCapability.Reservation?
 
-    init(connection: NWConnection, currentCapability: @escaping @Sendable () -> DownloadCapability?, queue: DispatchQueue) {
+    init(
+        connection: NWConnection,
+        currentCapability: @escaping @Sendable () -> DownloadCapability?,
+        queue: DispatchQueue,
+        onFinished: @escaping @Sendable () -> Void
+    ) {
         self.connection = connection
         self.currentCapability = currentCapability
         self.queue = queue
+        self.onFinished = onFinished
     }
 
     func start() {
@@ -523,6 +563,7 @@ private final class DownloadConnection: @unchecked Sendable {
             switch state {
             case .failed, .cancelled:
                 abandon()
+                finish()
             default:
                 break
             }
@@ -596,6 +637,13 @@ private final class DownloadConnection: @unchecked Sendable {
             stage = .done
             connection.cancel()
         })
+    }
+
+    /// finish gives back this connection's place once, when it has ended.
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        onFinished()
     }
 
     /// abandon drops the connection before a response went out and gives
