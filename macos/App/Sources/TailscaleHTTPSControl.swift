@@ -30,6 +30,8 @@ struct TailscaleHTTPSControl: View {
     }
 
     private static let title = "Tailscale HTTPS"
+    // The turn-on button is the screen's primary action only while no chosen
+    // way works yet; once one does, it is a plain button and never a nudge.
     private static let offCaption = "A private address that works at home and away."
 
     @ViewBuilder
@@ -48,11 +50,11 @@ struct TailscaleHTTPSControl: View {
                 model.settings.tailscaleHTTPSEnabled ? "Turned off in Tailscale. Turn it on again." : Self.offCaption,
                 model.isChangingTailscale
                     ? .checking
-                    : .action("Use Tailscale HTTPS", style: .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
+                    : .action("Use Tailscale HTTPS", style: model.phoneReachability.isReachable ? .secondary : .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
             )
         case .on(let port):
             row(
-                port == 443 ? "Followers reach this Mac over https." : "Followers reach this Mac over https, port " + String(port) + ".",
+                onCaption(port: port),
                 model.isChangingTailscale
                     ? .checking
                     : .doneWithAction("On", actionLabel: "Turn Off…", accessibleName: "Turn Off Tailscale HTTPS") { isConfirmingTurnOff = true }
@@ -67,9 +69,19 @@ struct TailscaleHTTPSControl: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Follower apps using the https address stop reading until you give them a new address. This runs: \(TailscaleServeCommand.disableHTTPS(httpsPort: port).displayText)")
+                Text("Follower apps using the https address stop reading until you turn it on again or give them a new address. Your choice of how phones reach this Mac stays as it is. This runs: \(TailscaleServeCommand.disableHTTPS(httpsPort: port).displayText)")
             }
         }
+    }
+
+    /// onCaption says what the running handler does for the chosen way: when
+    /// Tailscale HTTPS is chosen followers use it, and otherwise it is only
+    /// there to be picked in the list of ways.
+    private func onCaption(port: Int) -> String {
+        guard model.settings.tailscaleHTTPSEnabled else {
+            return "On in Tailscale, but not the way you chose."
+        }
+        return port == 443 ? "Followers reach this Mac over https." : "Followers reach this Mac over https, port " + String(port) + "."
     }
 
     @ViewBuilder

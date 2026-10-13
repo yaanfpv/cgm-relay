@@ -218,9 +218,11 @@ struct SetupView: View {
     }
 
     /// offersTailscaleHTTPS is true while step 2's own primary action, the
-    /// Tailscale HTTPS button, is on screen: Continue then steps back so
-    /// the screen has one primary action.
+    /// Tailscale HTTPS button, is on screen: only while no chosen way works
+    /// yet, so Continue then steps back and the screen has one primary
+    /// action. Once the chosen way works, Continue is the primary action.
     private var offersTailscaleHTTPS: Bool {
+        guard !isPhoneReachable else { return false }
         if case .off = model.httpsState { return true }
         return false
     }
@@ -254,10 +256,10 @@ struct SetupView: View {
 }
 
 /// SetupReachStep is step 2. Tailscale's state and its HTTPS setting read as
-/// status rows; with Tailscale connected it offers Tailscale's own https
-/// address, and always the ways a phone can reach this Mac that Advanced has
-/// beneath it (without This Mac only, which no phone can use). Continue waits
-/// for one that works, and one line under the choices says what is missing.
+/// status rows, and beneath them every way a phone can reach this Mac that
+/// Advanced has (without This Mac only, which no phone can use), Tailscale
+/// HTTPS among them. Continue waits for the chosen way to work, and one line
+/// under the choices says what is missing.
 private struct SetupReachStep: View {
     @ObservedObject var model: AppModel
 
@@ -276,27 +278,12 @@ private struct SetupReachStep: View {
                     EmptyView()
                 }
             }
-            switch model.tailscaleStatus {
-            case .running:
-                if !model.httpsState.isOn {
-                    Section {
-                        ReachChoicesView(model: model, offersThisMacOnly: false, showsAvailabilityNotes: false)
-                    } header: {
-                        Text("Other ways")
-                    } footer: {
-                        blockedReason
-                    }
-                }
-            case .unknown:
-                EmptyView()
-            case .absent, .stopped:
-                Section {
-                    ReachChoicesView(model: model, offersThisMacOnly: false, showsAvailabilityNotes: false)
-                } header: {
-                    Text("Choose how your phone reaches this Mac")
-                } footer: {
-                    blockedReason
-                }
+            Section {
+                ReachChoicesView(model: model, offersThisMacOnly: false, showsAvailabilityNotes: false)
+            } header: {
+                Text("Choose how your phone reaches this Mac")
+            } footer: {
+                blockedReason
             }
         }
         .formStyle(.grouped)

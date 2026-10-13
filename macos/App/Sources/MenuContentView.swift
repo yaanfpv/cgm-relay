@@ -40,6 +40,14 @@ struct MenuContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if model.portChangeMenuNotice {
+                Text("The port changed. Follower apps using the old address stop reading until they get the new one.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                AccessibleButton("Show New Address…", action: actions.openConnect)
+            }
+
             if model.needsSetup {
                 AccessibleButton("Finish setup…", style: actionsRowHasPrimary ? .secondary : .primary, action: actions.openSetup)
             }

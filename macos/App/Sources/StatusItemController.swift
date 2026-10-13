@@ -47,6 +47,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let panelActions = MenuPanelActions(
             openSettings: { [weak self] in self?.openSettings() },
             openSetup: { [weak self] in self?.openSetup() },
+            openConnect: { [weak self] in self?.openConnect() },
             performUpdate: { [weak self] in self?.performUpdate() }
         )
         let hosting = NSHostingController(rootView: MenuContentView(model: model, updates: updates, actions: panelActions, focusRing: focusRing))
@@ -181,6 +182,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         endRest()
+        model.portChangeNoticeShown()
     }
 
     private func showContextMenu() {
@@ -212,6 +214,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.performClose(nil)
         WindowActivation.bringAppForward()
         sceneActions.openSettings?()
+    }
+
+    private func openConnect() {
+        popover.performClose(nil)
+        sceneActions.showSettings(tab: .connect)
     }
 
     @objc private func performUpdate() {
@@ -248,6 +255,7 @@ final class PanelFocusRing: ObservableObject {
 struct MenuPanelActions {
     let openSettings: () -> Void
     let openSetup: () -> Void
+    let openConnect: () -> Void
     let performUpdate: () -> Void
 }
 

@@ -156,6 +156,52 @@ struct TailscaleServeTests {
         #expect(TailscaleHTTPSState.evaluate(status: testCase.status, config: config, relayPort: 1337) == testCase.want)
     }
 
+    static let lockCases: [(name: String, state: TailscaleHTTPSState, chosen: Bool, seen: HandlerObservation?, locks: Bool)] = [
+        ("serving and chosen", .on(port: 443), true, .serving, true),
+        ("serving but another way is chosen", .on(port: 443), false, .serving, true),
+        ("serving, whatever was seen before", .on(port: 443), true, .notServing, true),
+        ("not serving, chosen: turned off in Tailscale", .off(port: 443), true, .notServing, false),
+        ("not serving, whatever was seen before", .off(port: 443), true, .serving, false),
+        ("no free port, another way chosen", .noFreePort, false, nil, false),
+        ("stopped Tailscale, last seen serving", .unavailable, true, .serving, true),
+        ("stopped Tailscale, last seen serving, another way chosen", .unavailable, false, .serving, true),
+        ("stopped Tailscale, last confirmed off, still chosen", .unavailable, true, .notServing, false),
+        ("unreadable settings, last confirmed off, still chosen", .unreadable, true, .notServing, false),
+        ("not read yet, last confirmed off, still chosen", .unknown, true, .notServing, false),
+        ("unreadable settings, last seen serving", .unreadable, true, .serving, true),
+        ("not read yet, last seen serving", .unknown, false, .serving, true),
+        ("stopped Tailscale, never observed, chosen", .unavailable, true, nil, true),
+        ("unreadable settings, never observed, chosen", .unreadable, true, nil, true),
+        ("not read yet, never observed, chosen", .unknown, true, nil, true),
+        ("stopped Tailscale, never observed, another way chosen", .unavailable, false, nil, false),
+        ("not read yet, never observed, another way chosen", .unknown, false, nil, false),
+    ]
+
+    @Test("the port is fixed while the app's handler is serving, as last confirmed when Tailscale cannot be asked, and never after a confirmed removal", arguments: lockCases)
+    func portLock(_ testCase: (name: String, state: TailscaleHTTPSState, chosen: Bool, seen: HandlerObservation?, locks: Bool)) {
+        #expect(testCase.state.locksPort(chosen: testCase.chosen, lastObserved: testCase.seen) == testCase.locks, Comment(rawValue: testCase.name))
+        #expect((testCase.state.portLockNote(chosen: testCase.chosen, lastObserved: testCase.seen) != nil) == testCase.locks, Comment(rawValue: testCase.name))
+    }
+
+    @Test("a lock with nothing ever observed says plainly why it is careful")
+    func carefulLockSaysWhy() {
+        #expect(TailscaleHTTPSState.unavailable.portLockNote(chosen: true, lastObserved: nil)?.hasPrefix("CGM Relay can't tell whether Tailscale HTTPS is still set up.") == true)
+    }
+
+    static let observationCases: [(name: String, state: TailscaleHTTPSState, want: HandlerObservation?)] = [
+        ("serving is confirmed on", .on(port: 443), .serving),
+        ("a read that shows no handler is confirmed off", .off(port: 443), .notServing),
+        ("a read with every port taken is confirmed off", .noFreePort, .notServing),
+        ("a stopped Tailscale confirms nothing", .unavailable, nil),
+        ("an unreadable answer confirms nothing", .unreadable, nil),
+        ("a read not made yet confirms nothing", .unknown, nil),
+    ]
+
+    @Test("only a successful read of the serve settings confirms the handler", arguments: observationCases)
+    func observing(_ testCase: (name: String, state: TailscaleHTTPSState, want: HandlerObservation?)) {
+        #expect(HandlerObservation.observing(testCase.state) == testCase.want, Comment(rawValue: testCase.name))
+    }
+
     @Test("with every port from 443 up taken there is no free port, and one free port anywhere above is found")
     func noFreePortOnlyWhenEveryPortIsTaken() {
         let everyPort = TailscaleServeConfig(occupiedPorts: Set(443...65535))

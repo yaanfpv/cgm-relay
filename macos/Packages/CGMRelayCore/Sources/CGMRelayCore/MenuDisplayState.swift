@@ -338,7 +338,7 @@ public struct MenuDisplayState: Sendable, Equatable {
         case .configurationUnreadable:
             return "Try again. If it keeps happening, quit and reopen CGM Relay."
         case .portInUse:
-            let named = port.map(PortAvailability.inUseMessage(port:)) ?? "The port is in use by another app."
+            let named = port.map { "Port \($0) is in use by another app." } ?? "The port is in use by another app."
             return "\(named) Choose another in Settings, under Advanced."
         case .httpsOnStatusPort:
             return "Tailscale HTTPS is set on the port CGM Relay keeps for itself. Turn Tailscale HTTPS off in Settings, under Advanced, with Tailscale running, and CGM Relay moves to a free port."

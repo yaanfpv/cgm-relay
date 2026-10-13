@@ -79,6 +79,9 @@ public struct AppSettings: Equatable, Sendable {
     /// needs before a phone can connect over https. It is per Mac, and is
     /// cleared when the certificate authority is made again.
     public var localCertificateStepFinished: Bool
+    /// lastHandlerObservation is what the app last confirmed about its own
+    /// Tailscale handler, nil until it has confirmed anything.
+    public var lastHandlerObservation: HandlerObservation?
 
     /// effectiveReach is the reach the relay is actually bound to: this
     /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
@@ -87,6 +90,40 @@ public struct AppSettings: Equatable, Sendable {
     /// relay never widens while Tailscale is down or being re-read.
     public var effectiveReach: NetworkReach {
         tailscaleHTTPSEnabled ? .thisMacOnly : reach
+    }
+
+    /// chosenWay is the way the person has picked, as the list shows it: a
+    /// saved Tailscale HTTPS choice reads as Tailscale HTTPS whatever reach
+    /// was saved beside it, and otherwise the saved reach.
+    public var chosenWay: ReachWay {
+        if tailscaleHTTPSEnabled { return .tailscaleHTTPS }
+        switch reach {
+        case .thisMacOnly: return .thisMacOnly
+        case .myTailnet: return .myTailnet
+        case .myLocalNetwork: return .myLocalNetwork
+        }
+    }
+
+    /// choosing is these settings with way chosen, and nothing else changed.
+    /// Choosing another way only moves the choice: whether Tailscale holds
+    /// the app's handler is Tailscale's, not a setting, and is never touched
+    /// from here.
+    public func choosing(_ way: ReachWay) -> AppSettings {
+        var next = self
+        switch way {
+        case .tailscaleHTTPS:
+            next.tailscaleHTTPSEnabled = true
+        case .thisMacOnly:
+            next.tailscaleHTTPSEnabled = false
+            next.reach = .thisMacOnly
+        case .myTailnet:
+            next.tailscaleHTTPSEnabled = false
+            next.reach = .myTailnet
+        case .myLocalNetwork:
+            next.tailscaleHTTPSEnabled = false
+            next.reach = .myLocalNetwork
+        }
+        return next
     }
 
     public static let defaultPort = RelayDefaults.followerPort
@@ -126,7 +163,8 @@ public struct AppSettings: Equatable, Sendable {
         showReadingInMenuBar: Bool = AppSettings.defaultShowReadingInMenuBar,
         connectFollowerApp: FollowerApp = .xDrip4iOS,
         safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil,
-        localCertificateStepFinished: Bool = false
+        localCertificateStepFinished: Bool = false,
+        lastHandlerObservation: HandlerObservation? = nil
     ) {
         self.port = port
         self.reach = reach
@@ -141,6 +179,7 @@ public struct AppSettings: Equatable, Sendable {
         self.connectFollowerApp = connectFollowerApp
         self.safetyNoticeAcceptance = safetyNoticeAcceptance
         self.localCertificateStepFinished = localCertificateStepFinished
+        self.lastHandlerObservation = lastHandlerObservation
     }
 }
 
@@ -155,7 +194,7 @@ extension AppSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
         case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
-        case localCertificateStepFinished
+        case localCertificateStepFinished, lastHandlerObservation
     }
 
     public init(from decoder: Decoder) throws {
@@ -176,6 +215,8 @@ extension AppSettings: Codable {
         connectFollowerApp = ((try? container.decodeIfPresent(FollowerApp.self, forKey: .connectFollowerApp)) ?? nil) ?? fallback.connectFollowerApp
         safetyNoticeAcceptance = ((try? container.decodeIfPresent(SafetyNoticeAcceptance.self, forKey: .safetyNoticeAcceptance)) ?? nil)
         localCertificateStepFinished = try container.decodeIfPresent(Bool.self, forKey: .localCertificateStepFinished) ?? fallback.localCertificateStepFinished
+        // A value this version does not know falls back to nothing observed.
+        lastHandlerObservation = ((try? container.decodeIfPresent(HandlerObservation.self, forKey: .lastHandlerObservation)) ?? nil)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -193,6 +234,7 @@ extension AppSettings: Codable {
         try container.encode(connectFollowerApp, forKey: .connectFollowerApp)
         try container.encodeIfPresent(safetyNoticeAcceptance, forKey: .safetyNoticeAcceptance)
         try container.encode(localCertificateStepFinished, forKey: .localCertificateStepFinished)
+        try container.encodeIfPresent(lastHandlerObservation, forKey: .lastHandlerObservation)
     }
 }
 

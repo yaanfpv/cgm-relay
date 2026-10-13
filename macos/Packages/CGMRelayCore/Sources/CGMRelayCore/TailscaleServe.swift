@@ -194,6 +194,37 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
         return false
     }
 
+    /// portLockNote is why the port must not change, nil when it may. Only
+    /// the port is ever fixed, never the choice of a way, and only while the
+    /// app's handler is serving, whatever way is chosen, since changing the
+    /// port then would strand it. While Tailscale cannot be asked, the lock
+    /// follows what the app last confirmed about its own handler (lastObserved):
+    /// serving keeps the port fixed, a confirmed removal leaves it free even
+    /// after Tailscale stops. Only with nothing ever observed does it stay
+    /// careful, and only for a person who chose Tailscale HTTPS, who may have
+    /// set it up before this version kept the observation.
+    public func portLockNote(chosen: Bool, lastObserved: HandlerObservation?) -> String? {
+        switch self {
+        case .on:
+            return "Turn off Tailscale HTTPS to change the port."
+        case .off, .noFreePort:
+            return nil
+        case .unknown, .unavailable, .unreadable:
+            switch lastObserved {
+            case .serving:
+                return "Tailscale HTTPS was on when CGM Relay last checked. Connect Tailscale to change the port."
+            case .notServing:
+                return nil
+            case nil:
+                return chosen ? "CGM Relay can't tell whether Tailscale HTTPS is still set up. Connect Tailscale to change the port." : nil
+            }
+        }
+    }
+
+    public func locksPort(chosen: Bool, lastObserved: HandlerObservation?) -> Bool {
+        portLockNote(chosen: chosen, lastObserved: lastObserved) != nil
+    }
+
     public static func evaluate(status: TailscaleStatus, config: TailscaleServeConfig?, relayPort: Int) -> TailscaleHTTPSState {
         switch status {
         case .unknown:
@@ -216,6 +247,25 @@ public enum TailscaleHTTPSState: Sendable, Equatable {
     /// with the port only when it is not 443.
     public static func address(name: String, port: Int) -> String {
         port == 443 ? "https://\(name)" : "https://\(name):\(port)"
+    }
+}
+
+/// HandlerObservation is what the app last confirmed about its own handler in
+/// Tailscale. It is kept beside the saved settings, so a launch with
+/// Tailscale stopped still knows. Only a successful read of Tailscale's serve
+/// settings while it runs confirms anything; a read that cannot be made
+/// leaves the last observation as it was.
+public enum HandlerObservation: String, Codable, Sendable, Equatable {
+    case serving
+    case notServing
+
+    /// observing is what a read confirms, nil when it confirms nothing.
+    public static func observing(_ state: TailscaleHTTPSState) -> HandlerObservation? {
+        switch state {
+        case .on: return .serving
+        case .off, .noFreePort: return .notServing
+        case .unknown, .unavailable, .unreadable: return nil
+        }
     }
 }
 
@@ -533,7 +583,7 @@ extension ConnectPaneAddressState {
         case .unreadable:
             return .unavailable(reason: "Couldn't read Tailscale's settings right now.")
         case .off, .noFreePort:
-            return .unavailable(reason: "Tailscale HTTPS is off right now.")
+            return .unavailable(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way.")
         case .on(let port):
             guard case .running(let name) = tailscale else {
                 return .unavailable(reason: "Waiting for Tailscale to connect.")
