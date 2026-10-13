@@ -168,10 +168,11 @@ final class AppModel: ObservableObject {
 
     /// portLockNote is why the port must not change, nil when it may: while
     /// this app's handler is serving, whatever way is chosen, since changing
-    /// the port then would strand the handler already set up. The choice of
+    /// the port then would strand the handler already set up. While Tailscale
+    /// cannot be asked, the last confirmed observation decides. The choice of
     /// a way is never locked.
     var portLockNote: String? {
-        httpsState.portLockNote(chosen: settings.tailscaleHTTPSEnabled)
+        httpsState.portLockNote(chosen: settings.tailscaleHTTPSEnabled, lastObserved: settings.lastHandlerObservation)
     }
 
     var isPortLocked: Bool { portLockNote != nil }
@@ -750,6 +751,12 @@ final class AppModel: ObservableObject {
         }
         tailscaleStatus = status
         tailscaleServe = serve
+        // A read that confirms the handler's state is remembered, so the port
+        // lock still follows it when Tailscale later cannot be asked.
+        if let observed = HandlerObservation.observing(httpsState), observed != settings.lastHandlerObservation {
+            settings.lastHandlerObservation = observed
+            persistSettings()
+        }
         // A start refused while Tailscale's state was unknown can go ahead
         // once Tailscale shows nothing holds the port.
         if engineState == .failed(.httpsOnStatusPort), !isPortLocked {

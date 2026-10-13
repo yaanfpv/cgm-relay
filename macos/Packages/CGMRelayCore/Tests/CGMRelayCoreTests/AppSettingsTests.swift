@@ -117,6 +117,23 @@ struct AppSettingsTests {
         }
     }
 
+    @Test("the last confirmed handler state is absent from an older settings file, survives a round trip, and an unknown value reads as nothing observed")
+    func lastHandlerObservation() throws {
+        #expect(AppSettings.default.lastHandlerObservation == nil)
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "tailscaleHTTPSEnabled": true}"#.utf8))
+        #expect(older.lastHandlerObservation == nil)
+        #expect(older.tailscaleHTTPSEnabled && older.port == 4000, "the other fields are kept")
+        for seen in [HandlerObservation.serving, .notServing] {
+            var settings = AppSettings.default
+            settings.lastHandlerObservation = seen
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.lastHandlerObservation == seen)
+        }
+        let unknown = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "lastHandlerObservation": "someNewerState"}"#.utf8))
+        #expect(unknown.lastHandlerObservation == nil)
+        #expect(unknown.port == 4000)
+    }
+
     @Test("setup and Tailscale HTTPS default off and survive a round trip")
     func setupFieldsRoundTrip() throws {
         #expect(AppSettings.default.setupFinished == false)
