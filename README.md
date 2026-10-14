@@ -25,13 +25,16 @@ Your phone lets xDrip run for a moment, then puts it back to sleep, and the minu
 CGM Relay fills those minutes in from your Mac. It checks your LibreLinkUp account about once a minute, keeps every reading it gets, and hands them all to xDrip4iOS, xDrip+, LoopFollow, Nightguard or any Nightscout follower app the moment it wakes up. No account, no cloud in between.
 
 <p align="center">
-  <img src="docs/images/panel.png" width="320" alt="The CGM Relay menu open under the menu bar icon, showing a reading of 100 mg/dL, Current, just now, with Stop, Settings and Quit buttons">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-dark.png">
+    <img src="docs/images/panel-light.png" width="354" alt="The CGM Relay menu, showing a reading of 100 mg/dL, Current, just now, last polled just now, with Stop, Settings and Quit buttons">
+  </picture>
 </p>
 
 ## Get started in two minutes
 
 1. [Download CGM Relay](https://github.com/yaanfpv/cgm-relay/releases/latest), open the disk image and drag it to Applications.
-2. Open it and follow setup. It signs you in to LibreLinkUp, sets up how your phone reaches your Mac (one click if you use Tailscale) and connects your app with a QR code.
+2. Open it and follow setup. It signs you in to LibreLinkUp, lets you choose how your phone reaches your Mac (your Wi-Fi or Tailscale) and connects your app with a QR code. On your Wi-Fi, your phone installs a certificate from your Mac once, so readings travel encrypted.
 3. Turn off your app's own LibreLinkUp follower. Only one thing should follow your account.
 
 That's it. Your app now catches up whenever it wakes.
