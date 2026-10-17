@@ -19,7 +19,16 @@ coverage.*
 # macOS menu bar app build artifacts (macos/) -- project.yml and the
 # Swift sources are tracked; everything XcodeGen or Xcode itself
 # generates from them is not.
-/macos/*.xcodeproj/
+/macos/*.xcodeproj/*
+# Except the app project's own package lock file, so builds resolve the same versions everywhere and
+# never rewrite the core package's Package.resolved.
+!/macos/CGMRelay.xcodeproj/project.xcworkspace/
+/macos/CGMRelay.xcodeproj/project.xcworkspace/*
+!/macos/CGMRelay.xcodeproj/project.xcworkspace/xcshareddata/
+/macos/CGMRelay.xcodeproj/project.xcworkspace/xcshareddata/*
+!/macos/CGMRelay.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+/macos/CGMRelay.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!/macos/CGMRelay.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 /macos/.build/
 /macos/Packages/CGMRelayCore/.build/
 /macos/Packages/CGMRelayCore/.swiftpm/
