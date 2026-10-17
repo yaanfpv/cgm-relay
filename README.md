@@ -27,7 +27,7 @@ CGM Relay fills those minutes in from your Mac. It checks your LibreLinkUp accou
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-dark.png">
-    <img src="docs/images/panel-light.png" width="354" alt="The CGM Relay menu, showing a reading of 100 mg/dL, Current, just now, last polled just now, with Stop, Settings and Quit buttons">
+    <img src="docs/images/panel-light.png" width="329" alt="The CGM Relay menu open under its menu bar icon, which reads 100 with a steady arrow. The menu shows 100 mg/dL, Current, just now, last polled just now, with Stop, Settings and Quit buttons">
   </picture>
 </p>
 
