@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The libraries CGM Relay is built on are up to date, swift-crypto 5.0.1 and the Go SQLite and system packages among them. Nothing changes in how it works.
+
 ## [1.0.2] - 2026-10-14
 
 ### Changed
