@@ -282,8 +282,18 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.typedPortRefusal(port: dual.port, bindHost: "127.0.0.1", binder: binder, reserved: nil) != nil, "a dual-stack holder is refused")
         let free = try freePort()
         #expect(PortAvailability.typedPortRefusal(port: free, bindHost: "0.0.0.0", binder: binder, reserved: nil) == nil)
-        let closing = try #require(portInTimeWait())
-        #expect(PortAvailability.typedPortRefusal(port: closing, bindHost: "0.0.0.0", binder: binder, reserved: nil) == nil, "connections still closing do not hold a port")
+        // The closing port comes from the ephemeral range, so a test running
+        // alongside can open a connection on it before the check; that one is
+        // retried with a fresh port. Refusing every closing port is the failure.
+        var refusals: [String] = []
+        for _ in 0..<5 {
+            let closing = try #require(portInTimeWait())
+            guard let refusal = PortAvailability.typedPortRefusal(port: closing, bindHost: "0.0.0.0", binder: binder, reserved: nil) else {
+                return
+            }
+            refusals.append(refusal)
+        }
+        Issue.record("connections still closing do not hold a port, yet every one was refused: \(refusals)")
     }
 
     // Another suite running alongside can take a released port between the
