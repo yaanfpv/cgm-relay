@@ -8,7 +8,7 @@ let package = Package(
         .library(name: "CGMRelayCore", targets: ["CGMRelayCore"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-certificates.git", exact: "1.21.0"),
+        .package(url: "https://github.com/apple/swift-certificates.git", exact: "1.21.1"),
         .package(url: "https://github.com/apple/swift-crypto.git", exact: "5.0.1"),
         .package(url: "https://github.com/apple/swift-asn1.git", exact: "1.7.3"),
     ],
