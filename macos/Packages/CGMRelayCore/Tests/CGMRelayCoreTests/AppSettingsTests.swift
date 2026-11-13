@@ -22,7 +22,8 @@ struct AppSettingsTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
 
         #expect(decoded.port == 4000)
-        #expect(decoded.reach == .myLocalNetwork)
+        #expect(decoded.reach == .thisMacOnly)
+        #expect(decoded.movedFromLocalRoute == true)
         #expect(decoded.retentionDays == 30)
         #expect(decoded.units == .mmolL)
         #expect(decoded.noReadingAlertMinutes == 45)
@@ -85,8 +86,8 @@ struct AppSettingsTests {
         let on = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach":"myTailnet","tailscaleHTTPSEnabled":true}"#.utf8))
         #expect(on.chosenWay == .tailscaleHTTPS)
         #expect(on.reach == .myTailnet)
-        let off = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach":"myLocalNetwork","tailscaleHTTPSEnabled":false}"#.utf8))
-        #expect(off.chosenWay == .myLocalNetwork)
+        let off = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach":"myTailnet","tailscaleHTTPSEnabled":false}"#.utf8))
+        #expect(off.chosenWay == .myTailnet)
         #expect(AppSettings.default.chosenWay == .thisMacOnly)
     }
 

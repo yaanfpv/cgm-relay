@@ -44,6 +44,13 @@ public enum GlucoseUnit: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// StayAwakeChoice is the person's answer to whether this Mac should be
+/// kept from sleeping while the relay runs.
+public enum StayAwakeChoice: String, Codable, Sendable {
+    case off
+    case on
+}
+
 /// AppSettings is every non-secret setting the Settings window's General,
 /// Advanced, and Alerts panes expose. It carries no LibreLinkUp account,
 /// token, or store key -- those stay in CredentialStore -- so this whole
@@ -82,6 +89,29 @@ public struct AppSettings: Equatable, Sendable {
     /// lastHandlerObservation is what the app last confirmed about its own
     /// Tailscale handler, nil until it has confirmed anything.
     public var lastHandlerObservation: HandlerObservation?
+    /// movedFromLocalRoute is whether a saved local network choice was
+    /// replaced by this Mac only when settings were read, so the person can
+    /// be told once.
+    public var movedFromLocalRoute: Bool
+    /// setupVersion is the version of setup the person last finished: 0
+    /// before any setup, and currentSetupVersion once they finish the
+    /// present one.
+    public var setupVersion: Int
+    /// stayAwake is the person's answer to keeping this Mac awake, nil
+    /// until they have been asked.
+    public var stayAwake: StayAwakeChoice?
+
+    /// currentSetupVersion is the version of setup this build runs.
+    public static let currentSetupVersion = 2
+
+    /// finishingSetup is these settings with setup marked finished at the
+    /// current version, and nothing else changed.
+    public func finishingSetup() -> AppSettings {
+        var next = self
+        next.setupFinished = true
+        next.setupVersion = AppSettings.currentSetupVersion
+        return next
+    }
 
     /// effectiveReach is the reach the relay is actually bound to: this
     /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
@@ -164,7 +194,10 @@ public struct AppSettings: Equatable, Sendable {
         connectFollowerApp: FollowerApp = .xDrip4iOS,
         safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil,
         localCertificateStepFinished: Bool = false,
-        lastHandlerObservation: HandlerObservation? = nil
+        lastHandlerObservation: HandlerObservation? = nil,
+        movedFromLocalRoute: Bool = false,
+        setupVersion: Int = 0,
+        stayAwake: StayAwakeChoice? = nil
     ) {
         self.port = port
         self.reach = reach
@@ -180,6 +213,9 @@ public struct AppSettings: Equatable, Sendable {
         self.safetyNoticeAcceptance = safetyNoticeAcceptance
         self.localCertificateStepFinished = localCertificateStepFinished
         self.lastHandlerObservation = lastHandlerObservation
+        self.movedFromLocalRoute = movedFromLocalRoute
+        self.setupVersion = setupVersion
+        self.stayAwake = stayAwake
     }
 }
 
@@ -195,13 +231,13 @@ extension AppSettings: Codable {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
         case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
         case localCertificateStepFinished, lastHandlerObservation
+        case movedFromLocalRoute, setupVersion, stayAwake
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let fallback = AppSettings.default
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? fallback.port
-        reach = try container.decodeIfPresent(NetworkReach.self, forKey: .reach) ?? fallback.reach
         retentionDays = try container.decodeIfPresent(Int.self, forKey: .retentionDays) ?? fallback.retentionDays
         units = try container.decodeIfPresent(GlucoseUnit.self, forKey: .units) ?? fallback.units
         noReadingAlertEnabled = try container.decodeIfPresent(Bool.self, forKey: .noReadingAlertEnabled) ?? fallback.noReadingAlertEnabled
@@ -209,6 +245,27 @@ extension AppSettings: Codable {
         signInFailingAlertEnabled = try container.decodeIfPresent(Bool.self, forKey: .signInFailingAlertEnabled) ?? fallback.signInFailingAlertEnabled
         tailscaleHTTPSEnabled = try container.decodeIfPresent(Bool.self, forKey: .tailscaleHTTPSEnabled) ?? fallback.tailscaleHTTPSEnabled
         setupFinished = try container.decodeIfPresent(Bool.self, forKey: .setupFinished) ?? fallback.setupFinished
+        // A stored reach this version does not offer becomes this Mac only
+        // rather than failing the whole decode. The retired local network
+        // choice is matched by its stored name, so it is still recognised
+        // after its case is gone.
+        let storedReach = ((try? container.decodeIfPresent(String.self, forKey: .reach)) ?? nil)
+        let storedMoved = try container.decodeIfPresent(Bool.self, forKey: .movedFromLocalRoute) ?? fallback.movedFromLocalRoute
+        if let storedReach {
+            if storedReach == "myLocalNetwork" {
+                reach = .thisMacOnly
+                movedFromLocalRoute = true
+            } else {
+                reach = NetworkReach(rawValue: storedReach) ?? .thisMacOnly
+                movedFromLocalRoute = storedMoved
+            }
+        } else {
+            reach = fallback.reach
+            movedFromLocalRoute = storedMoved
+        }
+        // Settings saved before setup had a version were finished at
+        // version 1, or never finished.
+        setupVersion = try container.decodeIfPresent(Int.self, forKey: .setupVersion) ?? (setupFinished ? 1 : 0)
         showReadingInMenuBar = try container.decodeIfPresent(Bool.self, forKey: .showReadingInMenuBar) ?? fallback.showReadingInMenuBar
         // A value this version does not know (a newer version's app) falls
         // back to the default rather than failing the whole decode.
@@ -217,6 +274,8 @@ extension AppSettings: Codable {
         localCertificateStepFinished = try container.decodeIfPresent(Bool.self, forKey: .localCertificateStepFinished) ?? fallback.localCertificateStepFinished
         // A value this version does not know falls back to nothing observed.
         lastHandlerObservation = ((try? container.decodeIfPresent(HandlerObservation.self, forKey: .lastHandlerObservation)) ?? nil)
+        // An answer this version does not know reads as not yet asked.
+        stayAwake = ((try? container.decodeIfPresent(StayAwakeChoice.self, forKey: .stayAwake)) ?? nil)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -235,6 +294,9 @@ extension AppSettings: Codable {
         try container.encodeIfPresent(safetyNoticeAcceptance, forKey: .safetyNoticeAcceptance)
         try container.encode(localCertificateStepFinished, forKey: .localCertificateStepFinished)
         try container.encodeIfPresent(lastHandlerObservation, forKey: .lastHandlerObservation)
+        try container.encode(movedFromLocalRoute, forKey: .movedFromLocalRoute)
+        try container.encode(setupVersion, forKey: .setupVersion)
+        try container.encodeIfPresent(stayAwake, forKey: .stayAwake)
     }
 }
 

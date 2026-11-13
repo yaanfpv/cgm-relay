@@ -857,7 +857,7 @@ final class AppModel: ObservableObject {
     /// phone can reach this Mac; otherwise setup stays open for next time.
     func completeSetup() {
         guard SetupCompletion.mayFinish(reachability: phoneReachability) else { return }
-        settings.setupFinished = true
+        settings = settings.finishingSetup()
         persistSettings()
     }
 
