@@ -26,7 +26,8 @@
 //
 // See LoadFromReader for the alternate path `cgm-relay serve
 // --config-stdin` uses: a single JSON object piped on stdin, in place of
-// the config file and every environment variable above.
+// the config file and every environment variable above. The status secret
+// and the built-in Tailscale route's two settings exist only there.
 package config
 
 import (
@@ -113,6 +114,14 @@ type Config struct {
 	// headless install has none and the relay refuses to mint pairing codes.
 	// It is never written to the config file and never logged.
 	StatusSecret string `json:"-"`
+	// TailscaleStateDir, when set, turns on the built-in Tailscale route:
+	// the directory where the engine's own node keeps its sign-in. It must
+	// be an absolute path. Only `serve --config-stdin` sets it; the file and
+	// environment never carry one. It is never written to the config file.
+	TailscaleStateDir string `json:"-"`
+	// TailscaleHostname is the generic name the built-in node asks for. It is
+	// required with TailscaleStateDir and carries the same limits.
+	TailscaleHostname string `json:"-"`
 }
 
 // Paths are the on-disk locations Setup writes to and Load reads from.

@@ -13,6 +13,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/config"
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
+	"github.com/yaanfpv/cgm-relay/internal/tailnode"
 )
 
 // fixedNow returns a now func that always reports t, so a test can assert
@@ -517,5 +518,40 @@ func TestContainsValue(t *testing.T) {
 				t.Errorf("ContainsValue(%q, %q) = %v, want %v", c.text, "111", got, c.want)
 			}
 		})
+	}
+}
+
+// TestStatusCarriesTailnodeOnlyWhenConfigured checks the ts_* fields appear
+// beside today's fields when the built-in route is configured, and no ts_*
+// key appears when it is not.
+func TestStatusCarriesTailnodeOnlyWhenConfigured(t *testing.T) {
+	get := func(opts ...statusOption) map[string]any {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), "", opts...)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		req.Host = "127.0.0.1:1338"
+		h.ServeHTTP(rec, req)
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("decode /status: %v (%s)", err, rec.Body.String())
+		}
+		return m
+	}
+
+	without := get()
+	for k := range without {
+		if strings.HasPrefix(k, "ts_") {
+			t.Errorf("unconfigured status has %s", k)
+		}
+	}
+
+	with := get(withTailnode(func() tailnode.Status {
+		return tailnode.Status{State: tailnode.StateNeedsLogin, LoginURL: "https://login.example.test/a"}
+	}))
+	if with["ts_state"] != "needs-login" || with["ts_login_url"] != "https://login.example.test/a" {
+		t.Errorf("configured status = %v, want ts_state and ts_login_url", with)
+	}
+	if with["running"] != true {
+		t.Errorf("configured status lost its own fields: %v", with)
 	}
 }

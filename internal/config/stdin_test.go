@@ -502,3 +502,32 @@ func TestLoadFromReaderTailscale(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadFromReaderTailscaleRefusals checks the built-in route's settings
+// are refused when they could not work: a hostname without a state
+// directory, a relative directory, and a hostname that is not one plain
+// lowercase DNS label, since it ends up in a public certificate log.
+func TestLoadFromReaderTailscaleRefusals(t *testing.T) {
+	cases := []struct{ name, extra string }{
+		{"hostname alone", `"tailscale_hostname": "cgm-relay", `},
+		{"directory alone", `"tailscale_state_dir": "/tmp/x", `},
+		{"relative directory", `"tailscale_state_dir": "x", "tailscale_hostname": "cgm-relay", `},
+		{"uppercase hostname", `"tailscale_state_dir": "/tmp/x", "tailscale_hostname": "Mac", `},
+		{"dotted hostname", `"tailscale_state_dir": "/tmp/x", "tailscale_hostname": "a.b", `},
+		{"leading hyphen", `"tailscale_state_dir": "/tmp/x", "tailscale_hostname": "-a", `},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "database_path": "/tmp/does-not-matter/readings.db",
+  %s"key": %q
+}`, c.extra, testKeyBase64('T'))
+			if _, err := config.LoadFromReader(strings.NewReader(in)); err == nil {
+				t.Fatal("LoadFromReader accepted it, want an error")
+			}
+		})
+	}
+}
