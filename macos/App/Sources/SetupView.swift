@@ -2,16 +2,16 @@ import AppKit
 import CGMRelayCore
 import SwiftUI
 
-/// SetupView is first-launch setup: four steps that take a person from
+/// SetupView is first-launch setup: five steps that take a person from
 /// nothing to a follower app reading their glucose, running after every
 /// restart. It is its own window rather than a mode of Settings, so it can
 /// be sized to each step and Settings keeps opening to its panes. Every step
 /// reuses the control the Settings window already has for that job.
 struct SetupView: View {
     enum Step: Int {
-        case signIn = 1, reach, connect, ready
+        case signIn = 1, reach, stayAwake, connect, ready
 
-        static let count = 4
+        static let count = 5
 
         /// title is the step's heading; the last step says so plainly when
         /// no phone can reach this Mac yet, rather than claiming setup is done.
@@ -19,6 +19,7 @@ struct SetupView: View {
             switch self {
             case .signIn: "Sign In"
             case .reach: "Reach Your Phone"
+            case .stayAwake: "Keep This Mac Awake"
             case .connect: "Connect Your App"
             case .ready: phoneReachable ? "You're All Set" : "Your Phone Isn't Connected Yet"
             }
@@ -28,6 +29,7 @@ struct SetupView: View {
             switch self {
             case .signIn: "This is where CGM Relay gets your readings."
             case .reach: "Choose how your phone gets to this Mac."
+            case .stayAwake: "CGM Relay keeps reading only while this Mac is awake."
             case .connect: "Give your follower app this address and token."
             case .ready:
                 phoneReachable
@@ -156,6 +158,8 @@ struct SetupView: View {
             AccountPaneView(model: model, presentation: .setup, externalForm: signInForm)
         case .reach:
             SetupReachStep(model: model)
+        case .stayAwake:
+            SetupStayAwakeStep(model: model)
         case .connect:
             ConnectPaneView(
                 model: model,
@@ -184,8 +188,17 @@ struct SetupView: View {
                 if !isPhoneReachable {
                     AccessibleButton("Set Up Later", style: .plain) { requestedStep = .ready }
                 }
-                AccessibleButton("Continue", style: offersTailscaleHTTPS ? .secondary : .primary) { requestedStep = .connect }
+                AccessibleButton("Continue", style: offersTailscaleHTTPS ? .secondary : .primary) { requestedStep = .stayAwake }
                     .disabled(!isPhoneReachable)
+            case .stayAwake:
+                if model.stayAwakeChoice == nil {
+                    AccessibleButton("Not Now", style: .secondary) {
+                        Task { await model.turnOffStayAwake() }
+                        requestedStep = .connect
+                    }
+                } else {
+                    AccessibleButton("Continue", style: model.stayAwakeChoice == .on ? .primary : .secondary) { requestedStep = .connect }
+                }
             case .connect:
                 AccessibleButton("Continue", style: .primary) { requestedStep = .ready }
             case .ready:
@@ -234,7 +247,8 @@ struct SetupView: View {
     private func goBack() {
         switch step {
         case .ready: requestedStep = isPhoneReachable ? .connect : .reach
-        case .connect: requestedStep = .reach
+        case .connect: requestedStep = .stayAwake
+        case .stayAwake: requestedStep = .reach
         case .reach, .signIn: requestedStep = .signIn
         }
     }
@@ -316,7 +330,45 @@ private struct SetupReachStep: View {
     }
 }
 
-/// SetupReadyStep is step 4: the one setting left, Open at Login, then what
+/// SetupStayAwakeStep is step 3: whether CGM Relay keeps this Mac awake. It
+/// is asked once; Not Now and Turn On each save the answer, and a closed
+/// password prompt leaves it unanswered.
+private struct SetupStayAwakeStep: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Form {
+            Section {
+                SetupStatusRow(
+                    name: "stay-awake",
+                    title: StayAwakeCopy.title,
+                    caption: model.stayAwakeNotice ?? StayAwakeCopy.explanation(isLaptop: model.isLaptop),
+                    captionIsError: model.stayAwakeNotice != nil,
+                    wrapsCaption: true,
+                    slot: slot
+                )
+            }
+        }
+        .formStyle(.grouped)
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private var slot: SetupStatusRow.Slot {
+        if model.isChangingStayAwake { return .unavailable("Waiting for password…") }
+        switch model.stayAwakeChoice {
+        case .on:
+            return .doneWithAction("On", actionLabel: "Turn Off", accessibleName: "Turn Off Keep this Mac awake") {
+                Task { await model.turnOffStayAwake() }
+            }
+        case .off, nil:
+            return .action("Turn On", accessibleName: "Turn On Keep this Mac awake") {
+                Task { await model.turnOnStayAwake() }
+            }
+        }
+    }
+}
+
+/// SetupReadyStep is step 5: the one setting left, Open at Login, then what
 /// happens from here.
 private struct SetupReadyStep: View {
     @ObservedObject var model: AppModel

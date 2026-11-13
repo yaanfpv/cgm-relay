@@ -43,7 +43,10 @@ struct CGMRelayApp: App {
             tailscale: RealTailscaleController(
                 executableURL: CGMRelayApp.tailscaleExecutable(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
             ),
-            loginItemManager: CGMRelayApp.loginItemManager(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
+            loginItemManager: CGMRelayApp.loginItemManager(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
+            powerSource: CGMRelayApp.powerSource(),
+            sleepRules: CGMRelayApp.sleepRules(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
+            sleepSetting: CGMRelayApp.sleepSetting(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
         )
         let updates = UpdatesModel(feedURLOverride: CGMRelayApp.updateFeedURL(explicitKeychainServiceOverride: explicitKeychainServiceOverride))
         _model = StateObject(wrappedValue: model)
@@ -294,6 +297,37 @@ struct CGMRelayApp: App {
         #endif
     }
 
+    /// powerSource is the Mac's real power state. A development build can be
+    /// told to read as a desktop with `-CGMRelayForceDesktop YES`, to see
+    /// that wording on a laptop.
+    private static func powerSource() -> any PowerSourceReading {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "CGMRelayForceDesktop") {
+            return FixedPowerSource(PowerSnapshot(isLaptop: false, onACPower: true))
+        }
+        #endif
+        return SystemPowerSource()
+    }
+
+    /// sleepRules installs the sleep permission for real, except in a
+    /// development run on throwaway data, which never touches the Mac's
+    /// sudoers or boot jobs.
+    private static func sleepRules(explicitKeychainServiceOverride: String?) -> any SleepRuleManaging {
+        #if DEBUG
+        if explicitKeychainServiceOverride != nil { return UnavailableSleepRules() }
+        #endif
+        return SleepRuleAdministrator()
+    }
+
+    /// sleepSetting changes the Mac's sleep setting for real, except in a
+    /// development run on throwaway data, which never runs sudo.
+    private static func sleepSetting(explicitKeychainServiceOverride: String?) -> any SleepSettingWriting {
+        #if DEBUG
+        if explicitKeychainServiceOverride != nil { return IgnoredSleepSetting() }
+        #endif
+        return PrivilegedSleepSettingWriter()
+    }
+
     /// seedSyntheticAccountIfRequested writes CGM Relay's fixed
     /// development account into store when the app is launched with
     /// `-CGMRelaySeedSyntheticAccount YES`, so a development run can
@@ -389,3 +423,25 @@ struct AppMenuCommands: Commands {
         }
     }
 }
+
+#if DEBUG
+/// FixedPowerSource always reads the one power state it was given.
+private struct FixedPowerSource: PowerSourceReading {
+    private let value: PowerSnapshot
+    init(_ value: PowerSnapshot) { self.value = value }
+    func snapshot() -> PowerSnapshot { value }
+}
+
+/// IgnoredSleepSetting accepts every change and makes none.
+private struct IgnoredSleepSetting: SleepSettingWriting {
+    func setDisableSleep(_ on: Bool) throws {}
+}
+
+/// UnavailableSleepRules is the sleep permission in a development run on
+/// throwaway data: nothing is installed, and asking to install fails.
+private struct UnavailableSleepRules: SleepRuleManaging {
+    func isInstalled() async -> Bool { false }
+    func install() async -> SleepRuleOutcome { .failed }
+    func remove() async -> SleepRuleOutcome { .done }
+}
+#endif

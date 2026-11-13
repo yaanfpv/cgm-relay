@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Keep this Mac awake, in setup and in Settings: while CGM Relay runs and the Mac is plugged in it doesn't sleep, lid closed included on a laptop, and on battery it sleeps as usual. Turning it on asks for your Mac's password once.
+
 ### Changed
 
 - The local network route is removed in favour of Tailscale. If you used it, CGM Relay keeps the relay on this Mac only until you choose a Tailscale way to reach it, and deletes the certificate it had saved.
