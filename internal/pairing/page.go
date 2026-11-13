@@ -88,7 +88,6 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
 <main>
 <h1>Connect your follower app</h1>
 <p class="lede">Find your app below. Tap Copy next to each value and paste it into the app.</p>
-{{if .LocalNetwork}}<p class="lede note">Each phone needs CGM Relay's certificate once before it can connect over your Wi-Fi. To add another phone, choose Set Up a Phone in CGM Relay's Advanced settings on your Mac.</p>{{end}}
 {{range .Apps}}
 <section class="card" aria-labelledby="{{.ID}}-h">
 <h2 id="{{.ID}}-h">{{.Name}}</h2>
@@ -149,9 +148,6 @@ type pageData struct {
 	Style  template.CSS
 	Script template.JS
 	Apps   []appCard
-	// LocalNetwork is set when the page is served over the relay's own TLS
-	// listener, which a phone reaches only after the certificate step.
-	LocalNetwork bool
 }
 
 type expiredData struct{ Style template.CSS }
@@ -200,8 +196,6 @@ func setSecurityHeaders(w http.ResponseWriter) {
 // PageHandler serves GET /connect/<code>: the pairing page for the store's
 // live code, or a token-free "expired" page for anything else. token is the
 // relay's access token and appears only in a page served for a live code.
-// Served over the relay's own TLS (the local network route), the page also
-// says each phone needs the certificate step once.
 func PageHandler(store *Store, token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -216,7 +210,7 @@ func PageHandler(store *Store, token string) http.Handler {
 		var buf bytes.Buffer
 		status := http.StatusOK
 		if live {
-			data := pageData{Style: template.CSS(pageStyle), Script: template.JS(pageScript), Apps: cards(apps, token), LocalNetwork: r.TLS != nil}
+			data := pageData{Style: template.CSS(pageStyle), Script: template.JS(pageScript), Apps: cards(apps, token)}
 			if err := pageTemplate.Execute(&buf, data); err != nil {
 				live = false
 			}
