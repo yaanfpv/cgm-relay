@@ -462,3 +462,43 @@ func TestLoadFromReaderRefusesRetiredLANFields(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadFromReaderTailscale checks the two optional keys that turn on the
+// built-in private-address route: both are carried through when present and
+// both stay empty, without failing the decode, when absent.
+func TestLoadFromReaderTailscale(t *testing.T) {
+	base := func(extra string) string {
+		return fmt.Sprintf(`{
+  "librelinkup_email": "person@example.test",
+  "librelinkup_password": "some-password",
+  "token": "some-token",
+  "database_path": "/tmp/does-not-matter/readings.db",
+  %s"key": %q
+}`, extra, testKeyBase64('T'))
+	}
+
+	t.Run("both keys set", func(t *testing.T) {
+		got, err := config.LoadFromReader(strings.NewReader(base(
+			`"tailscale_state_dir": "/tmp/x", "tailscale_hostname": "cgm-relay", `)))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.TailscaleStateDir != "/tmp/x" {
+			t.Errorf("TailscaleStateDir = %q, want %q", got.TailscaleStateDir, "/tmp/x")
+		}
+		if got.TailscaleHostname != "cgm-relay" {
+			t.Errorf("TailscaleHostname = %q, want %q", got.TailscaleHostname, "cgm-relay")
+		}
+	})
+
+	t.Run("both keys absent", func(t *testing.T) {
+		got, err := config.LoadFromReader(strings.NewReader(base("")))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.TailscaleStateDir != "" || got.TailscaleHostname != "" {
+			t.Errorf("TailscaleStateDir = %q, TailscaleHostname = %q, want both empty",
+				got.TailscaleStateDir, got.TailscaleHostname)
+		}
+	})
+}
