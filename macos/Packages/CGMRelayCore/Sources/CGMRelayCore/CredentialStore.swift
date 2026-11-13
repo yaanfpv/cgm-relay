@@ -30,4 +30,10 @@ public protocol CredentialStore: Sendable {
     /// atomic update, for names no CredentialKey case carries any more: a
     /// name that is not stored is ignored, and nothing else is touched.
     func removeRawKeys(_ names: [String]) throws
+    /// addMissing stores each value in newValues whose key has no value
+    /// yet, leaves every key that already has one untouched, and returns
+    /// what is stored for every key given. The check and the write are one
+    /// step, so two copies of the app starting together both end up with
+    /// the first writer's values.
+    func addMissing(_ newValues: [CredentialKey: String]) throws -> [CredentialKey: String]
 }

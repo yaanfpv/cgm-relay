@@ -47,14 +47,11 @@ public struct CredentialsBootstrapper: Sendable {
     }
 
     public func ensureBootstrapped() throws {
-        if try store.string(for: .token) == nil {
-            let token = try randomBytes.randomBytes(count: Self.keySizeBytes).base64URLEncodedStringWithoutPadding()
-            try store.setString(token, for: .token)
-        }
-        if try store.string(for: .storeKey) == nil {
-            let key = try randomBytes.randomBytes(count: Self.keySizeBytes).base64EncodedString()
-            try store.setString(key, for: .storeKey)
-        }
+        let existing = [try store.string(for: .token), try store.string(for: .storeKey)]
+        guard existing.contains(where: { $0 == nil }) else { return }
+        let token = try randomBytes.randomBytes(count: Self.keySizeBytes).base64URLEncodedStringWithoutPadding()
+        let key = try randomBytes.randomBytes(count: Self.keySizeBytes).base64EncodedString()
+        _ = try store.addMissing([.token: token, .storeKey: key])
     }
 
     /// rotateToken generates and saves a fresh bearer token, in the same
