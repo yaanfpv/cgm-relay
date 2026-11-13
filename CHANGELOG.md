@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The local network route is removed in favour of Tailscale. If you used it, CGM Relay keeps the relay on this Mac only until you choose a Tailscale way to reach it, and deletes the certificate it had saved.
-- The libraries CGM Relay is built on are up to date, swift-crypto 5.0.1 and the Go SQLite and system packages among them. Nothing changes in how it works.
+- The libraries CGM Relay is built on are up to date, the Go SQLite and system packages among them. Nothing changes in how it works.
 
 ## [1.0.2] - 2026-10-14
 
