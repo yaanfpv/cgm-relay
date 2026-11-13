@@ -20,7 +20,17 @@ BUILD_DIR="${MACOS_DIR}/.build"
 ENGINE_DIR="${BUILD_DIR}/engine"
 DERIVED_DATA_DIR="${BUILD_DIR}/DerivedData"
 
-echo "==> Building the engine for arm64 and amd64 concurrently (CGO_ENABLED=0)"
+# The engine is built with the Go version go.mod names, the same one CI installs from go.mod. The go
+# command switches to that version on its own unless GOTOOLCHAIN is pinned to an older local one, so
+# check what a build here will use and stop with a clear message instead of a compiler error.
+REQUIRED_GO="go$(awk '$1 == "go" { print $2; exit }' "${REPO_ROOT}/go.mod")"
+BUILD_GO="$(cd "${REPO_ROOT}" && go env GOVERSION)"
+if [ "$(printf '%s\n%s\n' "${REQUIRED_GO}" "${BUILD_GO}" | sort -V | head -n 1)" != "${REQUIRED_GO}" ]; then
+  echo "==> The engine needs ${REQUIRED_GO} (from go.mod), but a build here would use ${BUILD_GO}. Install ${REQUIRED_GO} or unset GOTOOLCHAIN." >&2
+  exit 1
+fi
+
+echo "==> Building the engine for arm64 and amd64 concurrently (CGO_ENABLED=0, ${BUILD_GO})"
 mkdir -p "${ENGINE_DIR}"
 (
   cd "${REPO_ROOT}"
