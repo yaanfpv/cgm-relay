@@ -70,6 +70,19 @@ public struct CredentialsBootstrapper: Sendable {
     }
 }
 
+/// RetiredCertificateSecrets names the four entries an earlier version kept
+/// in the credentials item for its local certificate, and removes them.
+public enum RetiredCertificateSecrets {
+    public static let rawKeys = ["authority_key", "authority_certificate", "server_key", "server_certificate"]
+
+    /// remove deletes those entries in one update and leaves every other
+    /// secret as it was. It is safe to call on every launch: a store that
+    /// holds none of them is left unchanged.
+    public static func remove(from store: any CredentialStore) throws {
+        try store.removeRawKeys(rawKeys)
+    }
+}
+
 extension Data {
     /// base64URLEncodedStringWithoutPadding renders standard base64 with
     /// `+`/`/` swapped for the URL-safe `-`/`_` and trailing `=` removed,

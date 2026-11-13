@@ -74,11 +74,11 @@ struct AppSettingsTests {
     @Test("Tailscale HTTPS on binds this Mac only whatever reach was chosen; off leaves the chosen reach")
     func effectiveReachFollowsTailscaleHTTPS() {
         var settings = AppSettings.default
-        settings.reach = .myLocalNetwork
-        #expect(settings.effectiveReach == .myLocalNetwork)
+        settings.reach = .myTailnet
+        #expect(settings.effectiveReach == .myTailnet)
         settings.tailscaleHTTPSEnabled = true
         #expect(settings.effectiveReach == .thisMacOnly)
-        #expect(settings.reach == .myLocalNetwork, "the earlier choice comes back when HTTPS is turned off")
+        #expect(settings.reach == .myTailnet, "the earlier choice comes back when HTTPS is turned off")
     }
 
     @Test("settings saved before Tailscale HTTPS was one of the ways load unchanged: true reads as Tailscale HTTPS chosen, false as the saved reach")
@@ -110,9 +110,6 @@ struct AppSettingsTests {
             case .myTailnet:
                 expected.reach = .myTailnet
                 #expect(next.effectiveReach == .myTailnet)
-            case .myLocalNetwork:
-                expected.reach = .myLocalNetwork
-                #expect(next.effectiveReach == .myLocalNetwork)
             }
             #expect(next == expected, "only the choice changes, from \(start) to \(way)")
         }
@@ -144,18 +141,6 @@ struct AppSettingsTests {
         settings.tailscaleHTTPSEnabled = true
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
         #expect(decoded == settings)
-    }
-
-    @Test("the certificate step flag is off for a fresh or older saved value, and survives a round trip")
-    func certificateStepFlag() throws {
-        #expect(AppSettings.default.localCertificateStepFinished == false)
-        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "reach": "myLocalNetwork", "setupFinished": true}"#.utf8))
-        #expect(older.localCertificateStepFinished == false)
-        #expect(older.port == 4000 && older.setupFinished, "the other fields are kept")
-        var settings = AppSettings.default
-        settings.localCertificateStepFinished = true
-        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
-        #expect(decoded.localCertificateStepFinished)
     }
 
     @Test("a fresh install shows the reading in the menu bar and keeps 30 days")
@@ -254,7 +239,6 @@ struct AppSettingsTests {
         #expect(s.signInFailingAlertEnabled == true)
         #expect(s.setupFinished == true)
         #expect(s.showReadingInMenuBar == false)
-        #expect(s.localCertificateStepFinished == true)
     }
 
     /// load() on a throwaway suite holding the given settings JSON.

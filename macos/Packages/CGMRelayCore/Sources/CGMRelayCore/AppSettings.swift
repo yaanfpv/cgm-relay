@@ -81,11 +81,6 @@ public struct AppSettings: Equatable, Sendable {
     /// safetyNoticeAcceptance is the safety notice wording the person last
     /// accepted, nil until they have; see SafetyNotice.needsAcceptance.
     public var safetyNoticeAcceptance: SafetyNoticeAcceptance?
-    /// localCertificateStepFinished is whether the person has finished giving
-    /// their phone CGM Relay's certificate, which the local network route
-    /// needs before a phone can connect over https. It is per Mac, and is
-    /// cleared when the certificate authority is made again.
-    public var localCertificateStepFinished: Bool
     /// lastHandlerObservation is what the app last confirmed about its own
     /// Tailscale handler, nil until it has confirmed anything.
     public var lastHandlerObservation: HandlerObservation?
@@ -130,7 +125,6 @@ public struct AppSettings: Equatable, Sendable {
         switch reach {
         case .thisMacOnly: return .thisMacOnly
         case .myTailnet: return .myTailnet
-        case .myLocalNetwork: return .myLocalNetwork
         }
     }
 
@@ -149,9 +143,6 @@ public struct AppSettings: Equatable, Sendable {
         case .myTailnet:
             next.tailscaleHTTPSEnabled = false
             next.reach = .myTailnet
-        case .myLocalNetwork:
-            next.tailscaleHTTPSEnabled = false
-            next.reach = .myLocalNetwork
         }
         return next
     }
@@ -176,8 +167,7 @@ public struct AppSettings: Equatable, Sendable {
         setupFinished: false,
         showReadingInMenuBar: defaultShowReadingInMenuBar,
         connectFollowerApp: .xDrip4iOS,
-        safetyNoticeAcceptance: nil,
-        localCertificateStepFinished: false
+        safetyNoticeAcceptance: nil
     )
 
     public init(
@@ -193,7 +183,6 @@ public struct AppSettings: Equatable, Sendable {
         showReadingInMenuBar: Bool = AppSettings.defaultShowReadingInMenuBar,
         connectFollowerApp: FollowerApp = .xDrip4iOS,
         safetyNoticeAcceptance: SafetyNoticeAcceptance? = nil,
-        localCertificateStepFinished: Bool = false,
         lastHandlerObservation: HandlerObservation? = nil,
         movedFromLocalRoute: Bool = false,
         setupVersion: Int = 0,
@@ -211,7 +200,6 @@ public struct AppSettings: Equatable, Sendable {
         self.showReadingInMenuBar = showReadingInMenuBar
         self.connectFollowerApp = connectFollowerApp
         self.safetyNoticeAcceptance = safetyNoticeAcceptance
-        self.localCertificateStepFinished = localCertificateStepFinished
         self.lastHandlerObservation = lastHandlerObservation
         self.movedFromLocalRoute = movedFromLocalRoute
         self.setupVersion = setupVersion
@@ -230,7 +218,7 @@ extension AppSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
         case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
-        case localCertificateStepFinished, lastHandlerObservation
+        case lastHandlerObservation
         case movedFromLocalRoute, setupVersion, stayAwake
     }
 
@@ -273,7 +261,6 @@ extension AppSettings: Codable {
         // back to the default rather than failing the whole decode.
         connectFollowerApp = ((try? container.decodeIfPresent(FollowerApp.self, forKey: .connectFollowerApp)) ?? nil) ?? fallback.connectFollowerApp
         safetyNoticeAcceptance = ((try? container.decodeIfPresent(SafetyNoticeAcceptance.self, forKey: .safetyNoticeAcceptance)) ?? nil)
-        localCertificateStepFinished = try container.decodeIfPresent(Bool.self, forKey: .localCertificateStepFinished) ?? fallback.localCertificateStepFinished
         // A value this version does not know falls back to nothing observed.
         lastHandlerObservation = ((try? container.decodeIfPresent(HandlerObservation.self, forKey: .lastHandlerObservation)) ?? nil)
         // An answer this version does not know reads as not yet asked.
@@ -294,7 +281,6 @@ extension AppSettings: Codable {
         try container.encode(showReadingInMenuBar, forKey: .showReadingInMenuBar)
         try container.encode(connectFollowerApp, forKey: .connectFollowerApp)
         try container.encodeIfPresent(safetyNoticeAcceptance, forKey: .safetyNoticeAcceptance)
-        try container.encode(localCertificateStepFinished, forKey: .localCertificateStepFinished)
         try container.encodeIfPresent(lastHandlerObservation, forKey: .lastHandlerObservation)
         try container.encode(movedFromLocalRoute, forKey: .movedFromLocalRoute)
         try container.encode(setupVersion, forKey: .setupVersion)

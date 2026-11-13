@@ -80,6 +80,20 @@ public final class KeychainCredentialStore: CredentialStore, @unchecked Sendable
         }
     }
 
+    public func removeRawKeys(_ names: [String]) throws {
+        try lock.withLock {
+            try loadIfNeeded()
+            guard var updated = cache else { return }
+            var changed = false
+            for name in names where updated.removeValue(forKey: name) != nil {
+                changed = true
+            }
+            guard changed else { return }
+            try write(updated)
+            cache = updated
+        }
+    }
+
     private func loadIfNeeded() throws {
         guard cache == nil else { return }
 

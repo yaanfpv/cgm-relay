@@ -76,7 +76,6 @@ public enum DiagnosticsReport {
         switch reach {
         case .thisMacOnly: return "This Mac only"
         case .myTailnet: return "My tailnet"
-        case .myLocalNetwork: return "My local network"
         }
     }
 }

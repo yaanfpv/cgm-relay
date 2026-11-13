@@ -31,46 +31,6 @@ struct ReachAddressResolverTests {
         #expect(ReachAddressResolver.displayHost(for: .myTailnet, interfaces: noTailnet) == "127.0.0.1")
     }
 
-    @Test("My local network keeps its plain listener on loopback and displays the private LAN address")
-    func myLocalNetworkPlainListenerStaysOnLoopback() {
-        #expect(ReachAddressResolver.bindHost(for: .myLocalNetwork, interfaces: Self.mixed) == "127.0.0.1")
-        #expect(ReachAddressResolver.displayHost(for: .myLocalNetwork, interfaces: Self.mixed) == "192.168.1.42")
-    }
-
-    @Test("the follower port is tested on every interface for My local network, and on the listening host for the others")
-    func portCheckHostCoversEveryListener() {
-        #expect(ReachAddressResolver.portCheckHost(for: .myLocalNetwork, interfaces: Self.mixed) == "0.0.0.0")
-        #expect(ReachAddressResolver.portCheckHost(for: .thisMacOnly, interfaces: Self.mixed) == "127.0.0.1")
-        #expect(ReachAddressResolver.portCheckHost(for: .myTailnet, interfaces: Self.mixed) == "100.101.102.5")
-    }
-
-    @Test("only private addresses on ordinary interfaces are offered to the local network route, each once and in a fixed order")
-    func privateLANAddressesOnly() {
-        let interfaces = [
-            NetworkInterfaceAddress(name: "en1", address: "10.0.0.7"),
-            NetworkInterfaceAddress(name: "en0", address: "192.168.1.42"),
-            NetworkInterfaceAddress(name: "en2", address: "203.0.113.9"),
-            NetworkInterfaceAddress(name: "en3", address: "172.15.0.1"),
-            NetworkInterfaceAddress(name: "en4", address: "172.16.4.2"),
-            NetworkInterfaceAddress(name: "en5", address: "192.168.1.42"),
-            NetworkInterfaceAddress(name: "bridge100", address: "192.168.64.1"),
-            NetworkInterfaceAddress(name: "utun4", address: "100.101.102.5"),
-            NetworkInterfaceAddress(name: "en6", address: "169.254.3.4"),
-        ]
-        #expect(ReachAddressResolver.privateLANIPv4s(among: interfaces) == ["10.0.0.7", "172.16.4.2", "192.168.1.42"])
-        #expect(ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: "en0") == "192.168.1.42")
-        #expect(ReachAddressResolver.primaryPrivateLANIPv4(among: interfaces, primaryInterfaceName: "en2") == "10.0.0.7", "a public address on the default route is never the one given to a phone")
-        let publicOnly = [NetworkInterfaceAddress(name: "en0", address: "203.0.113.9")]
-        #expect(ReachAddressResolver.displayHostAvailability(for: .myLocalNetwork, interfaces: publicOnly) == .unavailable(reason: "Waiting for a network connection."))
-    }
-
-    @Test("My local network with no LAN address falls back to loopback for display")
-    func myLocalNetworkWithNoLANAddressFallsBack() {
-        let tailnetOnly = [NetworkInterfaceAddress(name: "utun4", address: "100.101.102.5")]
-        #expect(ReachAddressResolver.primaryLANIPv4(among: tailnetOnly) == nil)
-        #expect(ReachAddressResolver.displayHost(for: .myLocalNetwork, interfaces: tailnetOnly) == "127.0.0.1")
-    }
-
     @Test(
         "the Tailscale range boundary is exact: 100.63 and 100.128 are outside it, 100.64 and 100.127 are inside it",
         arguments: [
@@ -86,72 +46,21 @@ struct ReachAddressResolverTests {
         #expect(ReachAddressResolver.isTailscaleAddress(testCase.address) == testCase.wantInRange)
     }
 
-    @Test("a VM bridge interface listed first is never chosen as the local network address")
-    func vmBridgeInterfaceExcluded() {
-        let interfaces = [
-            NetworkInterfaceAddress(name: "bridge100", address: "192.168.64.1"),
-            NetworkInterfaceAddress(name: "vmnet1", address: "192.168.72.1"),
-            NetworkInterfaceAddress(name: "en0", address: "192.168.1.50"),
-        ]
-        #expect(ReachAddressResolver.primaryLANIPv4(among: interfaces) == "192.168.1.50")
-    }
-
-    @Test("a VPN tunnel interface (utun, ipsec, ppp) listed first is never chosen as the local network address")
-    func vpnTunnelInterfacesExcluded() {
-        let interfaces = [
-            NetworkInterfaceAddress(name: "ppp0", address: "10.8.0.5"),
-            NetworkInterfaceAddress(name: "ipsec0", address: "10.9.0.5"),
-            NetworkInterfaceAddress(name: "en0", address: "192.168.1.50"),
-        ]
-        #expect(ReachAddressResolver.primaryLANIPv4(among: interfaces) == "192.168.1.50")
-    }
-
-    @Test("a self-assigned 169.254.x.x link-local address is never chosen, even with nothing else present")
-    func linkLocalAddressExcluded() {
-        let interfaces = [NetworkInterfaceAddress(name: "en0", address: "169.254.10.4")]
-        #expect(ReachAddressResolver.primaryLANIPv4(among: interfaces) == nil)
-        #expect(ReachAddressResolver.displayHostAvailability(for: .myLocalNetwork, interfaces: interfaces) == .unavailable(reason: "Waiting for a network connection."))
-    }
-
-    @Test("the interface actually carrying the default route wins over an earlier-listed candidate")
-    func defaultRouteInterfaceWins() {
-        let interfaces = [
-            NetworkInterfaceAddress(name: "en1", address: "192.168.2.9"),
-            NetworkInterfaceAddress(name: "en0", address: "192.168.1.50"),
-        ]
-        #expect(ReachAddressResolver.primaryLANIPv4(among: interfaces, primaryInterfaceName: "en0") == "192.168.1.50")
-    }
-
-    @Test("with no known default-route interface, the first physical LAN candidate is used")
-    func fallsBackToFirstCandidateWithNoPrimaryInterfaceName() {
-        let interfaces = [
-            NetworkInterfaceAddress(name: "en1", address: "192.168.2.9"),
-            NetworkInterfaceAddress(name: "en0", address: "192.168.1.50"),
-        ]
-        #expect(ReachAddressResolver.primaryLANIPv4(among: interfaces, primaryInterfaceName: nil) == "192.168.2.9")
-    }
-
     @Test("displayHostAvailability reports the real address when this Mac has one, for every reach")
     func displayHostAvailabilityReportsRealAddresses() {
         #expect(ReachAddressResolver.displayHostAvailability(for: .thisMacOnly, interfaces: []) == .available("127.0.0.1"))
         #expect(ReachAddressResolver.displayHostAvailability(for: .myTailnet, interfaces: Self.mixed) == .available("100.101.102.5"))
-        #expect(ReachAddressResolver.displayHostAvailability(for: .myLocalNetwork, interfaces: Self.mixed) == .available("192.168.1.42"))
     }
 
     @Test("displayHostAvailability reports a plain reason, never the loopback fallback, when this Mac has no address for the chosen reach")
     func displayHostAvailabilityReportsNoAddressPlainly() {
         let noTailnet = [NetworkInterfaceAddress(name: "en0", address: "192.168.1.42")]
         #expect(ReachAddressResolver.displayHostAvailability(for: .myTailnet, interfaces: noTailnet) == .unavailable(reason: "Waiting for Tailscale to connect."))
-
-        let tailnetOnly = [NetworkInterfaceAddress(name: "utun4", address: "100.101.102.5")]
-        #expect(ReachAddressResolver.displayHostAvailability(for: .myLocalNetwork, interfaces: tailnetOnly) == .unavailable(reason: "Waiting for a network connection."))
     }
 }
 
 @Suite("ConnectPaneAddressState")
 struct ConnectPaneAddressStateTests {
-    static let localListen = "127.0.0.1|relay-mac.local|192.168.1.42"
-
     static let cases: [(name: String, reach: NetworkReach, boundHost: String?, impliedBindHost: String, availability: ReachAddressAvailability, want: ConnectPaneAddressState)] = [
         ("This Mac only, engine running", .thisMacOnly, "127.0.0.1", "127.0.0.1", .available("127.0.0.1"), .thisMacOnly),
         ("This Mac only, engine stopped", .thisMacOnly, nil, "127.0.0.1", .available("127.0.0.1"), .thisMacOnly),
@@ -166,12 +75,6 @@ struct ConnectPaneAddressStateTests {
         ("consequence: My tailnet bound to the loopback fallback is never offered as ready", .myTailnet, "127.0.0.1", "127.0.0.1", .available("100.101.102.5"), .unavailable(reason: "Waiting for Tailscale to connect.")),
         ("My tailnet, nothing running", .myTailnet, nil, "100.101.102.5", .available("100.101.102.5"), .unavailable(reason: "The engine isn't running right now.")),
         ("My tailnet just chosen with Tailscale connected: engine still bound to its old address", .myTailnet, "0.0.0.0", "100.101.102.5", .available("100.101.102.5"), .unavailable(reason: "The network setting is being applied.")),
-
-        ("consequence: My local network never shows the loopback listen host, only the https address", .myLocalNetwork, localListen, localListen, .available("192.168.1.42"), .ready(address: "https://192.168.1.42:1337")),
-        ("My local network, bound but no LAN address right now", .myLocalNetwork, localListen, localListen, .unavailable(reason: "Waiting for a network connection."), .unavailable(reason: "Waiting for a network connection.")),
-        ("My local network, nothing running", .myLocalNetwork, nil, localListen, .available("192.168.1.42"), .unavailable(reason: "The engine isn't running right now.")),
-        ("My local network just chosen: engine still bound to its old This Mac only address", .myLocalNetwork, "127.0.0.1", localListen, .available("192.168.1.42"), .unavailable(reason: "The network setting is being applied.")),
-        ("My local network, an address joined since the engine started", .myLocalNetwork, localListen, "127.0.0.1|relay-mac.local|10.0.0.7,192.168.1.42", .available("192.168.1.42"), .unavailable(reason: "The network setting is being applied.")),
     ]
 
     @Test("decide maps every reach, bound host, implied host and availability combination to the pane's own state", arguments: cases)
@@ -180,64 +83,32 @@ struct ConnectPaneAddressStateTests {
         #expect(got == testCase.want)
     }
 
-    @Test("the local network address names this Mac's .local name when it has one, and always uses https")
-    func localNetworkAddressUsesTheName() {
-        let got = ConnectPaneAddressState.decide(
-            reach: .myLocalNetwork, boundHost: Self.localListen, impliedBindHost: Self.localListen, port: 1337,
-            displayHostAvailability: .available("192.168.1.42"), localHostName: "relay-mac.local"
-        )
-        #expect(got == .ready(address: "https://relay-mac.local:1337"))
-    }
-
-    @Test("until the certificate step is finished the local network route offers no address, and every other route is unaffected")
-    func certificateStepHoldsBackTheLocalRoute() {
-        let local = ConnectPaneAddressState.decide(
-            reach: .myLocalNetwork, boundHost: Self.localListen, impliedBindHost: Self.localListen, port: 1337,
-            displayHostAvailability: .available("192.168.1.42"), localHostName: "relay-mac.local", certificateStepFinished: false
-        )
-        #expect(local == .certificateStepNeeded)
-        let stopped = ConnectPaneAddressState.decide(
-            reach: .myLocalNetwork, boundHost: nil, impliedBindHost: Self.localListen, port: 1337,
-            displayHostAvailability: .available("192.168.1.42"), certificateStepFinished: false
-        )
-        #expect(stopped == .unavailable(reason: "The engine isn't running right now."), "a reason that is about the network is still said first")
-        let tailnet = ConnectPaneAddressState.decide(
-            reach: .myTailnet, boundHost: "100.101.102.5", impliedBindHost: "100.101.102.5", port: 1337,
-            displayHostAvailability: .available("100.101.102.5"), certificateStepFinished: false
-        )
-        #expect(tailnet == .ready(address: "http://100.101.102.5:1337"))
-    }
 }
 
 @Suite("PhoneReachability")
 struct PhoneReachabilityTests {
-    static let cases: [(name: String, reach: NetworkReach, chosen: Bool, https: TailscaleHTTPSState, tailnet: Bool, lan: Bool, reachable: Bool)] = [
-        ("Tailscale HTTPS serving", .thisMacOnly, true, .on(port: 443), false, false, true),
-        ("Tailscale HTTPS serving, reach left at another choice", .myLocalNetwork, true, .on(port: 443), false, false, true),
-        ("Tailscale HTTPS chosen but turned off, a network up", .myLocalNetwork, true, .off(port: 443), true, true, false),
-        ("Tailscale HTTPS chosen, Tailscale stopped, a network up", .myLocalNetwork, true, .unavailable, false, true, false),
-        ("Tailscale HTTPS chosen, settings unreadable", .myLocalNetwork, true, .unreadable, false, true, false),
-        ("Tailscale HTTPS chosen, not read yet", .myLocalNetwork, true, .unknown, false, true, false),
-        ("A handler serving, another way chosen: My local network with an address", .myLocalNetwork, false, .on(port: 443), false, true, true),
-        ("A handler serving, another way chosen: no address for My tailnet", .myTailnet, false, .on(port: 443), false, true, false),
-        ("A handler serving, This Mac only chosen", .thisMacOnly, false, .on(port: 443), false, false, false),
-        ("A handler serving, My tailnet chosen with an address", .myTailnet, false, .on(port: 443), true, false, true),
-        ("Tailscale stopped, My local network with an address", .myLocalNetwork, false, .unavailable, false, true, true),
-        ("This Mac only, everything available", .thisMacOnly, false, .off(port: 443), true, true, false),
-        ("My tailnet with a Tailscale address", .myTailnet, false, .off(port: 443), true, false, true),
-        ("My tailnet with no Tailscale address", .myTailnet, false, .off(port: 443), false, true, false),
-        ("My local network with an address", .myLocalNetwork, false, .off(port: 443), false, true, true),
-        ("My local network with no address", .myLocalNetwork, false, .off(port: 443), true, false, false),
+    static let cases: [(name: String, reach: NetworkReach, chosen: Bool, https: TailscaleHTTPSState, tailnet: Bool, reachable: Bool)] = [
+        ("Tailscale HTTPS serving", .thisMacOnly, true, .on(port: 443), false, true),
+        ("Tailscale HTTPS serving, reach left at another choice", .myTailnet, true, .on(port: 443), false, true),
+        ("Tailscale HTTPS chosen but turned off, a tailnet address available", .myTailnet, true, .off(port: 443), true, false),
+        ("Tailscale HTTPS chosen, Tailscale stopped", .myTailnet, true, .unavailable, false, false),
+        ("Tailscale HTTPS chosen, settings unreadable", .myTailnet, true, .unreadable, false, false),
+        ("Tailscale HTTPS chosen, not read yet", .myTailnet, true, .unknown, false, false),
+        ("A handler serving, another way chosen: no address for My tailnet", .myTailnet, false, .on(port: 443), false, false),
+        ("A handler serving, This Mac only chosen", .thisMacOnly, false, .on(port: 443), false, false),
+        ("A handler serving, My tailnet chosen with an address", .myTailnet, false, .on(port: 443), true, true),
+        ("This Mac only, everything available", .thisMacOnly, false, .off(port: 443), true, false),
+        ("My tailnet with a Tailscale address", .myTailnet, false, .off(port: 443), true, true),
+        ("My tailnet with no Tailscale address", .myTailnet, false, .off(port: 443), false, false),
     ]
 
-    @Test("a phone can be reached only through chosen and serving HTTPS, or a tailnet or local network choice with an address", arguments: cases)
-    func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, chosen: Bool, https: TailscaleHTTPSState, tailnet: Bool, lan: Bool, reachable: Bool)) {
+    @Test("a phone can be reached only through chosen and serving HTTPS, or a tailnet choice with an address", arguments: cases)
+    func decideMapsEveryCombination(_ testCase: (name: String, reach: NetworkReach, chosen: Bool, https: TailscaleHTTPSState, tailnet: Bool, reachable: Bool)) {
         let got = PhoneReachability.decide(
             reach: testCase.reach,
             httpsChosen: testCase.chosen,
             https: testCase.https,
-            tailnetAvailable: testCase.tailnet,
-            localNetworkAvailable: testCase.lan
+            tailnetAvailable: testCase.tailnet
         )
         #expect(got.isReachable == testCase.reachable, Comment(rawValue: testCase.name))
         if !testCase.reachable, case .blocked(let reason) = got {
@@ -248,7 +119,7 @@ struct PhoneReachabilityTests {
 
     @Test("a chosen Tailscale HTTPS that is turned off says followers can't reach this Mac and what to do")
     func chosenButOffSaysSo() {
-        let got = PhoneReachability.decide(reach: .myLocalNetwork, httpsChosen: true, https: .off(port: 443), tailnetAvailable: true, localNetworkAvailable: true)
+        let got = PhoneReachability.decide(reach: .myTailnet, httpsChosen: true, https: .off(port: 443), tailnetAvailable: true)
         #expect(got == .blocked(reason: "Tailscale HTTPS is off, so followers can't reach this Mac. Turn it on, or choose another way."))
     }
 }
@@ -267,7 +138,6 @@ struct ReachWayTests {
     @Test("a way that cannot work right now is shown with its reason, whatever Tailscale HTTPS is doing", arguments: allStates)
     func unavailableWaysCarryAReason(_ state: TailscaleHTTPSState) {
         #expect(ReachWay.thisMacOnly.pickability(https: state, tailnetAvailable: false) == .pickable)
-        #expect(ReachWay.myLocalNetwork.pickability(https: state, tailnetAvailable: false) == .pickable)
         #expect(ReachWay.myTailnet.pickability(https: state, tailnetAvailable: true) == .pickable)
         #expect(ReachWay.myTailnet.pickability(https: state, tailnetAvailable: false) == .unavailable(reason: "This Mac has no Tailscale address right now."))
         if case .on = state { return }
