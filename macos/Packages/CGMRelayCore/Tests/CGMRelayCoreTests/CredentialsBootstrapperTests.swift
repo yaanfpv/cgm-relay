@@ -175,3 +175,164 @@ struct CredentialsBootstrapperTests {
         #expect(store.snapshot()[.librelinkupEmail] == "person@example.invalid")
     }
 }
+
+@Suite("KeychainCredentialStore across two running copies")
+struct KeychainCredentialStoreSharedItemTests {
+    private func makeDirectory() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("kc-lock-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func store(_ backing: InMemoryCredentialBacking, lock: URL, timeout: TimeInterval = 5) -> KeychainCredentialStore {
+        KeychainCredentialStore(service: "test.\(UUID().uuidString)", backing: backing, lockURL: lock, lockTimeout: timeout)
+    }
+
+    /// holdLock takes the lock file the way another process would: its own
+    /// open file description, exclusive, until released.
+    private func holdLock(_ url: URL) throws -> Int32 {
+        let fd = open(url.path, O_RDWR | O_CREAT, 0o600)
+        try #require(fd >= 0)
+        try #require(flock(fd, LOCK_EX | LOCK_NB) == 0)
+        return fd
+    }
+
+    private func release(_ fd: Int32) {
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
+
+    fileprivate enum Mutation: String, CaseIterable, Sendable {
+        case removeRawKeys, setString, setStrings, removeAll
+
+        func apply(to store: KeychainCredentialStore) throws {
+            switch self {
+            case .removeRawKeys: try store.removeRawKeys(["authority_key"])
+            case .setString: try store.setString("a@example.com", for: .librelinkupEmail)
+            case .setStrings: try store.setStrings([.librelinkupEmail: "a@example.com", .librelinkupPassword: "pw-a"])
+            case .removeAll: try store.removeAll([.storeKey])
+            }
+        }
+
+        func expectedChange(in items: [String: String]) -> Bool {
+            switch self {
+            case .removeRawKeys: items["authority_key"] == nil
+            case .setString: items["librelinkup_email"] == "a@example.com"
+            case .setStrings: items["librelinkup_email"] == "a@example.com" && items["librelinkup_password"] == "pw-a"
+            case .removeAll: items["store_key"] == nil
+            }
+        }
+    }
+
+    @Test("a mutation by one copy never undoes another copy's earlier change, whatever the mutation", arguments: Mutation.allCases)
+    fileprivate func staleCacheCannotUndoAnotherCopy(mutation: Mutation) throws {
+        let dir = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let lock = dir.appendingPathComponent("credentials.lock")
+        let backing = InMemoryCredentialBacking(items: ["store_key": "sk", "authority_key": "old"])
+        let a = store(backing, lock: lock)
+        let b = store(backing, lock: lock)
+
+        #expect(try a.string(for: .token) == nil)  // A now holds the item in its cache
+        try b.setString("token-b", for: .token)
+        try mutation.apply(to: a)
+
+        let items = try #require(backing.items)
+        #expect(items["token"] == "token-b")
+        #expect(mutation.expectedChange(in: items))
+        #expect(try a.string(for: .token) == "token-b")
+    }
+
+    @Test("two copies bootstrapping one after the other agree on one token and one store key, the first writer's")
+    func firstRunRaceKeepsFirstWriter() throws {
+        let dir = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let lock = dir.appendingPathComponent("credentials.lock")
+        let backing = InMemoryCredentialBacking()
+        let a = store(backing, lock: lock)
+        let b = store(backing, lock: lock)
+        #expect(try a.string(for: .token) == nil)  // A read the empty item before B ran
+
+        try CredentialsBootstrapper(store: b, randomBytes: ConstantByteGenerator(byte: 2)).ensureBootstrapped()
+        try CredentialsBootstrapper(store: a, randomBytes: ConstantByteGenerator(byte: 1)).ensureBootstrapped()
+
+        let bytes = Data(repeating: 2, count: CredentialsBootstrapper.keySizeBytes)
+        let token = bytes.base64URLEncodedStringWithoutPadding()
+        let storeKey = bytes.base64EncodedString()
+        #expect(try a.string(for: .token) == token)
+        #expect(try b.string(for: .token) == token)
+        #expect(try a.string(for: .storeKey) == storeKey)
+        #expect(try b.string(for: .storeKey) == storeKey)
+        #expect(backing.items == ["token": token, "store_key": storeKey])
+    }
+
+    @Test("addMissing writes only absent keys and returns what is stored for every key given")
+    func addMissingKeepsExisting() throws {
+        let dir = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let backing = InMemoryCredentialBacking(items: ["token": "existing"])
+        let kc = store(backing, lock: dir.appendingPathComponent("credentials.lock"))
+        let fake = FakeCredentialStore(values: [.token: "existing"])
+
+        for target in [kc as any CredentialStore, fake as any CredentialStore] {
+            let stored = try target.addMissing([.token: "new-token", .storeKey: "new-key"])
+            #expect(stored == [.token: "existing", .storeKey: "new-key"])
+            #expect(try target.string(for: .token) == "existing")
+            #expect(try target.string(for: .storeKey) == "new-key")
+        }
+        #expect(backing.items == ["token": "existing", "store_key": "new-key"])
+    }
+
+    @Test("a mutation times out with lockTimeout while the lock is held, writes nothing, and succeeds once it is released")
+    func lockTimeout() throws {
+        let dir = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let lock = dir.appendingPathComponent("credentials.lock")
+        let backing = InMemoryCredentialBacking(items: ["store_key": "sk"])
+        let kc = store(backing, lock: lock, timeout: 0.2)
+        let fd = try holdLock(lock)
+
+        #expect(throws: KeychainError.lockTimeout) { try kc.setString("t", for: .token) }
+        #expect(throws: KeychainError.lockTimeout) { try kc.removeRawKeys(["store_key"]) }
+        #expect(throws: KeychainError.lockTimeout) { _ = try kc.addMissing([.token: "t"]) }
+        #expect(backing.items == ["store_key": "sk"])
+
+        release(fd)
+        try kc.setString("t", for: .token)
+        #expect(backing.items == ["store_key": "sk", "token": "t"])
+    }
+
+    @Test("a lock held by another process is released when that process dies")
+    func lockReleasedOnProcessDeath() throws {
+        let dir = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let lock = dir.appendingPathComponent("credentials.lock")
+        let backing = InMemoryCredentialBacking(items: [:])
+        let kc = store(backing, lock: lock, timeout: 0.2)
+
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = [
+            "-I", "-c",
+            "import fcntl,os,sys,time\nf=open(sys.argv[1],'a')\nfcntl.flock(f,fcntl.LOCK_EX)\nsys.stdout.write('locked\\n')\nsys.stdout.flush()\ntime.sleep(3600)",
+            lock.path,
+        ]
+        let out = Pipe()
+        child.standardOutput = out
+        try child.run()
+        defer { if child.isRunning { child.terminate(); child.waitUntilExit() } }
+
+        // Block on the child's own report that it holds the lock.
+        let line = out.fileHandleForReading.availableData
+        try #require(String(decoding: line, as: UTF8.self).hasPrefix("locked"))
+
+        #expect(throws: KeychainError.lockTimeout) { try kc.setString("t", for: .token) }
+        #expect(backing.items == [:])
+
+        child.terminate()
+        child.waitUntilExit()
+
+        try kc.setString("t", for: .token)
+        #expect(backing.items == ["token": "t"])
+    }
+}

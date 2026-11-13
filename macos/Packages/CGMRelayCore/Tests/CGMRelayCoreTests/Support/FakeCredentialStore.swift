@@ -75,6 +75,17 @@ final class FakeCredentialStore: CredentialStore, @unchecked Sendable {
         }
     }
 
+    func addMissing(_ newValues: [CredentialKey: String]) throws -> [CredentialKey: String] {
+        lock.withLock {
+            var stored: [CredentialKey: String] = [:]
+            for (key, value) in newValues {
+                if values[key.rawValue] == nil { values[key.rawValue] = value }
+                stored[key] = values[key.rawValue]
+            }
+            return stored
+        }
+    }
+
     func snapshot() -> [CredentialKey: String] {
         lock.withLock {
             var known: [CredentialKey: String] = [:]
