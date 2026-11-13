@@ -248,13 +248,15 @@ extension AppSettings: Codable {
         // A stored reach this version does not offer becomes this Mac only
         // rather than failing the whole decode. The retired local network
         // choice is matched by its stored name, so it is still recognised
-        // after its case is gone.
+        // after its case is gone; it counts as a move only when it was the
+        // way in use, since Tailscale HTTPS left the earlier reach saved
+        // beneath it.
         let storedReach = ((try? container.decodeIfPresent(String.self, forKey: .reach)) ?? nil)
         let storedMoved = try container.decodeIfPresent(Bool.self, forKey: .movedFromLocalRoute) ?? fallback.movedFromLocalRoute
         if let storedReach {
             if storedReach == "myLocalNetwork" {
                 reach = .thisMacOnly
-                movedFromLocalRoute = true
+                movedFromLocalRoute = !tailscaleHTTPSEnabled
             } else {
                 reach = NetworkReach(rawValue: storedReach) ?? .thisMacOnly
                 movedFromLocalRoute = storedMoved

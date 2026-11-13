@@ -281,6 +281,20 @@ struct AppSettingsTests {
         expectSavedFieldsKept(loaded)
     }
 
+    @Test("a legacy local reach under Tailscale HTTPS is not a move: the person was on Tailscale")
+    func legacyLocalReachUnderTailscaleHTTPSIsNotAMove() throws {
+        let json = legacyJSON(reach: "myLocalNetwork")
+            .replacingOccurrences(of: #""tailscaleHTTPSEnabled": false"#, with: #""tailscaleHTTPSEnabled": true"#)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+        #expect(decoded.tailscaleHTTPSEnabled == true)
+        #expect(decoded.chosenWay == .tailscaleHTTPS)
+        #expect(decoded.reach == .thisMacOnly)
+        #expect(decoded.movedFromLocalRoute == false)
+        #expect(decoded.port == 4242)
+        #expect(decoded.retentionDays == 45)
+        #expect(decoded.setupFinished == true)
+    }
+
     @Test("any other unknown reach becomes this-Mac-only without the moved note, and keeps every other field")
     func unknownReachFallsBackQuietly() throws {
         let json = legacyJSON(reach: "somethingNew")
