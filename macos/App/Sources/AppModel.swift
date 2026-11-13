@@ -948,7 +948,7 @@ final class AppModel: ObservableObject {
     /// candidate is taken. A check reserves nothing, so an engine that still
     /// cannot listen is reported by its exit code.
     private func choosePortBeforeStart(interfaces: [NetworkInterfaceAddress]) -> EngineSupervisor.FailureReason? {
-        let bindHost = ReachAddressResolver.portCheckHost(for: settings.effectiveReach, interfaces: interfaces)
+        let bindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         let decision = PortAvailability.startPort(
             current: settings.port,
             default: AppSettings.defaultPort,
