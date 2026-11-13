@@ -4,7 +4,8 @@ import Foundation
 /// other copies with the same bundle identifier may already be running.
 public enum SingleInstance {
     public enum Decision: Equatable, Sendable {
-        /// proceed: no other copy is running, so this one carries on.
+        /// proceed: no copy with a lower process id is in the snapshot of
+        /// running copies this one was given, so this one carries on.
         case proceed
         /// yield: a copy with a lower process id is running; this one hands
         /// focus to it and quits before touching anything.

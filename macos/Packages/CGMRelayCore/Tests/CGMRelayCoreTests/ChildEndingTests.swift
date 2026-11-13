@@ -1,8 +1,8 @@
 import Testing
 import Foundation
 
-/// These checks are the contract of the test-target routine every test uses to
-/// end a child it started (Support/TestChild.swift): it ends the child by
+/// These checks are the contract of TestChild (Support/TestChild.swift), the
+/// test-target routine the credential lock test uses to end its child: it ends the child by
 /// closing its input, waits on the child's exit event, and says "ended" only
 /// when that event happened. They run real children, send no signal, and leave
 /// no child running: the one child that ignores end of input is released
