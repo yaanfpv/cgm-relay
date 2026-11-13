@@ -6,15 +6,18 @@ public enum SingleInstance {
     public enum Decision: Equatable, Sendable {
         /// proceed: no other copy is running, so this one carries on.
         case proceed
-        /// yield: another copy is running; this one hands focus to the
-        /// copy with this process id and quits before touching anything.
+        /// yield: a copy with a lower process id is running; this one hands
+        /// focus to it and quits before touching anything.
         case yield(to: Int32)
     }
 
-    /// decide returns .yield for the lowest process id in runningPIDs
-    /// other than ownPID, or .proceed when there is none.
+    /// decide lets the copy with the lowest process id among all copies,
+    /// this one included, proceed: it returns .proceed when ownPID is lower
+    /// than every other pid in runningPIDs (or there is none), else
+    /// .yield to the lowest other pid. Copies launched together each see
+    /// the same set, so exactly one of them proceeds.
     public static func decide(ownPID: Int32, runningPIDs: [Int32]) -> Decision {
-        guard let other = runningPIDs.filter({ $0 != ownPID }).min() else { return .proceed }
-        return .yield(to: other)
+        guard let lowest = runningPIDs.filter({ $0 != ownPID }).min(), lowest < ownPID else { return .proceed }
+        return .yield(to: lowest)
     }
 }
