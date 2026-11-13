@@ -41,6 +41,26 @@ struct SyntheticAccountSeederTests {
         }
     }
 
+    @Test("only a release build gets the real sleep authority; every run on throwaway data, with or without an override, gets the inert one")
+    func sleepAuthorityCases() {
+        let cases: [(name: String, isDebugBuild: Bool, override: String?, real: Bool)] = [
+            ("plain debug", true, nil, false),
+            ("debug with a throwaway override", true, "com.yaanfpv.cgmrelay.dev.test", false),
+            ("release", false, nil, true),
+            ("release given an override", false, "com.yaanfpv.cgmrelay.dev.test", true),
+        ]
+        for c in cases {
+            let decision = SyntheticAccountSeeder.resolveKeychainService(isDebugBuild: c.isDebugBuild, override: c.override)
+            let authority = SleepAuthorityLocator.resolve(service: decision)
+            let rules = ObjectIdentifier(type(of: authority.rules as Any))
+            let setting = ObjectIdentifier(type(of: authority.setting as Any))
+            let assertion = ObjectIdentifier(type(of: authority.assertion as Any))
+            #expect(rules == ObjectIdentifier(c.real ? SleepRuleAdministrator.self : UnavailableSleepRules.self), "\(c.name): rules")
+            #expect(setting == ObjectIdentifier(c.real ? PrivilegedSleepSettingWriter.self : IgnoredSleepSetting.self), "\(c.name): setting")
+            #expect(assertion == ObjectIdentifier(c.real ? SystemIdleSleepAssertion.self : IgnoredIdleSleepAssertion.self), "\(c.name): assertion")
+        }
+    }
+
     @Test("does nothing when seeding was not requested")
     func doesNothingWhenNotRequested() throws {
         let store = FakeCredentialStore()

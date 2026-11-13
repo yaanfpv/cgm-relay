@@ -225,8 +225,9 @@ final class AppModel: ObservableObject {
         loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
         portBinder: any PortBinding = SystemPortBinder(),
         powerSource: any PowerSourceReading = SystemPowerSource(),
-        sleepRules: any SleepRuleManaging = SleepRuleAdministrator(),
-        sleepSetting: any SleepSettingWriting = PrivilegedSleepSettingWriter()
+        sleepRules: any SleepRuleManaging,
+        sleepSetting: any SleepSettingWriting,
+        idleSleepAssertion: any IdleSleepAsserting
     ) {
         self.powerSource = powerSource
         self.sleepRules = sleepRules
@@ -253,7 +254,7 @@ final class AppModel: ObservableObject {
         stayAwake = StayAwakeController(
             choice: loaded.stayAwake,
             power: powerSource,
-            assertion: SystemIdleSleepAssertion(),
+            assertion: idleSleepAssertion,
             sleepSetting: sleepSetting
         )
         portIsPersonChosen = loaded.setupFinished || loaded.port != AppSettings.defaultPort

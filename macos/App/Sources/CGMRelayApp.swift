@@ -30,7 +30,9 @@ struct CGMRelayApp: App {
     init() {
         CGMRelayApp.yieldToRunningCopy()
         let explicitKeychainServiceOverride = CGMRelayApp.explicitKeychainServiceOverride()
-        let keychainServiceOverride = CGMRelayApp.validatedThrowawayKeychainService(explicitOverride: explicitKeychainServiceOverride)
+        let keychainServiceDecision = CGMRelayApp.keychainServiceDecision(explicitOverride: explicitKeychainServiceOverride)
+        let keychainServiceOverride = CGMRelayApp.validatedThrowawayKeychainService(decision: keychainServiceDecision)
+        let sleepAuthority = SleepAuthorityLocator.resolve(service: keychainServiceDecision)
         let store = CGMRelayApp.credentialStore(keychainServiceOverride: keychainServiceOverride)
         CGMRelayApp.seedSyntheticAccountIfRequested(into: store, explicitKeychainServiceOverride: explicitKeychainServiceOverride)
         let model = AppModel(
@@ -45,8 +47,9 @@ struct CGMRelayApp: App {
             ),
             loginItemManager: CGMRelayApp.loginItemManager(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
             powerSource: CGMRelayApp.powerSource(),
-            sleepRules: CGMRelayApp.sleepRules(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
-            sleepSetting: CGMRelayApp.sleepSetting(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
+            sleepRules: sleepAuthority.rules,
+            sleepSetting: sleepAuthority.setting,
+            idleSleepAssertion: sleepAuthority.assertion
         )
         let updates = UpdatesModel(feedURLOverride: CGMRelayApp.updateFeedURL(explicitKeychainServiceOverride: explicitKeychainServiceOverride))
         _model = StateObject(wrappedValue: model)
@@ -138,21 +141,30 @@ struct CGMRelayApp: App {
         #endif
     }
 
-    /// validatedThrowawayKeychainService turns explicitOverride into the
+    /// keychainServiceDecision is SyntheticAccountSeeder.resolveKeychainService
+    /// for this build, the one decision everything downstream follows. A
+    /// release build never reads the override at all.
+    private static func keychainServiceDecision(explicitOverride: String?) -> SyntheticAccountSeeder.KeychainServiceDecision {
+        #if DEBUG
+        SyntheticAccountSeeder.resolveKeychainService(isDebugBuild: true, override: explicitOverride)
+        #else
+        .useRealService
+        #endif
+    }
+
+    /// validatedThrowawayKeychainService turns the decision into the
     /// one Keychain service every downstream call (credentialStore,
-    /// databasePath) is backed by. The actual decision is
-    /// SyntheticAccountSeeder.resolveKeychainService: a debug build always
+    /// databasePath) is backed by: a debug build always
     /// ends up on a throwaway service, whether that is the override it was
     /// given or, when none was given at all, a fixed development default,
     /// so a plain debug launch with no argument still never reaches the
     /// real Keychain item or database. An override that fails
     /// isThrowawayService (empty, the app's own real service name, or
     /// anything not safe to use as a single folder name) fails loudly
-    /// instead of silently falling back to anything. Absent entirely in
-    /// Release, where the result is always the real service.
-    private static func validatedThrowawayKeychainService(explicitOverride: String?) -> String? {
-        #if DEBUG
-        switch SyntheticAccountSeeder.resolveKeychainService(isDebugBuild: true, override: explicitOverride) {
+    /// instead of silently falling back to anything. In Release the
+    /// decision is always the real service.
+    private static func validatedThrowawayKeychainService(decision: SyntheticAccountSeeder.KeychainServiceDecision) -> String? {
+        switch decision {
         case .useRealService:
             return nil
         case .useThrowawayService(let service):
@@ -160,9 +172,6 @@ struct CGMRelayApp: App {
         case .refused(let service):
             fatalError("cgm-relay: -CGMRelayKeychainService \(service) is not a throwaway service (it is empty, names the app's own real Keychain service, or is not a single plain name safe to use as a folder name -- \".\", \"..\", and anything containing \"/\" are refused); refusing to start rather than risk touching the real Keychain item or database")
         }
-        #else
-        return nil
-        #endif
     }
 
     /// yieldToRunningCopy runs before anything reads or writes credentials:
@@ -309,25 +318,6 @@ struct CGMRelayApp: App {
         return SystemPowerSource()
     }
 
-    /// sleepRules installs the sleep permission for real, except in a
-    /// development run on throwaway data, which never touches the Mac's
-    /// sudoers or boot jobs.
-    private static func sleepRules(explicitKeychainServiceOverride: String?) -> any SleepRuleManaging {
-        #if DEBUG
-        if explicitKeychainServiceOverride != nil { return UnavailableSleepRules() }
-        #endif
-        return SleepRuleAdministrator()
-    }
-
-    /// sleepSetting changes the Mac's sleep setting for real, except in a
-    /// development run on throwaway data, which never runs sudo.
-    private static func sleepSetting(explicitKeychainServiceOverride: String?) -> any SleepSettingWriting {
-        #if DEBUG
-        if explicitKeychainServiceOverride != nil { return IgnoredSleepSetting() }
-        #endif
-        return PrivilegedSleepSettingWriter()
-    }
-
     /// seedSyntheticAccountIfRequested writes CGM Relay's fixed
     /// development account into store when the app is launched with
     /// `-CGMRelaySeedSyntheticAccount YES`, so a development run can
@@ -430,18 +420,5 @@ private struct FixedPowerSource: PowerSourceReading {
     private let value: PowerSnapshot
     init(_ value: PowerSnapshot) { self.value = value }
     func snapshot() -> PowerSnapshot { value }
-}
-
-/// IgnoredSleepSetting accepts every change and makes none.
-private struct IgnoredSleepSetting: SleepSettingWriting {
-    func setDisableSleep(_ on: Bool) throws {}
-}
-
-/// UnavailableSleepRules is the sleep permission in a development run on
-/// throwaway data: nothing is installed, and asking to install fails.
-private struct UnavailableSleepRules: SleepRuleManaging {
-    func isInstalled() async -> Bool { false }
-    func install() async -> SleepRuleOutcome { .failed }
-    func remove() async -> SleepRuleOutcome { .done }
 }
 #endif

@@ -153,14 +153,79 @@ struct StayAwakeControllerTests {
         #expect(rig.log.drain().contains("setDisableSleep(false)"))
     }
 
-    @Test("a failed sleep write is retried on the next transition")
+    @Test("a failed sleep write is retried when the relay changes again, not on a power notification that changed nothing")
     func failedWriteRetries() {
         let rig = Rig(choice: .on, power: laptopOnAC)
         rig.sleep.failNextWrite = true
         rig.controller.relayStarted()
-        _ = rig.log.drain()
+        #expect(rig.sleep.attempts == 1)
         rig.controller.powerChanged(laptopOnAC)
-        #expect(rig.log.drain().contains("setDisableSleep(true)"))
+        rig.controller.powerChanged(laptopOnAC)
+        #expect(rig.sleep.attempts == 1, "a battery level step does not run the command again")
+        rig.controller.relayStarted()
+        #expect(rig.sleep.attempts == 2)
+        #expect(rig.sleep.setting)
+    }
+
+    @Test("a write that keeps failing runs again only when the Mac really changes power source")
+    func persistentFailureDoesNotLoop() {
+        let rig = Rig(choice: .on, power: laptopOnAC)
+        rig.sleep.failEveryWrite = true
+        rig.controller.relayStarted()
+        for _ in 0..<5 { rig.controller.powerChanged(laptopOnAC) }
+        #expect(rig.sleep.attempts == 1)
+        rig.controller.powerChanged(laptopOnBattery)
+        #expect(rig.sleep.attempts == 2, "pulling the charger is a real change")
+        for _ in 0..<5 { rig.controller.powerChanged(laptopOnBattery) }
+        #expect(rig.sleep.attempts == 2)
+    }
+
+    /// A laptop on power whose launch reset worked, then an enable that took
+    /// effect and timed out: the setting reads on, but the app was told the
+    /// write failed.
+    private func rigWithEnableThatTookEffectThenFailed() -> Rig {
+        let rig = Rig(choice: .on, power: laptopOnAC)
+        rig.controller.launched()
+        rig.sleep.failNextWriteAfterEffect = true
+        rig.controller.relayStarted()
+        #expect(rig.sleep.setting, "the enable took effect before it reported failure")
+        return rig
+    }
+
+    @Test("an enable that took effect before it failed is reset when the relay stops")
+    func unknownEnableThenRelayStopped() {
+        let rig = rigWithEnableThatTookEffectThenFailed()
+        rig.controller.relayStopped()
+        #expect(!rig.sleep.setting)
+    }
+
+    @Test("an enable that took effect before it failed is reset when the Mac goes onto battery")
+    func unknownEnableThenBattery() {
+        let rig = rigWithEnableThatTookEffectThenFailed()
+        rig.power.current = laptopOnBattery
+        rig.controller.powerChanged(laptopOnBattery)
+        #expect(!rig.sleep.setting)
+    }
+
+    @Test("an enable that took effect before it failed is reset when the choice is turned off")
+    func unknownEnableThenChoiceOff() {
+        let rig = rigWithEnableThatTookEffectThenFailed()
+        rig.controller.choiceChanged(.off)
+        #expect(!rig.sleep.setting)
+    }
+
+    @Test("a choice turned off after such an enable, whose own reset also failed, is cleared on quit", arguments: [false, true])
+    func unknownEnableThenChoiceOffThenQuit(inBackground: Bool) async {
+        let rig = rigWithEnableThatTookEffectThenFailed()
+        rig.sleep.failNextWrite = true
+        rig.controller.choiceChanged(.off)
+        #expect(rig.sleep.setting, "the reset did not happen")
+        if inBackground {
+            await rig.controller.willQuitInBackground()
+        } else {
+            rig.controller.willQuit()
+        }
+        #expect(!rig.sleep.setting)
     }
 
     @Test("a failed write does not block quit from clearing the setting")
