@@ -220,4 +220,183 @@ struct AppSettingsTests {
         let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000}"#.utf8))
         #expect(older.safetyNoticeAcceptance == nil)
     }
+
+    // MARK: - settings that outlive a removed choice
+
+    /// A settings value shaped like the one 1.0.2 wrote, with the given
+    /// reach and no setupVersion, movedFromLocalRoute or stayAwake key.
+    private func legacyJSON(reach: String) -> String {
+        """
+        {
+          "port": 4242,
+          "reach": "\(reach)",
+          "retentionDays": 45,
+          "units": "mmolL",
+          "noReadingAlertEnabled": true,
+          "noReadingAlertMinutes": 45,
+          "signInFailingAlertEnabled": true,
+          "tailscaleHTTPSEnabled": false,
+          "setupFinished": true,
+          "showReadingInMenuBar": false,
+          "connectFollowerApp": "xDrip4iOS",
+          "localCertificateStepFinished": true
+        }
+        """
+    }
+
+    private func expectSavedFieldsKept(_ s: AppSettings) {
+        #expect(s.port == 4242)
+        #expect(s.retentionDays == 45)
+        #expect(s.units == .mmolL)
+        #expect(s.noReadingAlertEnabled == true)
+        #expect(s.noReadingAlertMinutes == 45)
+        #expect(s.signInFailingAlertEnabled == true)
+        #expect(s.setupFinished == true)
+        #expect(s.showReadingInMenuBar == false)
+        #expect(s.localCertificateStepFinished == true)
+    }
+
+    /// load() on a throwaway suite holding the given settings JSON.
+    private func loadFromThrowawaySuite(_ json: String) -> AppSettings {
+        let suite = "cgmrelay.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(Data(json.utf8), forKey: "com.yaanfpv.cgmrelay.settings")
+        return UserDefaultsSettingsStore(suiteName: suite).load()
+    }
+
+    @Test("a stored reach of the removed local-network choice becomes this-Mac-only, notes the move, and keeps every other field")
+    func legacyLocalReachIsMovedNotReset() throws {
+        let json = legacyJSON(reach: "myLocalNetwork")
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+        #expect(decoded.reach == .thisMacOnly)
+        #expect(decoded.movedFromLocalRoute == true)
+        expectSavedFieldsKept(decoded)
+
+        let loaded = loadFromThrowawaySuite(json)
+        #expect(loaded != AppSettings.default, "load() must not fall back to the defaults")
+        #expect(loaded.reach == .thisMacOnly)
+        #expect(loaded.movedFromLocalRoute == true)
+        expectSavedFieldsKept(loaded)
+    }
+
+    @Test("any other unknown reach becomes this-Mac-only without the moved note, and keeps every other field")
+    func unknownReachFallsBackQuietly() throws {
+        let json = legacyJSON(reach: "somethingNew")
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+        #expect(decoded.reach == .thisMacOnly)
+        #expect(decoded.movedFromLocalRoute == false)
+        expectSavedFieldsKept(decoded)
+
+        let loaded = loadFromThrowawaySuite(json)
+        #expect(loaded != AppSettings.default, "load() must not fall back to the defaults")
+        #expect(loaded.reach == .thisMacOnly)
+        #expect(loaded.movedFromLocalRoute == false)
+        expectSavedFieldsKept(loaded)
+    }
+
+    @Test("a known reach is still honoured as stored")
+    func knownReachStillHonoured() throws {
+        for (raw, expected) in [("thisMacOnly", NetworkReach.thisMacOnly), ("myTailnet", .myTailnet)] {
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(legacyJSON(reach: raw).utf8))
+            #expect(decoded.reach == expected)
+            #expect(decoded.movedFromLocalRoute == false)
+        }
+    }
+
+    @Test("setupVersion reads 0 for a fresh install, 1 for a 1.0.x install, and a stored value as stored")
+    func setupVersionDecoding() throws {
+        #expect(AppSettings.currentSetupVersion == 2)
+        let fresh = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "setupFinished": false}"#.utf8))
+        #expect(fresh.setupVersion == 0)
+        let noKeys = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(noKeys.setupVersion == 0)
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "setupFinished": true}"#.utf8))
+        #expect(legacy.setupVersion == 1)
+        #expect(AppSettings.default.setupVersion == 0)
+        for stored in [0, 1, 2, 7] {
+            let json = #"{"setupFinished": true, "setupVersion": \#(stored)}"#
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+            #expect(decoded.setupVersion == stored)
+        }
+        let storedWhileUnfinished = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"setupFinished": false, "setupVersion": 2}"#.utf8))
+        #expect(storedWhileUnfinished.setupVersion == 2)
+    }
+
+    @Test("finishingSetup marks setup finished at the current version and changes nothing else")
+    func finishingSetupChangesOnlyTwoFields() {
+        var base = AppSettings.default
+        base.port = 4242
+        base.retentionDays = 45
+        base.units = .mmolL
+        base.noReadingAlertEnabled = true
+        base.stayAwake = .on
+        base.movedFromLocalRoute = true
+        let finished = base.finishingSetup()
+        #expect(finished.setupFinished == true)
+        #expect(finished.setupVersion == AppSettings.currentSetupVersion)
+
+        var expected = base
+        expected.setupFinished = true
+        expected.setupVersion = AppSettings.currentSetupVersion
+        #expect(finished == expected)
+
+        var legacy = AppSettings.default
+        legacy.setupFinished = true
+        legacy.setupVersion = 1
+        #expect(legacy.finishingSetup().setupVersion == AppSettings.currentSetupVersion)
+    }
+
+    @Test("setupVersion survives an encode and decode round trip")
+    func setupVersionRoundTrip() throws {
+        for version in [0, 1, 2] {
+            var settings = AppSettings.default
+            settings.setupFinished = version > 0
+            settings.setupVersion = version
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.setupVersion == version)
+        }
+        let finished = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(AppSettings.default.finishingSetup()))
+        #expect(finished.setupVersion == AppSettings.currentSetupVersion)
+    }
+
+    @Test("stayAwake is nil until asked, decodes on and off, and an unknown value reads as nil without failing the decode")
+    func stayAwakeDecoding() throws {
+        #expect(AppSettings.default.stayAwake == nil)
+        let missing = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000}"#.utf8))
+        #expect(missing.stayAwake == nil)
+        let on = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "stayAwake": "on"}"#.utf8))
+        #expect(on.stayAwake == .on)
+        let off = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "stayAwake": "off"}"#.utf8))
+        #expect(off.stayAwake == StayAwakeChoice.off)
+        let unknown = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "retentionDays": 45, "stayAwake": "always"}"#.utf8))
+        #expect(unknown.stayAwake == nil)
+        #expect(unknown.port == 4000, "an unknown stayAwake keeps every other field")
+        #expect(unknown.retentionDays == 45)
+    }
+
+    @Test("stayAwake survives an encode and decode round trip, including nil")
+    func stayAwakeRoundTrip() throws {
+        for choice in [StayAwakeChoice?.none, .on, .off] {
+            var settings = AppSettings.default
+            settings.stayAwake = choice
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.stayAwake == choice)
+        }
+    }
+
+    @Test("movedFromLocalRoute defaults to false, survives a round trip, and a stored value without the key reads false")
+    func movedFromLocalRouteRoundTrip() throws {
+        #expect(AppSettings.default.movedFromLocalRoute == false)
+        for flag in [true, false] {
+            var settings = AppSettings.default
+            settings.movedFromLocalRoute = flag
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.movedFromLocalRoute == flag)
+        }
+        let missing = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "reach": "myTailnet"}"#.utf8))
+        #expect(missing.movedFromLocalRoute == false)
+        let stored = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach": "thisMacOnly", "movedFromLocalRoute": true}"#.utf8))
+        #expect(stored.movedFromLocalRoute == true)
+    }
 }
