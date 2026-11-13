@@ -112,6 +112,10 @@ final class AppModel: ObservableObject {
     private let powerSource: any PowerSourceReading
     private let sleepRules: any SleepRuleManaging
     private var powerWatcher: PowerSourceWatcher?
+    /// stopRequested is whether the person (or quitting) stopped the relay
+    /// since it was last started, so a state report that was still on its
+    /// way when they stopped it cannot hold the Mac awake again.
+    private var stopRequested = false
 
     private var latestStatus: EngineStatus?
 
@@ -272,7 +276,9 @@ final class AppModel: ObservableObject {
             Task { @MainActor in ref.value?.handleStatusUpdate(status) }
         }
         ref.value = self
-        stayAwake.onFailure = { [weak self] failure in self?.stayAwakeNotice = failure.message }
+        stayAwake.onFailure = { failure in
+            Task { @MainActor in ref.value?.stayAwakeNotice = failure.message }
+        }
         let watcher = PowerSourceWatcher { [weak self] in
             guard let self else { return }
             self.stayAwake.powerChanged(self.powerSource.snapshot())
@@ -344,6 +350,7 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        stopRequested = true
         Task {
             await supervisor.stop()
             stayAwake.relayStopped()
@@ -407,7 +414,8 @@ final class AppModel: ObservableObject {
     /// for the engine process to be gone, so a relaunch never meets a store
     /// the old engine still holds.
     func shutDown() async {
-        stayAwake.willQuit()
+        stopRequested = true
+        await stayAwake.willQuitInBackground()
         await statusPoller.stop()
         await supervisor.stopAndWait(timeout: .seconds(3))
         boundHost = nil
@@ -439,6 +447,7 @@ final class AppModel: ObservableObject {
     /// were gone.
     @discardableResult
     func signOut() async -> Bool {
+        stopRequested = true
         await supervisor.stop()
         stayAwake.relayStopped()
         boundHost = nil
@@ -999,6 +1008,7 @@ final class AppModel: ObservableObject {
     /// Start Fresh itself reports keeps that recovery path the only way
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
+        stopRequested = false
         if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
             boundHost = nil
             await supervisor.fail(.recoveryMoveFailed)
@@ -1093,7 +1103,7 @@ final class AppModel: ObservableObject {
             boundHost = nil
             stayAwake.relayStopped()
         case .running:
-            stayAwake.relayStarted()
+            if !stopRequested { stayAwake.relayStarted() }
         case .starting, .waitingToRestart:
             break
         }

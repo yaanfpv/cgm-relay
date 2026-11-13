@@ -59,9 +59,11 @@ public enum StayAwakePolicy {
 /// StayAwakeFailure is why the Mac could not be kept awake as chosen, for
 /// the app to explain.
 public enum StayAwakeFailure: Error, Equatable, Sendable {
-    /// The sleep setting could not be changed: the permission CGM Relay
-    /// asked for at setup is missing, or the command did not finish.
+    /// The sleep setting could not be changed: the command did not finish
+    /// or was refused.
     case sleepSettingNotChanged
+    /// The permission CGM Relay asks for at setup is not installed.
+    case permissionNotInstalled
     /// The idle sleep assertion could not be taken.
     case assertionNotHeld
 
@@ -69,6 +71,8 @@ public enum StayAwakeFailure: Error, Equatable, Sendable {
         switch self {
         case .sleepSettingNotChanged:
             "CGM Relay isn't allowed to change the sleep setting, so the Mac may sleep with its lid closed. Turn Keep this Mac awake off and on again to allow it."
+        case .permissionNotInstalled:
+            "CGM Relay doesn't have permission to change the sleep setting, so the Mac may sleep with its lid closed. Turn Keep this Mac awake off and on again to allow it."
         case .assertionNotHeld:
             "The Mac couldn't be kept awake right now. CGM Relay tries again whenever something changes."
         }
@@ -82,10 +86,13 @@ public enum StayAwakeFailure: Error, Equatable, Sendable {
 ///
 /// It is told what happened (the relay started or stopped, the power source
 /// changed, the person changed the choice, the app launched or is quitting)
-/// and does no observing of its own. All of it is called from the main
-/// thread. "The relay is running" includes the engine restarting by itself;
+/// and does no observing of its own. Calls are serialized by a lock, so
+/// willQuitInBackground may run off the main thread while the power
+/// watcher keeps calling on it; onFailure is called with that lock held and
+/// must only hand the failure on. "The relay is running" includes the engine restarting by itself;
 /// the caller reports a stop only when the relay really stops.
-public final class StayAwakeController {
+public final class StayAwakeController: @unchecked Sendable {
+    private let lock = NSLock()
     private var choice: StayAwakeChoice?
     private var relayRunning = false
     private var snapshot: PowerSnapshot
@@ -120,24 +127,28 @@ public final class StayAwakeController {
     /// relayStarted: the relay is running, or running again after a
     /// restart of its own.
     public func relayStarted() {
+        lock.lock(); defer { lock.unlock() }
         relayRunning = true
         apply(refreshingPower: true)
     }
 
     /// relayStopped: the person stopped the relay, or it gave up.
     public func relayStopped() {
+        lock.lock(); defer { lock.unlock() }
         relayRunning = false
         apply(refreshingPower: true)
     }
 
     /// powerChanged: the power source changed to snapshot.
     public func powerChanged(_ snapshot: PowerSnapshot) {
+        lock.lock(); defer { lock.unlock() }
         self.snapshot = snapshot
         apply(refreshingPower: false)
     }
 
     /// choiceChanged: the person answered the stay-awake question.
     public func choiceChanged(_ choice: StayAwakeChoice?) {
+        lock.lock(); defer { lock.unlock() }
         self.choice = choice
         apply(refreshingPower: true)
     }
@@ -146,6 +157,7 @@ public final class StayAwakeController {
     /// choice on and the relay already running this sets everything again;
     /// otherwise it makes sure the setting is off.
     public func launched() {
+        lock.lock(); defer { lock.unlock() }
         apply(refreshingPower: true)
     }
 
@@ -153,12 +165,20 @@ public final class StayAwakeController {
     /// the setting is written off even when it already reads off, so a
     /// write that failed earlier cannot leave it on.
     public func willQuit() {
+        lock.lock(); defer { lock.unlock() }
         relayRunning = false
         let wrote = apply(refreshingPower: true)
         let mayBeOn = appliedDisableSleep == true
         if !wrote, mayBeOn || (choice == .on && snapshot.isLaptop) {
             write(false)
         }
+    }
+
+    /// willQuitInBackground is willQuit run off the calling thread and
+    /// awaited, so a slow privileged write never holds the main thread. Its
+    /// time is bounded by the writer's.
+    public func willQuitInBackground() async {
+        await Task.detached { self.willQuit() }.value
     }
 
     /// apply returns whether it wrote the sleep setting.

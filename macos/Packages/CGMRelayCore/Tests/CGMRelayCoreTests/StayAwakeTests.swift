@@ -258,3 +258,44 @@ struct SleepRuleInstallerTests {
         #expect(reset.lowerBound < plist.lowerBound)
     }
 }
+
+// MARK: - Privileged writer
+
+private final class CountingRunner: BoundedProcessRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [[String]] = []
+    var calls: [[String]] { lock.withLock { recorded } }
+
+    func run(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessResult {
+        lock.withLock { recorded.append(arguments) }
+        return .exited(0)
+    }
+
+    func runCapturingOutput(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessOutput {
+        BoundedProcessOutput(result: await run(executableURL: executableURL, arguments: arguments, standardInputData: standardInputData, timeout: timeout), output: Data())
+    }
+}
+
+@Suite("PrivilegedSleepSettingWriter")
+struct PrivilegedSleepSettingWriterTests {
+    @Test("without the rule file sudo never runs: off is a no-op, on is a clear error")
+    func ruleMissing() throws {
+        let runner = CountingRunner()
+        let writer = PrivilegedSleepSettingWriter(runner: runner, ruleExists: { false })
+        try writer.setDisableSleep(false)
+        #expect(throws: StayAwakeFailure.permissionNotInstalled) { try writer.setDisableSleep(true) }
+        #expect(runner.calls.isEmpty)
+    }
+
+    @Test("with the rule file it runs exactly sudo -n pmset -a disablesleep")
+    func ruleThere() throws {
+        let runner = CountingRunner()
+        let writer = PrivilegedSleepSettingWriter(runner: runner, ruleExists: { true })
+        try writer.setDisableSleep(true)
+        try writer.setDisableSleep(false)
+        #expect(runner.calls == [
+            ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"],
+            ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"],
+        ])
+    }
+}

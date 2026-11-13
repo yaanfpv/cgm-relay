@@ -60,17 +60,34 @@ public final class SystemIdleSleepAssertion: IdleSleepAsserting {
 /// PrivilegedSleepSettingWriter changes the sleep setting through the
 /// sudoers rule SleepRuleInstaller put in place, using `sudo -n` so a
 /// missing rule is an error at once and never a password prompt waiting for
-/// a keyboard. The call blocks until the command finishes or its time is up.
+/// a keyboard. Without the rule file sudo is not run at all: turning the
+/// setting off then needs nothing (nothing could have turned it on), and
+/// turning it on is an error. Otherwise the call blocks until the command
+/// finishes or its time is up: at most the timeout, plus the runner's 2 s
+/// to end a child that ignores the request, plus a 1 s margin before this
+/// stops waiting.
 public struct PrivilegedSleepSettingWriter: SleepSettingWriting {
     private let runner: any BoundedProcessRunning
     private let timeout: Duration
+    private let ruleExists: @Sendable () -> Bool
 
-    public init(runner: any BoundedProcessRunning = RealBoundedProcessRunner(), timeout: Duration = .seconds(4)) {
+    public init(
+        runner: any BoundedProcessRunning = RealBoundedProcessRunner(),
+        timeout: Duration = .seconds(3),
+        ruleExists: @escaping @Sendable () -> Bool = {
+            FileManager.default.fileExists(atPath: SleepRuleInstaller.sudoersPath)
+        }
+    ) {
         self.runner = runner
         self.timeout = timeout
+        self.ruleExists = ruleExists
     }
 
     public func setDisableSleep(_ on: Bool) throws {
+        guard ruleExists() else {
+            if on { throw StayAwakeFailure.permissionNotInstalled }
+            return
+        }
         let runner = runner
         let timeout = timeout
         let arguments = ["-n", "/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"]
@@ -84,7 +101,7 @@ public struct PrivilegedSleepSettingWriter: SleepSettingWriting {
             )
             outcome.finish(result)
         }
-        guard outcome.wait() == .exited(0) else { throw StayAwakeFailure.sleepSettingNotChanged }
+        guard outcome.wait(seconds: Double(timeout.components.seconds) + 3) == .exited(0) else { throw StayAwakeFailure.sleepSettingNotChanged }
     }
 }
 
@@ -99,8 +116,8 @@ private final class BlockingResult: @unchecked Sendable {
         done.signal()
     }
 
-    func wait() -> BoundedProcessResult {
-        done.wait()
+    func wait(seconds: Double) -> BoundedProcessResult {
+        guard done.wait(timeout: .now() + seconds) == .success else { return .timedOut }
         return lock.withLock { value }
     }
 }
