@@ -178,6 +178,10 @@ struct CredentialsBootstrapperTests {
 
 @Suite("KeychainCredentialStore across two running copies")
 struct KeychainCredentialStoreSharedItemTests {
+    /// hangBoundMilliseconds bounds each wait on the child process; it is a
+    /// hang ceiling, never the expected time.
+    private static let hangBoundMilliseconds: Int32 = 30_000
+
     private func makeDirectory() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("kc-lock-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -310,27 +314,44 @@ struct KeychainCredentialStoreSharedItemTests {
         let backing = InMemoryCredentialBacking(items: [:])
         let kc = store(backing, lock: lock, timeout: 0.2)
 
+        // The child takes the lock, reports it, then blocks reading stdin and
+        // exits when stdin reaches end of file: no signal is ever sent.
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         child.arguments = [
             "-I", "-c",
-            "import fcntl,os,sys,time\nf=open(sys.argv[1],'a')\nfcntl.flock(f,fcntl.LOCK_EX)\nsys.stdout.write('locked\\n')\nsys.stdout.flush()\ntime.sleep(3600)",
+            "import fcntl,sys\nf=open(sys.argv[1],'a')\nfcntl.flock(f,fcntl.LOCK_EX)\nprint('locked',flush=True)\nsys.stdin.read()",
             lock.path,
         ]
         let out = Pipe()
+        let input = Pipe()
         child.standardOutput = out
+        child.standardInput = input
         try child.run()
-        defer { if child.isRunning { child.terminate(); child.waitUntilExit() } }
+        let exited = DispatchSemaphore(value: 0)
+        child.terminationHandler = { _ in exited.signal() }
+        func endChild() {
+            try? input.fileHandleForWriting.close()
+        }
+        defer { endChild() }
 
-        // Block on the child's own report that it holds the lock.
+        // Wait for the child's own report that it holds the lock, up to the hang bound.
+        var pollFD = pollfd(fd: out.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&pollFD, 1, Self.hangBoundMilliseconds)
+        guard ready > 0 else {
+            endChild()
+            Issue.record("child did not report holding the lock within \(Self.hangBoundMilliseconds) ms")
+            return
+        }
         let line = out.fileHandleForReading.availableData
         try #require(String(decoding: line, as: UTF8.self).hasPrefix("locked"))
 
         #expect(throws: KeychainError.lockTimeout) { try kc.setString("t", for: .token) }
         #expect(backing.items == [:])
 
-        child.terminate()
-        child.waitUntilExit()
+        endChild()
+        let result = exited.wait(timeout: .now() + .milliseconds(Int(Self.hangBoundMilliseconds)))
+        try #require(result == .success, "child did not exit within \(Self.hangBoundMilliseconds) ms of its stdin closing")
 
         try kc.setString("t", for: .token)
         #expect(backing.items == ["token": "t"])

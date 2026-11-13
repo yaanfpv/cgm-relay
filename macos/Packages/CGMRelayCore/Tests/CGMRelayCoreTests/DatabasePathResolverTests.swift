@@ -36,3 +36,14 @@ struct DatabasePathResolverTests {
         #expect(first != second)
     }
 }
+
+@Suite("SingleInstance")
+struct SingleInstanceTests {
+    @Test("a copy proceeds when it is the only one, and yields to the other copy otherwise")
+    func decisions() {
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: []) == .proceed)
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: [10]) == .proceed)
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: [10, 7]) == .yield(to: 7))
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: [30, 20, 10]) == .yield(to: 20))
+    }
+}

@@ -28,6 +28,7 @@ struct CGMRelayApp: App {
     private let statusItemController: StatusItemController
 
     init() {
+        CGMRelayApp.yieldToRunningCopy()
         let explicitKeychainServiceOverride = CGMRelayApp.explicitKeychainServiceOverride()
         let keychainServiceOverride = CGMRelayApp.validatedThrowawayKeychainService(explicitOverride: explicitKeychainServiceOverride)
         let store = CGMRelayApp.credentialStore(keychainServiceOverride: keychainServiceOverride)
@@ -159,6 +160,21 @@ struct CGMRelayApp: App {
         #else
         return nil
         #endif
+    }
+
+    /// yieldToRunningCopy runs before anything reads or writes credentials:
+    /// when another copy with this app's bundle identifier is already
+    /// running, it brings that copy forward and quits this one, so two
+    /// copies never share the credentials item and database.
+    private static func yieldToRunningCopy() {
+        guard let identifier = Bundle.main.bundleIdentifier else { return }
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+        let decision = SingleInstance.decide(
+            ownPID: ProcessInfo.processInfo.processIdentifier,
+            runningPIDs: running.map(\.processIdentifier))
+        guard case .yield(let pid) = decision else { return }
+        running.first { $0.processIdentifier == pid }?.activate()
+        exit(0)
     }
 
     /// credentialStore returns the production Keychain-backed store when
