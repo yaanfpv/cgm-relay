@@ -1,5 +1,5 @@
 // Package tailnode runs the engine's own Tailscale node, which gives the
-// relay a private https address on the internet that only a valid token
+// relay a public https address on the internet that only a valid token
 // opens. This file holds the parts that need no network: the mapping from
 // what the node reports to the state shown to the app, the limits on the
 // waiting states, the path allowlist for the public listener and its
