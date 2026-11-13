@@ -414,4 +414,40 @@ struct AppSettingsTests {
         let stored = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"reach": "thisMacOnly", "movedFromLocalRoute": true}"#.utf8))
         #expect(stored.movedFromLocalRoute == true)
     }
+
+    @Test("the reach choices offered are exactly the three kept ways and the two kept reaches, none of them a local network way")
+    func reachChoicesHaveNoLocalNetworkWay() {
+        #expect(Set(ReachWay.allCases) == [.tailscaleHTTPS, .thisMacOnly, .myTailnet])
+        #expect(ReachWay.allCases.count == 3)
+        #expect(Set(NetworkReach.allCases) == [.thisMacOnly, .myTailnet])
+        #expect(NetworkReach.allCases.count == 2)
+        #expect(Set(NetworkReach.allCases.map(\.rawValue)) == ["thisMacOnly", "myTailnet"])
+    }
+
+    @Test("settings stored by an earlier version with the certificate step finished and the local network reach still decode, keeping every other field")
+    func olderSettingsWithCertificateFieldStillDecode() throws {
+        let json = """
+        {
+          "port": 4000,
+          "reach": "myLocalNetwork",
+          "localCertificateStepFinished": true,
+          "setupFinished": true,
+          "retentionDays": 45,
+          "units": "mmolL",
+          "noReadingAlertMinutes": 50,
+          "signInFailingAlertEnabled": true
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+
+        #expect(decoded.reach == .thisMacOnly)
+        #expect(decoded.movedFromLocalRoute == true)
+        #expect(decoded.port == 4000)
+        #expect(decoded.setupFinished == true)
+        #expect(decoded.retentionDays == 45)
+        #expect(decoded.units == .mmolL)
+        #expect(decoded.noReadingAlertMinutes == 50)
+        #expect(decoded.signInFailingAlertEnabled == true)
+    }
 }

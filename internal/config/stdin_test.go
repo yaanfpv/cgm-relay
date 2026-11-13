@@ -422,3 +422,51 @@ func TestLoadFromReaderRefusesInvalid(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadFromReaderRefusesRetiredLANFields checks that the three fields
+// of the retired local-network route are unknown fields to the stdin
+// decode, each on its own and all together, while the same otherwise
+// valid configuration without them decodes and binds only its plain
+// listener.
+func TestLoadFromReaderRefusesRetiredLANFields(t *testing.T) {
+	t.Parallel()
+	base := func(extra string) string {
+		return fmt.Sprintf(`{"librelinkup_email": "person@example.test", "librelinkup_password": "some-password", "token": "some-token", "key": %q%s}`, testKeyBase64('K'), extra)
+	}
+
+	t.Run("the same configuration without them decodes", func(t *testing.T) {
+		t.Parallel()
+		got, err := config.LoadFromReader(strings.NewReader(base("")))
+		if err != nil {
+			t.Fatalf("LoadFromReader: %v", err)
+		}
+		if got.ListenAddr != config.DefaultListenAddr {
+			t.Errorf("ListenAddr = %q, want %q", got.ListenAddr, config.DefaultListenAddr)
+		}
+	})
+
+	cases := []struct {
+		name  string
+		extra string
+		field string
+	}{
+		{"lan_listen_addrs", `, "lan_listen_addrs": ["192.168.1.5:8443"]`, "lan_listen_addrs"},
+		{"lan_listen_addrs empty", `, "lan_listen_addrs": []`, "lan_listen_addrs"},
+		{"tls_cert_pem", `, "tls_cert_pem": "synthetic-certificate"`, "tls_cert_pem"},
+		{"tls_key_pem", `, "tls_key_pem": "synthetic-key"`, "tls_key_pem"},
+		{"all three", `, "lan_listen_addrs": ["192.168.1.5:8443"], "tls_cert_pem": "synthetic-certificate", "tls_key_pem": "synthetic-key"`, "lan_listen_addrs"},
+	}
+	for _, c := range cases {
+		t.Run(c.name+" is an unknown field", func(t *testing.T) {
+			t.Parallel()
+			_, err := config.LoadFromReader(strings.NewReader(base(c.extra)))
+			if err == nil {
+				t.Fatal("LoadFromReader succeeded, want an unknown-field refusal")
+			}
+			want := fmt.Sprintf("unknown field %q", c.field)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %s", err, want)
+			}
+		})
+	}
+}
