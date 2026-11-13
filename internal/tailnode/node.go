@@ -15,6 +15,7 @@ import (
 
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
+	"tailscale.com/logtail"
 	"tailscale.com/tsnet"
 )
 
@@ -202,6 +203,8 @@ func (n *Node) run(ctx context.Context) {
 		closeStarted()
 		return
 	}
+	// The node's own logs stay on this Mac: logtail would otherwise upload them to Tailscale's log service.
+	logtail.Disable()
 	quiet := func(string, ...any) {}
 	s := &tsnet.Server{
 		Dir:        n.opts.StateDir,

@@ -40,10 +40,12 @@ mkdir -p "${ENGINE_DIR}"
   # running them side by side and waiting on each by its own PID is safe.
   # Both PIDs are always waited on, even when one fails first, so a
   # failure never leaves the other build running past this subshell.
-  # -trimpath keeps the paths of this checkout and the module cache out of the binary.
-  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
+  # -trimpath keeps the paths of this checkout and the module cache out of the binary. -s -w drops
+  # the symbol table and DWARF debug data, which a Go panic trace does not use: it prints function
+  # names from the runtime's own tables.
+  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
   arm64_pid=$!
-  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
+  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
   amd64_pid=$!
 
   arm64_status=0
