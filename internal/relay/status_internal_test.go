@@ -3,9 +3,12 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -459,6 +462,58 @@ func TestStartServerAppliesTimeouts(t *testing.T) {
 	}
 	if rs.srv.IdleTimeout <= 0 {
 		t.Error("IdleTimeout is not set")
+	}
+}
+
+// lockedBuilder is a strings.Builder safe to write from the server's
+// goroutines while the test reads it.
+type lockedBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuilder) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuilder) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestStartServerKeepsRequesterAddressOutOfTheLog protects the rule that
+// the relay never logs who asked. net/http reports a handler that panics
+// with the requester's address, and by default writes that to the process
+// log; the servers Run starts for the Nightscout API and the status
+// endpoint must not. It fails if a server goes back to the default error
+// log. It is not parallel because it captures the process-wide log.
+func TestStartServerKeepsRequesterAddressOutOfTheLog(t *testing.T) {
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	var captured lockedBuilder
+	log.SetOutput(&captured)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	rs, err := startServer("127.0.0.1:0", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("handler failed")
+	}))
+	if err != nil {
+		t.Fatalf("startServer: %v", err)
+	}
+	// The panic closes the connection, so the client sees an error; what
+	// matters is that the server has handled the request before the check.
+	resp, err := http.Get("http://" + rs.addr() + "/")
+	if err == nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	rs.shutdown()
+
+	if got := captured.String(); strings.Contains(got, "127.0.0.1") {
+		t.Errorf("process log carries the requester's address: %q", got)
 	}
 }
 

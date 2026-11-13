@@ -292,9 +292,14 @@ func startServer(addr string, handler http.Handler) (*runningServer, error) {
 
 // newHTTPServer builds an HTTP server around handler with the fixed
 // timeouts every server Run starts needs.
+//
+// ErrorLog discards net/http's own connection-level messages (a panicking
+// handler, a failed TLS handshake): they name the requester's address, and
+// the relay never logs who asked.
 func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           handler,
+		ErrorLog:          log.New(io.Discard, "", 0),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

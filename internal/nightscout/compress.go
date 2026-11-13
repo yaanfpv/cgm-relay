@@ -2,13 +2,17 @@ package nightscout
 
 import (
 	"compress/gzip"
+	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // gzipMinSize is the smallest marshaled body writeJSON will ever gzip.
@@ -122,6 +126,29 @@ func combinedAcceptEncoding(r *http.Request) string {
 	return strings.Join(r.Header.Values("Accept-Encoding"), ",")
 }
 
+// writeErrorKind names why a response write failed, as one of a fixed set
+// of words. A failed write on a connection returns a *net.OpError whose
+// text carries the local and remote addresses, and the relay never logs
+// who asked, so the error itself is never printed: only this word is. The
+// timeout test covers the tailnet's userspace TCP stack as well, whose
+// expired write deadline reports Timeout but is not os.ErrDeadlineExceeded.
+func writeErrorKind(err error) string {
+	var netErr net.Error
+	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return "deadline"
+	case errors.Is(err, net.ErrClosed):
+		return "closed"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "reset"
+	case errors.Is(err, syscall.EPIPE):
+		return "broken pipe"
+	case errors.Is(err, io.ErrShortWrite):
+		return "short write"
+	}
+	return "other"
+}
+
 // writeMaybeGzipped writes body as the response, gzip-encoding it only
 // when r's combined Accept-Encoding accepts gzip and body is large enough
 // that compression is worth its own container overhead. w must not have
@@ -135,7 +162,7 @@ func combinedAcceptEncoding(r *http.Request) string {
 func writeMaybeGzipped(w http.ResponseWriter, r *http.Request, body []byte) {
 	if len(body) < gzipMinSize || !acceptsGzip(combinedAcceptEncoding(r)) {
 		if _, err := w.Write(body); err != nil {
-			log.Printf("nightscout: write response: %v", err)
+			log.Printf("nightscout: write response: %s", writeErrorKind(err))
 		}
 		return
 	}
@@ -154,12 +181,12 @@ func writeMaybeGzipped(w http.ResponseWriter, r *http.Request, body []byte) {
 	// reused, pinning it alive for no reason.
 	defer func() {
 		if err := gz.Close(); err != nil {
-			log.Printf("nightscout: gzip response: close: %v", err)
+			log.Printf("nightscout: gzip response: close: %s", writeErrorKind(err))
 		}
 		gz.Reset(io.Discard)
 		gzipWriterPool.Put(gz)
 	}()
 	if _, err := gz.Write(body); err != nil {
-		log.Printf("nightscout: gzip response: %v", err)
+		log.Printf("nightscout: gzip response: %s", writeErrorKind(err))
 	}
 }

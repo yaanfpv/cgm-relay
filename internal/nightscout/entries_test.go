@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -793,5 +799,181 @@ func TestHeadRequestOnLargeGzippedResponse(t *testing.T) {
 	}
 	if len(body) != 0 {
 		t.Errorf("HEAD response body has %d bytes, want 0", len(body))
+	}
+}
+
+// failingWriter is a ResponseWriter whose failAt-th Write (counting from
+// zero) returns whatever fail produces, and whose earlier Writes are
+// swallowed. fail runs at that moment, so an error taken from a real
+// connection is produced by the connection, not prepared in advance.
+type failingWriter struct {
+	header http.Header
+	calls  int
+	failAt int
+	fail   func() error
+}
+
+func (w *failingWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *failingWriter) WriteHeader(int) {}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	n := w.calls
+	w.calls++
+	if n == w.failAt {
+		return 0, w.fail()
+	}
+	return len(p), nil
+}
+
+// loopbackConn returns the client end of a real loopback TCP connection
+// and its local and remote address strings.
+func loopbackConn(t *testing.T) (c net.Conn, addrs []string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if peer, err := ln.Accept(); err == nil {
+			accepted <- peer
+		}
+	}()
+	c, err = net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	peer := <-accepted
+	t.Cleanup(func() { peer.Close() })
+	return c, []string{c.LocalAddr().String(), c.RemoteAddr().String()}
+}
+
+// gonetTimeout stands in for the timeout error the tailnet's userspace TCP
+// stack returns for an expired write deadline: a net.Error reporting
+// Timeout, but not os.ErrDeadlineExceeded.
+type gonetTimeout struct{}
+
+func (gonetTimeout) Error() string   { return "i/o timeout" }
+func (gonetTimeout) Timeout() bool   { return true }
+func (gonetTimeout) Temporary() bool { return true }
+
+// TestResponseWriteFailureLogsKindNotAddresses protects the rule that the
+// relay never logs who asked. A response write that fails on a real
+// connection returns a *net.OpError whose text carries both endpoints'
+// addresses; the log line for every sink that reports such a failure
+// (plain body, gzip write, gzip close) must carry only a fixed kind. It
+// fails if any sink formats the error itself, or maps a kind wrongly. It
+// is not parallel because it captures the process-wide log, and it drives
+// the handler's real entries route rather than the unexported writer.
+func TestResponseWriteFailureLogsKindNotAddresses(t *testing.T) {
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	var captured strings.Builder
+	log.SetOutput(&captured)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	// Eight readings marshal past the gzip floor, yet compress to a
+	// single block that is written out only when the gzip stream closes.
+	h, err := nightscout.New(&fakeStore{readings: manyReadings(base, 8)}, testToken, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	type realFailure struct {
+		name string
+		kind string
+		// provoke makes conn fail its next Write the given way.
+		provoke func(c net.Conn)
+	}
+	realFailures := []realFailure{
+		{"real write past its deadline", "deadline", func(c net.Conn) { c.SetWriteDeadline(time.Now().Add(-time.Second)) }},
+		{"real write on a closed connection", "closed", func(c net.Conn) { c.Close() }},
+	}
+	sinks := []struct {
+		name   string
+		accept string
+		failAt int
+		// want is the exact log output for kind.
+		want func(kind string) string
+	}{
+		{"plain body", "", 0, func(k string) string { return "nightscout: write response: " + k + "\n" }},
+		// A header write that fails also leaves the stream broken, so
+		// Close reports it too.
+		{"gzip write", "gzip", 0, func(k string) string {
+			return "nightscout: gzip response: " + k + "\nnightscout: gzip response: close: " + k + "\n"
+		}},
+		{"gzip close", "gzip", 1, func(k string) string { return "nightscout: gzip response: close: " + k + "\n" }},
+	}
+
+	run := func(t *testing.T, accept string, failAt int, fail func() error, addrs []string, want string) {
+		captured.Reset()
+		w := &failingWriter{failAt: failAt, fail: fail}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/entries.json?token="+testToken+"&count=8", nil)
+		if accept != "" {
+			req.Header.Set("Accept-Encoding", accept)
+		}
+		h.ServeHTTP(w, req)
+		got := captured.String()
+		for _, a := range append([]string{"127.0.0.1"}, addrs...) {
+			if strings.Contains(got, a) {
+				t.Errorf("log carries the address %q: %q", a, got)
+			}
+		}
+		if got != want {
+			t.Errorf("log = %q, want %q", got, want)
+		}
+	}
+
+	for _, rf := range realFailures {
+		for _, s := range sinks {
+			t.Run(rf.name+"/"+s.name, func(t *testing.T) {
+				conn, addrs := loopbackConn(t)
+				fail := func() error {
+					rf.provoke(conn)
+					_, err := conn.Write([]byte("x"))
+					var op *net.OpError
+					if !errors.As(err, &op) {
+						t.Fatalf("connection write error = %v, want a *net.OpError", err)
+					}
+					return err
+				}
+				run(t, s.accept, s.failAt, fail, addrs, s.want(rf.kind))
+			})
+		}
+	}
+
+	// Errors that cannot be provoked on a loopback connection without a
+	// peer misbehaving, or that come from another stack, still map to
+	// their kinds. Each sits inside an OpError carrying real addresses.
+	conn, addrs := loopbackConn(t)
+	wrapped := func(inner error) error {
+		return &net.OpError{Op: "write", Net: "tcp", Source: conn.LocalAddr(), Addr: conn.RemoteAddr(), Err: inner}
+	}
+	synthetic := []struct {
+		name string
+		err  error
+		kind string
+	}{
+		{"timeout that is not os.ErrDeadlineExceeded", wrapped(gonetTimeout{}), "deadline"},
+		{"connection reset", wrapped(os.NewSyscallError("write", syscall.ECONNRESET)), "reset"},
+		{"broken pipe", wrapped(os.NewSyscallError("write", syscall.EPIPE)), "broken pipe"},
+		{"short write", io.ErrShortWrite, "short write"},
+		{"anything else", wrapped(errors.New("unrecognised failure")), "other"},
+	}
+	for _, c := range synthetic {
+		for _, s := range sinks {
+			t.Run(c.name+"/"+s.name, func(t *testing.T) {
+				run(t, s.accept, s.failAt, func() error { return c.err }, addrs, s.want(c.kind))
+			})
+		}
 	}
 }
