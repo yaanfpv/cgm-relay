@@ -9,15 +9,11 @@ import SwiftUI
 struct ReachChoicesView: View {
     @ObservedObject var model: AppModel
     /// offersThisMacOnly is false in setup, where every choice must be a way
-    /// for a phone to connect; Advanced offers all four.
+    /// for a phone to connect; Advanced offers all three.
     var offersThisMacOnly = true
     /// showsAvailabilityNotes is false where the surrounding screen already
     /// says, once, why the person cannot go on.
     var showsAvailabilityNotes = true
-    /// setUpPhone, where given, is offered beside the local network's
-    /// certificate note as the way to set up a phone. Setup leaves it out,
-    /// since its next step is that very step.
-    var setUpPhone: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -26,7 +22,6 @@ struct ReachChoicesView: View {
                 reachRow(.thisMacOnly, title: "This Mac only", description: "Only apps on this Mac can connect.")
             }
             reachRow(.myTailnet, title: "My tailnet", description: "Any device on your tailnet can connect.")
-            reachRow(.myLocalNetwork, title: "My local network", description: "Any device on your Wi-Fi or wired network can connect.")
         }
 
         if showsAvailabilityNotes, model.settings.chosenWay == .tailscaleHTTPS, case .blocked(let reason) = model.phoneReachability {
@@ -34,30 +29,6 @@ struct ReachChoicesView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        if model.settings.chosenWay == .myLocalNetwork {
-            if showsAvailabilityNotes, !model.localNetworkAvailable {
-                Text("My local network is unavailable: this Mac has no network address right now.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let setUpPhone {
-                HStack {
-                    certificateNote
-                    Spacer(minLength: 12)
-                    AccessibleButton("Set Up a Phone…", accessibleName: "Set Up HTTPS on a Phone", action: setUpPhone)
-                        .fixedSize()
-                }
-            } else {
-                certificateNote
-            }
-        }
-    }
-
-    private var certificateNote: some View {
-        Text("Each phone installs CGM Relay's certificate once, then reads over HTTPS.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// reachRow is one of the reach options, hand-built rather than

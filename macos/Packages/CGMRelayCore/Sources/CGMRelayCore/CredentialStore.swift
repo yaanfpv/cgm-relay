@@ -1,19 +1,13 @@
 import Foundation
 
 /// CredentialKey names every value CGM Relay keeps in the Keychain: the
-/// two a person enters (the LibreLinkUp account), the two the app
-/// generates for itself (the Nightscout token and the store key) and the
-/// four PEM documents that make up its local certificate authority and the
-/// server certificate it issued for this Mac.
+/// two a person enters (the LibreLinkUp account) and the two the app
+/// generates for itself (the Nightscout token and the store key).
 public enum CredentialKey: String, Sendable, CaseIterable {
     case librelinkupEmail = "librelinkup_email"
     case librelinkupPassword = "librelinkup_password"
     case token = "token"
     case storeKey = "store_key"
-    case authorityKey = "authority_key"
-    case authorityCertificate = "authority_certificate"
-    case serverKey = "server_key"
-    case serverCertificate = "server_certificate"
 }
 
 /// CredentialStore reads and writes CGM Relay's secrets. Production code
@@ -32,4 +26,14 @@ public protocol CredentialStore: Sendable {
     /// removeAll deletes every key in keys as a single atomic update:
     /// either all of them are removed, or none are.
     func removeAll(_ keys: [CredentialKey]) throws
+    /// removeRawKeys deletes the entries stored under names as a single
+    /// atomic update, for names no CredentialKey case carries any more: a
+    /// name that is not stored is ignored, and nothing else is touched.
+    func removeRawKeys(_ names: [String]) throws
+    /// addMissing stores each value in newValues whose key has no value
+    /// yet, leaves every key that already has one untouched, and returns
+    /// what is stored for every key given. The check and the write are one
+    /// step, so two copies of the app starting together both end up with
+    /// the first writer's values.
+    func addMissing(_ newValues: [CredentialKey: String]) throws -> [CredentialKey: String]
 }

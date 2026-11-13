@@ -12,12 +12,8 @@ import SwiftUI
 /// and shows a plain reason instead of a guess whenever there is none
 /// right now. Setup's connect step is this same view, laid out more compactly,
 /// with its own way out of the blocked state and its own trailing sections.
-/// On the local network route, until a phone has CGM Relay's certificate,
-/// it offers the certificate stepper instead, as a sheet on this pane; after
-/// that, a further phone is set up from Advanced, which the steps' footer
-/// says.
-/// The token is read from the Keychain when the view appears, after a
-/// rotation and when the certificate step changes, and held in state.
+/// The token is read from the Keychain when the view appears and after a
+/// rotation, and held in state.
 struct ConnectPaneView<Extra: View>: View {
     @ObservedObject var model: AppModel
     let blockedSecondary: String
@@ -52,9 +48,6 @@ struct ConnectPaneView<Extra: View>: View {
     @State private var isConfirmingRotate = false
     @State private var isRotating = false
     @State private var rotateErrorMessage: String?
-    /// isPresentingCertificateStep is whether this pane opened the stepper,
-    /// so only the window the person pressed the button in shows it.
-    @State private var isPresentingCertificateStep = false
 
     var body: some View {
         Form {
@@ -69,14 +62,6 @@ struct ConnectPaneView<Extra: View>: View {
                 )
             case .unavailable(let reason):
                 blockedSection(symbol: "clock", message: reason, secondary: nil, actionLabel: nil, action: nil)
-            case .certificateStepNeeded:
-                blockedSection(
-                    symbol: "lock.shield",
-                    message: "Your phone needs CGM Relay's certificate before it can connect over your Wi-Fi.",
-                    secondary: nil,
-                    actionLabel: "Set Up HTTPS on Your Phone",
-                    action: openCertificateStep
-                )
             case .ready(let address):
                 readySection(address: address)
                 if !isCompact { stepsSection(address: address) }
@@ -86,19 +71,11 @@ struct ConnectPaneView<Extra: View>: View {
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
         .task(id: pairingKey) {
-            // The engine keeps one pairing code, so while this pane's stepper
-            // shows Connect itself, only that inner pane makes codes; this one
-            // makes a fresh code once the stepper closes. The inner pane's
-            // code replaces this one's, so this one is dropped meanwhile.
-            if let readyAddress, !isPresentingCertificateStep {
+            if let readyAddress {
                 await keepPairingCodeFresh(address: readyAddress)
             } else {
                 pairingCode = nil
             }
-        }
-        .certificateStepSheet(isPresenting: $isPresentingCertificateStep, model: model)
-        .onChange(of: model.settings.needsCertificateStep) {
-            token = model.currentToken() ?? ""
         }
         .onAppear {
             token = model.currentToken() ?? ""
@@ -148,11 +125,6 @@ struct ConnectPaneView<Extra: View>: View {
         }
     }
 
-    private func openCertificateStep() {
-        isPresentingCertificateStep = true
-        model.beginCertificateStep()
-    }
-
     private var readyAddress: String? {
         if case .ready(let address) = model.connectPaneAddressState { return address }
         return nil
@@ -160,9 +132,9 @@ struct ConnectPaneView<Extra: View>: View {
 
     /// pairingKey changes whenever a code already minted could stop working:
     /// a new address, the engine (which holds the codes) starting again, as
-    /// it does after a new token, or this pane's stepper opening or closing.
+    /// it does after a new token.
     private var pairingKey: String {
-        "\(readyAddress ?? "")|\(token)|\(String(describing: model.engineState))|\(isPresentingCertificateStep)"
+        "\(readyAddress ?? "")|\(token)|\(String(describing: model.engineState))"
     }
 
     private var followerApp: FollowerApp { model.settings.connectFollowerApp }
@@ -187,7 +159,7 @@ struct ConnectPaneView<Extra: View>: View {
         guard let address = readyAddress else { return nil }
         return FollowerQRPlanner.qr(
             for: followerApp,
-            address: model.followerAddress(for: followerApp, readyAddress: address),
+            address: address,
             token: token,
             pairingCode: pairingCode?.code
         )
@@ -240,24 +212,17 @@ struct ConnectPaneView<Extra: View>: View {
     }
 
     /// stepsSection is where the chosen app keeps its fields, in its own
-    /// names, and the one-tap copy for an app that takes a single address. On
-    /// the local network route its footer says a further phone needs the
-    /// certificate first; the app cannot tell phones apart, so it never
-    /// claims which phones have it.
+    /// names, and the one-tap copy for an app that takes a single address.
     private func stepsSection(address: String) -> some View {
         Section {
             stepsBlock(address: address)
         } header: {
             Text("In \(followerApp.displayName)")
-        } footer: {
-            if model.localRoute != nil {
-                Text("Each phone needs CGM Relay's certificate once. Set up another phone in Advanced.")
-            }
         }
     }
 
     private func stepsBlock(address: String) -> some View {
-        let instructions = FollowerAppEntry.instructions(for: followerApp, address: model.followerAddress(for: followerApp, readyAddress: address))
+        let instructions = FollowerAppEntry.instructions(for: followerApp, address: address)
         return VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(instructions.steps.enumerated()), id: \.offset) { _, step in
                 Text(step)
@@ -301,9 +266,8 @@ struct ConnectPaneView<Extra: View>: View {
     /// little before ever truncating it: it is exactly the string a person
     /// has to read and retype on their phone, so it never breaks inside a
     /// hostname.
-    private func addressRow(address readyAddress: String) -> some View {
-        let address = model.followerAddress(for: followerApp, readyAddress: readyAddress)
-        return VStack(alignment: .leading, spacing: 6) {
+    private func addressRow(address: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Address")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -519,7 +483,7 @@ extension ConnectPaneView where Extra == EmptyView {
     init(model: AppModel, openAdvancedPane: @escaping () -> Void) {
         self.init(
             model: model,
-            blockedSecondary: "Switch to My tailnet or My local network in Advanced to change that.",
+            blockedSecondary: "Choose Tailscale HTTPS or My tailnet in Advanced to change that.",
             blockedAction: ("Open Advanced…", openAdvancedPane),
             showsTokenRotation: true,
             isCompact: false,

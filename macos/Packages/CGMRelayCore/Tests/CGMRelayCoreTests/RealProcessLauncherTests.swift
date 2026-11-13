@@ -93,8 +93,17 @@ struct RealProcessLauncherTests {
     private final class LineCollector: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [String] = []
+        private let arrived = DispatchSemaphore(value: 0)
         var lines: [String] { lock.withLock { stored } }
-        func add(_ line: String) { lock.withLock { stored.append(line) } }
+        func add(_ line: String) {
+            lock.withLock { stored.append(line) }
+            arrived.signal()
+        }
+        /// waitForLine waits on the arrival of the next unconsumed line, up
+        /// to the hang ceiling, and says whether one arrived.
+        func waitForLine() -> Bool {
+            arrived.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
+        }
     }
 
     /// forwardedLines runs shellCommand through a launcher whose log sink is
@@ -132,20 +141,40 @@ struct RealProcessLauncherTests {
     }
 
     @Test("a line the engine writes is forwarded while the engine is still running, not when it exits")
-    func lineArrivesWhileEngineStillRuns() async throws {
+    func lineArrivesWhileEngineStillRuns() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("launcher-line-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fifo = dir.appendingPathComponent("release").path
+        try #require(mkfifo(fifo, 0o600) == 0)
+        // Read-write open never blocks on a FIFO; holding it keeps the child's own open from blocking too.
+        let releaseFD = open(fifo, O_RDWR | O_CLOEXEC)
+        try #require(releaseFD >= 0)
+        defer { close(releaseFD) }
+
         let collector = LineCollector()
+        let exited = DispatchSemaphore(value: 0)
         let launcher = RealProcessLauncher(engineLog: { collector.add($0) })
+        // The child writes its line, then stays running until the test writes
+        // to the FIFO, and then exits on its own. No signal is ever sent.
         let process = try launcher.launch(
             executableURL: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "printf 'poller: alive\\n' >&2; exec sleep 30"],
+            arguments: ["-c", "printf 'poller: alive\\n' >&2; read _ < \"$1\"", "sh", fifo],
             standardInputData: Data(),
             onReady: {}
-        ) { _ in }
-        defer { process.terminate() }
-
-        for _ in 0..<120 where collector.lines.isEmpty {
-            try await Task.sleep(for: .milliseconds(25))
+        ) { _ in exited.signal() }
+        let pid = process.processIdentifier
+        // Registered right after the launch: release the child, then observe its exit.
+        defer {
+            _ = write(releaseFD, "x\n", 2)
+            if exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) != .success {
+                Issue.record("engine child pid \(pid) may still be running, outcome unknown; it was not signalled, end it by hand")
+            }
         }
+
+        // The child cannot exit before the defer above releases it, so a line
+        // that arrives now arrived while it was still running.
+        #expect(collector.waitForLine(), "no line arrived within \(TestChild.hangCeilingMilliseconds) ms")
         #expect(collector.lines == ["poller: alive"])
     }
 

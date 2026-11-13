@@ -34,7 +34,7 @@ CGM Relay fills those minutes in from your Mac. It checks your LibreLinkUp accou
 ## Get started in two minutes
 
 1. [Download CGM Relay](https://github.com/yaanfpv/cgm-relay/releases/latest), open the disk image and drag it to Applications.
-2. Open it and follow setup. It signs you in to LibreLinkUp, lets you choose how your phone reaches your Mac (your Wi-Fi or Tailscale) and connects your app with a QR code. On your Wi-Fi, your phone installs a certificate from your Mac once, so readings travel encrypted.
+2. Open it and follow setup. It signs you in to LibreLinkUp, lets you choose how your phone reaches your Mac over Tailscale and connects your app with a QR code.
 3. Turn off your app's own LibreLinkUp follower. Only one thing should follow your account.
 
 That's it. Your app now catches up whenever it wakes.

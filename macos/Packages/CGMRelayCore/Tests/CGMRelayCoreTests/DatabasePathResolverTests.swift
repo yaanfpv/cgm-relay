@@ -36,3 +36,24 @@ struct DatabasePathResolverTests {
         #expect(first != second)
     }
 }
+
+@Suite("SingleInstance")
+struct SingleInstanceTests {
+    @Test("the lowest process id proceeds and every other copy yields to it")
+    func decisions() {
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: []) == .proceed)
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: [10]) == .proceed)
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: [10, 20, 30]) == .proceed)
+        #expect(SingleInstance.decide(ownPID: 10, runningPIDs: [10, 7]) == .yield(to: 7))
+        #expect(SingleInstance.decide(ownPID: 20, runningPIDs: [30, 20, 10, 15]) == .yield(to: 10))
+    }
+
+    @Test("two copies given the same set of running pids agree on which one proceeds")
+    func simultaneousLaunch() {
+        let both: [Int32] = [100, 200]
+        let low = SingleInstance.decide(ownPID: 100, runningPIDs: both)
+        let high = SingleInstance.decide(ownPID: 200, runningPIDs: both)
+        #expect(low == .proceed)
+        #expect(high == .yield(to: 100))
+    }
+}

@@ -28,4 +28,14 @@ public enum DatabasePathResolver {
             .appendingPathComponent(service, isDirectory: true)
             .appendingPathComponent("readings.db")
     }
+
+    /// credentialLockURL is the file every running copy locks while it
+    /// changes the credentials item, in the same folder resolve gives the
+    /// database: so a throwaway Keychain service gets a lock of its own,
+    /// beside its own database, and never contends with the real one.
+    public static func credentialLockURL(baseDirectory: URL, keychainServiceOverride: String?) -> URL {
+        resolve(baseDirectory: baseDirectory, keychainServiceOverride: keychainServiceOverride)
+            .deletingLastPathComponent()
+            .appendingPathComponent("credentials.lock")
+    }
 }

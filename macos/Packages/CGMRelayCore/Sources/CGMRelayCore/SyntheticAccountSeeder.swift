@@ -113,8 +113,7 @@ public enum SyntheticAccountSeeder {
             return .alreadyConfigured
         }
 
-        try store.setString(email, for: .librelinkupEmail)
-        try store.setString(password, for: .librelinkupPassword)
+        try store.setStrings([.librelinkupEmail: email, .librelinkupPassword: password])
         return .seeded
     }
 }

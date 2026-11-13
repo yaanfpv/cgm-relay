@@ -47,14 +47,11 @@ public struct CredentialsBootstrapper: Sendable {
     }
 
     public func ensureBootstrapped() throws {
-        if try store.string(for: .token) == nil {
-            let token = try randomBytes.randomBytes(count: Self.keySizeBytes).base64URLEncodedStringWithoutPadding()
-            try store.setString(token, for: .token)
-        }
-        if try store.string(for: .storeKey) == nil {
-            let key = try randomBytes.randomBytes(count: Self.keySizeBytes).base64EncodedString()
-            try store.setString(key, for: .storeKey)
-        }
+        let existing = [try store.string(for: .token), try store.string(for: .storeKey)]
+        guard existing.contains(where: { $0 == nil }) else { return }
+        let token = try randomBytes.randomBytes(count: Self.keySizeBytes).base64URLEncodedStringWithoutPadding()
+        let key = try randomBytes.randomBytes(count: Self.keySizeBytes).base64EncodedString()
+        _ = try store.addMissing([.token: token, .storeKey: key])
     }
 
     /// rotateToken generates and saves a fresh bearer token, in the same
@@ -67,6 +64,19 @@ public struct CredentialsBootstrapper: Sendable {
         let token = try randomBytes.randomBytes(count: Self.keySizeBytes).base64URLEncodedStringWithoutPadding()
         try store.setString(token, for: .token)
         return token
+    }
+}
+
+/// RetiredCertificateSecrets names the four entries an earlier version kept
+/// in the credentials item for its local certificate, and removes them.
+public enum RetiredCertificateSecrets {
+    public static let rawKeys = ["authority_key", "authority_certificate", "server_key", "server_certificate"]
+
+    /// remove deletes those entries in one update and leaves every other
+    /// secret as it was. It is safe to call on every launch: a store that
+    /// holds none of them is left unchanged.
+    public static func remove(from store: any CredentialStore) throws {
+        try store.removeRawKeys(rawKeys)
     }
 }
 

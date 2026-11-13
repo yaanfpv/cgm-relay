@@ -1,10 +1,8 @@
 package relay
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,10 +11,8 @@ import (
 
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/config"
-	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
-	"github.com/yaanfpv/cgm-relay/internal/store"
 )
 
 // fixedNow returns a now func that always reports t, so a test can assert
@@ -172,11 +168,8 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 	seenAt := time.Date(2026, 6, 1, 11, 59, 0, 0, time.UTC)
 	tracker.record("xDrip4iOS/1.0", seenAt)
 	tracker.record("LoopFollow/1.0", seenAt.Add(time.Minute))
-	lanReadings := newClientTracker()
-	lanSeenAt := seenAt.Add(2 * time.Minute)
-	lanReadings.record("xDrip4iOS/1.0", lanSeenAt)
 
-	h := newStatusHandler(fake, tracker, lanReadings, pairing.NewStore(nil), "")
+	h := newStatusHandler(fake, tracker, pairing.NewStore(nil), "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Host = "127.0.0.1:1338" // this test is about the response shape, not the Host gate
@@ -220,9 +213,6 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 	if !got.Clients["LoopFollow/1.0"].Equal(seenAt.Add(time.Minute)) {
 		t.Errorf("clients[LoopFollow/1.0] = %v, want %v", got.Clients["LoopFollow/1.0"], seenAt.Add(time.Minute))
 	}
-	if len(got.LANReadingClients) != 1 || !got.LANReadingClients["xDrip4iOS/1.0"].Equal(lanSeenAt) {
-		t.Errorf("lan_reading_clients = %v, want only xDrip4iOS/1.0 at %v (body: %s)", got.LANReadingClients, lanSeenAt, rec.Body.String())
-	}
 }
 
 // TestStatusHandlerOmitsUnsetFields checks that a poller which has never
@@ -230,7 +220,7 @@ func TestStatusHandlerReportsPollerAndClients(t *testing.T) {
 // rather than the zero time formatted as if it meant something.
 func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 	t.Parallel()
-	h := newStatusHandler(fakePollerStatus{}, newClientTracker(), newClientTracker(), pairing.NewStore(nil), "")
+	h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	req.Host = "127.0.0.1:1338" // this test is about the response shape, not the Host gate
@@ -249,9 +239,6 @@ func TestStatusHandlerOmitsUnsetFields(t *testing.T) {
 	if _, present := raw["last_reading_trend"]; present {
 		t.Error(`"last_reading_trend" is present before any reading has been stored`)
 	}
-	if _, present := raw["lan_reading_clients"]; present {
-		t.Error(`"lan_reading_clients" is present before any client has fetched readings over a LAN listener`)
-	}
 }
 
 // TestStatusHandlerOmitsTrendTheDeviceDidNotCompute checks that a stored
@@ -268,7 +255,7 @@ func TestStatusHandlerOmitsTrendTheDeviceDidNotCompute(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/status", nil)
 		req.Host = "127.0.0.1:1338"
-		newStatusHandler(fake, newClientTracker(), newClientTracker(), pairing.NewStore(nil), "").ServeHTTP(rec, req)
+		newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil), "").ServeHTTP(rec, req)
 
 		var raw map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
@@ -292,7 +279,7 @@ func TestStatusHandlerOmitsTrendTheDeviceDidNotCompute(t *testing.T) {
 func TestStatusHandlerRequiresLoopbackHost(t *testing.T) {
 	t.Parallel()
 	fake := fakePollerStatus{status: poller.Status{LastReadingMgDl: 145}}
-	h := newStatusHandler(fake, newClientTracker(), newClientTracker(), pairing.NewStore(nil), "")
+	h := newStatusHandler(fake, newClientTracker(), pairing.NewStore(nil), "")
 
 	cases := []struct {
 		host       string
@@ -391,7 +378,7 @@ func TestStatusHandlerSecret(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			pairings := pairing.NewStore(nil)
-			h := newStatusHandler(fake, newClientTracker(), newClientTracker(), pairings, c.configured)
+			h := newStatusHandler(fake, newClientTracker(), pairings, c.configured)
 			rec := statusRequest(h, c.method, c.path, c.sent)
 
 			if rec.Code != c.wantStatus {
@@ -530,198 +517,5 @@ func TestContainsValue(t *testing.T) {
 				t.Errorf("ContainsValue(%q, %q) = %v, want %v", c.text, "111", got, c.want)
 			}
 		})
-	}
-}
-
-// fakeReadings is a nightscout.ReadingRange holding a fixed set of readings.
-type fakeReadings struct {
-	readings []cgm.Reading
-}
-
-func (f fakeReadings) Range(_ context.Context, q store.RangeQuery) ([]cgm.Reading, error) {
-	if q.Limit > 0 && len(f.readings) > q.Limit {
-		return f.readings[:q.Limit], nil
-	}
-	return f.readings, nil
-}
-
-const lanTestToken = "lan-reading-token-0123456789"
-
-// lanFetch sends one GET for target through handler as userAgent and
-// returns the status code. A "{token}" in target is replaced by the real
-// token; header, when not empty, is sent as the api-secret header.
-func lanFetch(handler http.Handler, target, userAgent, header string) int {
-	req := httptest.NewRequest(http.MethodGet, strings.ReplaceAll(target, "{token}", lanTestToken), nil)
-	if userAgent != "" {
-		req.Header.Set("User-Agent", userAgent)
-	}
-	if header != "" {
-		req.Header.Set("api-secret", header)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec.Code
-}
-
-func newLANTestHandler(t *testing.T, readings []cgm.Reading, tracker *clientTracker, now func() time.Time) http.Handler {
-	t.Helper()
-	ns, err := nightscout.New(fakeReadings{readings: readings}, lanTestToken, nil)
-	if err != nil {
-		t.Fatalf("nightscout.New: %v", err)
-	}
-	return trackLANReadings(ns, tracker, now)
-}
-
-// TestLANReadingTrackerRecordsOnlyRequestsAnsweredWithReadings drives the
-// real Nightscout handler through trackLANReadings: only a request that
-// carried a valid credential and was answered with at least one reading is
-// recorded, whichever endpoint or credential form it used.
-func TestLANReadingTrackerRecordsOnlyRequestsAnsweredWithReadings(t *testing.T) {
-	t.Parallel()
-	one := []cgm.Reading{{Time: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), MgDl: 120, Trend: cgm.TrendFlat, Source: "test"}}
-	cases := []struct {
-		name     string
-		readings []cgm.Reading
-		target   string
-		header   string
-		want     bool
-	}{
-		{name: "entries with a token", readings: one, target: "/api/v1/entries.json?count=10&token={token}", want: true},
-		{name: "sgv with a token", readings: one, target: "/api/v1/entries/sgv.json?token={token}", want: true},
-		{name: "current with a token", readings: one, target: "/api/v1/entries/current.json?token={token}", want: true},
-		{name: "entries with the api-secret header", readings: one, target: "/api/v1/entries.json", header: lanTestToken, want: true},
-		{name: "no token", readings: one, target: "/api/v1/entries.json?count=10"},
-		{name: "a wrong token", readings: one, target: "/api/v1/entries.json?token=not-the-token"},
-		{name: "a wrong api-secret header", readings: one, target: "/api/v1/entries.json", header: "not-the-token"},
-		{name: "an empty store", target: "/api/v1/entries.json?token={token}"},
-		{name: "an empty store on current", target: "/api/v1/entries/current.json?token={token}"},
-		{name: "a count of zero", readings: one, target: "/api/v1/entries.json?count=0&token={token}"},
-		{name: "a malformed count", readings: one, target: "/api/v1/entries.json?count=x&token={token}"},
-		{name: "the status check", readings: one, target: "/api/v1/status.json?token={token}"},
-		{name: "the profile", readings: one, target: "/api/v1/profile?token={token}"},
-		{name: "the treatments list", readings: one, target: "/api/v1/treatments.json?token={token}"},
-		{name: "an unimplemented path", readings: one, target: "/api/v3/version?token={token}"},
-		{name: "the root page", readings: one, target: "/"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			tracker := newClientTracker()
-			now := time.Date(2026, 6, 1, 12, 5, 0, 0, time.UTC)
-			h := newLANTestHandler(t, c.readings, tracker, fixedNow(now))
-
-			lanFetch(h, c.target, "LoopFollow/2.0", c.header)
-
-			seen := tracker.snapshot()
-			if !c.want {
-				if len(seen) != 0 {
-					t.Fatalf("recorded %v, want nothing", seen)
-				}
-				return
-			}
-			if got, ok := seen["LoopFollow/2.0"]; !ok || !got.Equal(now) || len(seen) != 1 {
-				t.Fatalf("recorded %v, want only LoopFollow/2.0 at %v", seen, now)
-			}
-		})
-	}
-}
-
-// TestLANReadingTrackerMovesForwardAndCleansTheUserAgent checks that a
-// later fetch replaces the recorded time, that the User-Agent is kept as
-// sent apart from control characters and the length cut, that a fetch with
-// no User-Agent is still recorded, and that /status carries no part of the
-// token or the query string.
-func TestLANReadingTrackerMovesForwardAndCleansTheUserAgent(t *testing.T) {
-	t.Parallel()
-	one := []cgm.Reading{{Time: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), MgDl: 120, Trend: cgm.TrendFlat, Source: "test"}}
-	tracker := newClientTracker()
-	current := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	h := newLANTestHandler(t, one, tracker, func() time.Time { return current })
-	target := "/api/v1/entries.json?count=3&token={token}"
-
-	lanFetch(h, target, "xDrip4iOS/1.0", "")
-	first := tracker.snapshot()["xDrip4iOS/1.0"]
-	if !first.Equal(current) {
-		t.Fatalf("first fetch recorded %v, want %v", first, current)
-	}
-	current = current.Add(5 * time.Minute)
-	lanFetch(h, target, "xDrip4iOS/1.0", "")
-	if second := tracker.snapshot()["xDrip4iOS/1.0"]; !second.Equal(current) || !second.After(first) {
-		t.Errorf("later fetch recorded %v, want %v, after %v", second, current, first)
-	}
-
-	// Control characters are removed; the rest is kept as sent. The header
-	// value is set on the request directly, since a client library would
-	// refuse to send the control characters at all.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/entries.json?token="+lanTestToken, nil)
-	req.Header["User-Agent"] = []string{"Nightguard\x00/\x1b[31m1.0\t\u0085 \u00e9"}
-	h.ServeHTTP(httptest.NewRecorder(), req)
-	if _, ok := tracker.snapshot()["Nightguard/[31m1.0 \u00e9"]; !ok {
-		t.Errorf("control characters were not removed or the rest was altered: %q", tracker.snapshot())
-	}
-
-	long := strings.Repeat("\u00e9", 500)
-	lanFetch(h, target, long, "")
-	if _, ok := tracker.snapshot()[strings.Repeat("\u00e9", maxLANUserAgentRunes)]; !ok {
-		t.Errorf("a %d-character User-Agent was not cut to %d characters: %q", 500, maxLANUserAgentRunes, tracker.snapshot())
-	}
-
-	lanFetch(h, target, "", "")
-	if _, ok := tracker.snapshot()[unknownUserAgent]; !ok {
-		t.Errorf("a fetch with no User-Agent was not recorded as %q: %v", unknownUserAgent, tracker.snapshot())
-	}
-
-	status := newStatusHandler(fakePollerStatus{}, newClientTracker(), tracker, pairing.NewStore(nil), "")
-	rec := httptest.NewRecorder()
-	statusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
-	statusReq.Host = "127.0.0.1:1338"
-	status.ServeHTTP(rec, statusReq)
-	body := rec.Body.String()
-	for _, leaked := range []string{lanTestToken, "token=", "count=3", "?"} {
-		if strings.Contains(body, leaked) {
-			t.Errorf("/status carries %q: %s", leaked, body)
-		}
-	}
-	var got statusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode /status: %v", err)
-	}
-	if len(got.LANReadingClients) != 4 {
-		t.Errorf("lan_reading_clients = %v, want 4 entries", got.LANReadingClients)
-	}
-}
-
-// TestLANErrorLogDropsHandshakeLinesAndKeepsTheRest checks the writer behind
-// the LAN servers' error log: handshake failures never reach the output
-// with an address, a count is reported at most once a minute, and every
-// other line the server logs passes through untouched.
-func TestLANErrorLogDropsHandshakeLinesAndKeepsTheRest(t *testing.T) {
-	t.Parallel()
-	var out strings.Builder
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	logger := log.New(&out, "", 0)
-	errorLog := newLANErrorLog(logger, func() time.Time { return now })
-
-	errorLog.Printf("http: TLS handshake error from 192.168.1.50:51234: EOF")
-	errorLog.Printf("http: TLS handshake error from 192.168.1.51:40000: tls: first record does not look like a TLS handshake")
-	errorLog.Printf("http: Accept error: too many open files; retrying in 5ms")
-	got := out.String()
-	if strings.Contains(got, "192.168.1.5") {
-		t.Errorf("output carries a remote address: %q", got)
-	}
-	if strings.Count(got, "handshake") != 1 {
-		t.Errorf("want one count line for the two failures inside a minute, got %q", got)
-	}
-	if !strings.Contains(got, "http: Accept error: too many open files; retrying in 5ms") {
-		t.Errorf("an unrelated server error was lost: %q", got)
-	}
-
-	now = now.Add(time.Minute)
-	errorLog.Printf("http: TLS handshake error from 192.168.1.52:1: EOF")
-	if strings.Count(out.String(), "handshake") != 2 {
-		t.Errorf("want a second count line after a minute, got %q", out.String())
-	}
-	if strings.Contains(out.String(), "192.168.1.5") {
-		t.Errorf("output carries a remote address: %q", out.String())
 	}
 }
