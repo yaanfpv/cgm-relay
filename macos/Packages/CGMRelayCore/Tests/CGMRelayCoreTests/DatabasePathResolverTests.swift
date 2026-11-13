@@ -48,7 +48,7 @@ struct SingleInstanceTests {
         #expect(SingleInstance.decide(ownPID: 20, runningPIDs: [30, 20, 10, 15]) == .yield(to: 10))
     }
 
-    @Test("two copies launched together see the same set and exactly one proceeds")
+    @Test("two copies given the same set of running pids agree on which one proceeds")
     func simultaneousLaunch() {
         let both: [Int32] = [100, 200]
         let low = SingleInstance.decide(ownPID: 100, runningPIDs: both)

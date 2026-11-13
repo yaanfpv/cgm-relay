@@ -14,8 +14,11 @@ public enum SingleInstance {
     /// decide lets the copy with the lowest process id among all copies,
     /// this one included, proceed: it returns .proceed when ownPID is lower
     /// than every other pid in runningPIDs (or there is none), else
-    /// .yield to the lowest other pid. Copies launched together each see
-    /// the same set, so exactly one of them proceeds.
+    /// .yield to the lowest other pid. Given the same set of pids, copies
+    /// agree on which one proceeds. The running-application list each copy
+    /// reads is a snapshot, so copies started close together can see
+    /// different sets and both proceed; the engine's store lock and port
+    /// then leave only one of them relaying.
     public static func decide(ownPID: Int32, runningPIDs: [Int32]) -> Decision {
         guard let lowest = runningPIDs.filter({ $0 != ownPID }).min(), lowest < ownPID else { return .proceed }
         return .yield(to: lowest)

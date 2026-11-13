@@ -164,8 +164,10 @@ struct CGMRelayApp: App {
 
     /// yieldToRunningCopy runs before anything reads or writes credentials:
     /// when another copy with this app's bundle identifier is already
-    /// running, it brings that copy forward and quits this one, so two
-    /// copies never share the credentials item and database.
+    /// running, it brings that copy forward and quits this one. The check
+    /// reads a snapshot of the running copies, so two copies started close
+    /// together can both pass it; one still relays, because the engine's
+    /// store lock and port refuse the second.
     private static func yieldToRunningCopy() {
         guard let identifier = Bundle.main.bundleIdentifier else { return }
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
