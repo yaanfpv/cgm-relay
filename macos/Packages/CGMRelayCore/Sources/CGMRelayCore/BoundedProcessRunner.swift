@@ -104,34 +104,34 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
         timeout: Duration,
         captureOutput: Bool
     ) async -> BoundedProcessOutput {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.environment = RealProcessLauncher.childEnvironment(from: ProcessInfo.processInfo.environment)
+        let environment = RealProcessLauncher.childEnvironment(from: ProcessInfo.processInfo.environment)
             .merging(extraEnvironment) { _, added in added }
         let outputPipe = captureOutput ? Pipe() : nil
-        process.standardOutput = outputPipe ?? FileHandle.nullDevice
-        process.standardError = outputPipe ?? FileHandle.nullDevice
+        let outputDescriptor = outputPipe?.fileHandleForWriting.fileDescriptor
         let inputPipe = Pipe()
-        process.standardInput = inputPipe
         disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
 
         let exitSignal = BoundedProcessExitSignal()
-        process.terminationHandler = { finished in
-            let exitCode = finished.terminationReason == .uncaughtSignal
-                ? -finished.terminationStatus
-                : finished.terminationStatus
-            Task { await exitSignal.resolve(exitCode) }
-        }
-
+        let child: SpawnedChild
         do {
-            try process.run()
+            child = try ChildSpawner.spawn(
+                executableURL: executableURL,
+                arguments: arguments,
+                environment: environment,
+                standardInput: inputPipe.fileHandleForReading.fileDescriptor,
+                standardOutput: outputDescriptor,
+                standardError: outputDescriptor
+            ) { exitCode in
+                Task { await exitSignal.resolve(exitCode) }
+            }
         } catch {
             return BoundedProcessOutput(result: .failedToLaunch, output: Data())
         }
-
-        // The parent's copy of the write end must close, or the read below
-        // never sees end of file after the child exits.
+        let signaller = child.signaller
+        // The child's own ends of the pipes close here, as do the parent's
+        // copy of the write end: without that the read below never sees end
+        // of file after the child exits.
+        try? inputPipe.fileHandleForReading.close()
         try? outputPipe?.fileHandleForWriting.close()
         let collectedOutput = outputPipe.map { OutputCollection(reading: $0.fileHandleForReading) }
 
@@ -176,15 +176,12 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
             // however this call happened to end the process, and a
             // future change to how it is terminated must never turn
             // .timedOut into .exited under this same test.
-            if process.isRunning {
-                process.terminate()
-            }
+            signaller.send(SIGTERM)
             // A child that ignores the request is killed outright after a
             // short grace, so a timed-out run never leaves it running.
-            let processID = process.processIdentifier
             let killer = Task {
                 try? await Task.sleep(for: Self.terminateGrace)
-                if !Task.isCancelled { kill(processID, SIGKILL) }
+                if !Task.isCancelled { signaller.send(SIGKILL) }
             }
             _ = await group.next()
             killer.cancel()
