@@ -77,7 +77,7 @@ struct CGMRelayApp: App {
         .restorationBehavior(.disabled)
 
         // First-launch setup: opened by SetupPresenter after a launch that
-        // finds setup incomplete, and by the menu's "Finish setup…", never
+        // finds setup incomplete, and by the menu's "Finish Setup…", never
         // by the system on its own.
         Window("Set Up CGM Relay", id: SetupWindow.id) {
             SetupView(model: model, openAdvanced: { sceneActions.showSettings(tab: .advanced) })
@@ -88,7 +88,7 @@ struct CGMRelayApp: App {
 
         // What an update adds to a finished setup: opened by
         // UpdateStepsPresenter after a launch that finds new steps, and by the
-        // menu's "Finish setup…" while the move to the built-in route is owed.
+        // menu's "Finish Setup…" while the move to the built-in route is owed.
         Window("What's New in This Update", id: UpdateStepsWindow.id) {
             UpdateStepsView(model: model)
         }
