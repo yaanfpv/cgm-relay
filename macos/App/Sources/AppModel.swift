@@ -293,7 +293,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in ref.value?.handleStatusUpdate(status) }
         }
         ref.value = self
-        stayAwake.onFailure = { failure in
+        stayAwake.onFailure = { @Sendable failure in
             Task { @MainActor in ref.value?.stayAwakeNotice = failure.message }
         }
         let watcher = PowerSourceWatcher { [weak self] in

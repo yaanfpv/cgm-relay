@@ -120,7 +120,7 @@ public final class StayAwakeController: @unchecked Sendable {
     /// onFailure hears each failure while the person's choice is on; with
     /// the choice off or unasked, a failure changes nothing for them and is
     /// not reported.
-    public var onFailure: ((StayAwakeFailure) -> Void)?
+    public var onFailure: (@Sendable (StayAwakeFailure) -> Void)?
 
     public init(
         choice: StayAwakeChoice?,
