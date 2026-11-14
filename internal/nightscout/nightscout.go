@@ -88,6 +88,8 @@ func (h *handler) registerRoutes() {
 	h.mux.HandleFunc("GET /api/v1/entries/current.json", h.handleCurrent)
 	h.mux.HandleFunc("GET /api/v1/status.json", h.handleStatus)
 	h.mux.HandleFunc("GET /api/v1/experiments/test", h.handleAuthTest)
+	h.mux.HandleFunc("GET /api/v2/properties", h.handleProperties)
+	h.mux.HandleFunc("GET /api/v2/properties/", h.handleProperties)
 	// Each empty collection is also served at every spelling a follower app
 	// requests it by (with or without ".json", "profile" or "profiles.json"),
 	// so each spelling gets the same answer instead of a 404.
@@ -112,7 +114,9 @@ func (h *handler) registerRoutes() {
 // vice versa, on any status code.
 //
 // After that, the request is routed, then, unless its path is one of
-// openPaths, authenticated before running the matched endpoint. A path
+// openPaths, authenticated before running the matched endpoint. status.json,
+// an open path, still answers 401 to a request that presents only wrong
+// credentials (see statusRefuses). A path
 // this handler does not implement is answered with 404 before any
 // credential is checked, matching a real Nightscout server: some follower
 // apps (e.g. Nightguard, probing /api/v3/version to decide whether to fall
@@ -128,7 +132,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if RequiresCredential(r) && !h.checkAuth(r) {
-		http.Error(w, "nightscout: missing or invalid credential", http.StatusUnauthorized)
+		writeUnauthorized(w)
+		return
+	}
+	if r.URL.Path == statusPath && h.statusRefuses(r) {
+		writeUnauthorized(w)
 		return
 	}
 	h.mux.ServeHTTP(w, r)

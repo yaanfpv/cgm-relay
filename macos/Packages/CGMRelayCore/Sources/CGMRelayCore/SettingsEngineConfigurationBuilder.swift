@@ -12,10 +12,11 @@ public enum SettingsEngineConfigurationBuilder {
         interfaces: [NetworkInterfaceAddress],
         statusAddr: String,
         databasePath: String,
+        tailscaleStateDir: String? = nil,
         librelinkupBaseURL: String? = nil
     ) throws -> EngineConfiguration? {
         let host = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        return try EngineConfigurationBuilder.build(
+        let configuration = try EngineConfigurationBuilder.build(
             from: store,
             listenAddr: "\(host):\(settings.port)",
             statusAddr: statusAddr,
@@ -23,5 +24,12 @@ public enum SettingsEngineConfigurationBuilder {
             retentionDays: settings.retentionDays,
             librelinkupBaseURL: librelinkupBaseURL
         )
+        guard settings.useBuiltInTailscale, let tailscaleStateDir, var configuration else { return configuration }
+        configuration.tailscaleStateDir = tailscaleStateDir
+        configuration.tailscaleHostname = builtInHostname
+        return configuration
     }
+
+    /// builtInHostname is the name the built-in node joins Tailscale as.
+    public static let builtInHostname = "cgm-relay"
 }

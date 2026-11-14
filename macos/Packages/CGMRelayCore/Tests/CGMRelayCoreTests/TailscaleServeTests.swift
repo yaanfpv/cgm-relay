@@ -458,3 +458,17 @@ struct TailscaleServeTests {
         #expect(LoginItemFailure.reason(for: LoginItemUnavailableError.notFound) == "This build can't open at login.")
     }
 }
+
+@Suite("TailscaleAppDetector")
+struct TailscaleAppDetectorTests {
+    @Test("no install of either build reads as not installed")
+    func absent() {
+        #expect(TailscaleAppDetector.isInstalled(lookup: { _ in nil }) == false)
+    }
+
+    @Test("either build alone reads as installed", arguments: TailscaleAppDetector.bundleIdentifiers)
+    func eitherBuild(identifier: String) {
+        let found = TailscaleAppDetector.isInstalled(lookup: { $0 == identifier ? URL(fileURLWithPath: "/Applications/Tailscale.app") : nil })
+        #expect(found)
+    }
+}

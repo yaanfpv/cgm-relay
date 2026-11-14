@@ -435,3 +435,308 @@ struct AppSettingsTests {
         #expect(decoded.signInFailingAlertEnabled == true)
     }
 }
+
+@Suite("AppSettings built-in Tailscale")
+struct AppSettingsBuiltInTailscaleTests {
+    @Test("useBuiltInTailscale defaults to false")
+    func defaultsFalse() {
+        #expect(AppSettings.default.useBuiltInTailscale == false)
+    }
+
+    @Test("useBuiltInTailscale true round-trips through encode and decode")
+    func roundTrips() throws {
+        var settings = AppSettings.default
+        settings.useBuiltInTailscale = true
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+
+        #expect(decoded.useBuiltInTailscale == true)
+        #expect(decoded == settings)
+    }
+
+    @Test("a stored value without the key reads false and keeps its other fields")
+    func missingKeyReadsFalse() throws {
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "retentionDays": 30}"#.utf8))
+
+        #expect(decoded.useBuiltInTailscale == false)
+        #expect(decoded.port == 4000)
+        #expect(decoded.retentionDays == 30)
+    }
+}
+
+@Suite("Update steps for an existing install")
+struct UpdateStepsTests {
+    /// A person who finished 1.0.x setup: finished, version 1, never asked
+    /// about keeping the Mac awake, on this Mac only with no Tailscale.
+    private static var oneZero: AppSettings {
+        var s = AppSettings.default
+        s.setupFinished = true
+        s.setupVersion = 1
+        return s
+    }
+
+    struct PlanCase: Sendable, CustomTestStringConvertible {
+        let name: String
+        let settings: AppSettings
+        let tailscaleInstalled: Bool
+        /// The plan while stayAwake is still unanswered.
+        let expected: SetupPlan
+        var testDescription: String { name }
+    }
+
+    private static func with(_ edit: (inout AppSettings) -> Void) -> AppSettings {
+        var s = oneZero
+        edit(&s)
+        return s
+    }
+
+    static let cases: [PlanCase] = [
+        PlanCase(name: "local mover, Tailscale absent",
+                 settings: with { $0.movedFromLocalRoute = true },
+                 tailscaleInstalled: false, expected: .updateSteps([.movedToBuiltIn, .stayAwake])),
+        PlanCase(name: "local mover, Tailscale installed",
+                 settings: with { $0.movedFromLocalRoute = true },
+                 tailscaleInstalled: true, expected: .updateSteps([.movedToBuiltIn, .stayAwake])),
+        PlanCase(name: "local mover who also had Tailscale HTTPS, installed: moved wins, no second step",
+                 settings: with { $0.movedFromLocalRoute = true; $0.tailscaleHTTPSEnabled = true },
+                 tailscaleInstalled: true, expected: .updateSteps([.movedToBuiltIn, .stayAwake])),
+        PlanCase(name: "Tailscale HTTPS user, Tailscale installed",
+                 settings: with { $0.tailscaleHTTPSEnabled = true },
+                 tailscaleInstalled: true, expected: .updateSteps([.tailscaleChoice, .stayAwake])),
+        PlanCase(name: "Tailscale HTTPS user, Tailscale not installed",
+                 settings: with { $0.tailscaleHTTPSEnabled = true },
+                 tailscaleInstalled: false, expected: .updateSteps([.movedToBuiltIn, .stayAwake])),
+        PlanCase(name: "My tailnet user, Tailscale installed",
+                 settings: with { $0.reach = .myTailnet },
+                 tailscaleInstalled: true, expected: .updateSteps([.tailscaleChoice, .stayAwake])),
+        PlanCase(name: "My tailnet user, Tailscale not installed",
+                 settings: with { $0.reach = .myTailnet },
+                 tailscaleInstalled: false, expected: .updateSteps([.movedToBuiltIn, .stayAwake])),
+        PlanCase(name: "This Mac only user, Tailscale installed, not moved",
+                 settings: with { _ in },
+                 tailscaleInstalled: true, expected: .updateSteps([.stayAwake])),
+        PlanCase(name: "This Mac only user, Tailscale absent, not moved",
+                 settings: with { _ in },
+                 tailscaleInstalled: false, expected: .updateSteps([.stayAwake])),
+        PlanCase(name: "already on built-in, with every older Tailscale trace, installed",
+                 settings: with { $0.useBuiltInTailscale = true; $0.movedFromLocalRoute = true; $0.tailscaleHTTPSEnabled = true; $0.reach = .myTailnet },
+                 tailscaleInstalled: true, expected: .updateSteps([.stayAwake])),
+        PlanCase(name: "already on built-in, with every older Tailscale trace, not installed",
+                 settings: with { $0.useBuiltInTailscale = true; $0.movedFromLocalRoute = true; $0.tailscaleHTTPSEnabled = true; $0.reach = .myTailnet },
+                 tailscaleInstalled: false, expected: .updateSteps([.stayAwake])),
+    ]
+
+    @Test("a 1.0.x install is asked only the steps that apply to it", arguments: cases)
+    func oneZeroPlan(_ c: PlanCase) {
+        #expect(SetupPlan.make(settings: c.settings, tailscaleInstalled: c.tailscaleInstalled) == c.expected)
+    }
+
+    @Test("a stayAwake answer already given removes that step, and a list that empties is nothing", arguments: cases, [StayAwakeChoice.on, .off])
+    func stayAwakeAnsweredDropsItsStep(_ c: PlanCase, _ choice: StayAwakeChoice) {
+        var settings = c.settings
+        settings.stayAwake = choice
+        let plan = SetupPlan.make(settings: settings, tailscaleInstalled: c.tailscaleInstalled)
+        guard case .updateSteps(let steps) = c.expected else {
+            Issue.record("table case must expect steps")
+            return
+        }
+        let remaining = steps.filter { $0 != .stayAwake }
+        #expect(plan == (remaining.isEmpty ? .nothing : .updateSteps(remaining)))
+    }
+
+    @Test("a person who never finished setup gets the full setup whatever else is stored")
+    func notFinishedIsFullSetup() {
+        var variants: [AppSettings] = [.default]
+        for edit: (inout AppSettings) -> Void in [
+            { $0.setupVersion = 1 }, { $0.setupVersion = AppSettings.currentSetupVersion },
+            { $0.movedFromLocalRoute = true }, { $0.tailscaleHTTPSEnabled = true },
+            { $0.reach = .myTailnet }, { $0.useBuiltInTailscale = true },
+            { $0.stayAwake = .on }, { $0.answeredUpdateSteps = Set(UpdateStep.allCases) },
+        ] {
+            var s = AppSettings.default
+            edit(&s)
+            variants.append(s)
+        }
+        for settings in variants {
+            #expect(settings.setupFinished == false)
+            for installed in [false, true] {
+                #expect(SetupPlan.make(settings: settings, tailscaleInstalled: installed) == .fullSetup)
+            }
+        }
+    }
+
+    @Test("an install already at the current setup version has nothing to show, whatever else is stored", arguments: [AppSettings.currentSetupVersion, AppSettings.currentSetupVersion + 1])
+    func currentVersionIsNothing(_ version: Int) {
+        var s = AppSettings.default
+        s.setupFinished = true
+        s.setupVersion = version
+        s.movedFromLocalRoute = true
+        s.tailscaleHTTPSEnabled = true
+        s.stayAwake = nil
+        for installed in [false, true] {
+            #expect(SetupPlan.make(settings: s, tailscaleInstalled: installed) == .nothing)
+        }
+    }
+
+    // MARK: - answered steps
+
+    @Test("answered steps are removed from the plan, and answering every step leaves nothing")
+    func answeredStepsAreRemoved() {
+        var mover = Self.oneZero
+        mover.movedFromLocalRoute = true
+        #expect(SetupPlan.make(settings: mover, tailscaleInstalled: false) == .updateSteps([.movedToBuiltIn, .stayAwake]))
+        let one = mover.answering(.movedToBuiltIn)
+        #expect(SetupPlan.make(settings: one, tailscaleInstalled: false) == .updateSteps([.stayAwake]))
+        let both = one.answering(.stayAwake)
+        #expect(both.stayAwake == nil, "answering records the step only; it never sets the stayAwake choice")
+        #expect(SetupPlan.make(settings: both, tailscaleInstalled: false) == .nothing)
+    }
+
+    @Test("an answered step that does not apply changes nothing, and answering the remaining step on a tailscaleChoice user leaves nothing")
+    func answeredStepThatDoesNotApplyIsInert() {
+        var mover = Self.oneZero
+        mover.movedFromLocalRoute = true
+        let inert = mover.answering(.tailscaleChoice)
+        #expect(SetupPlan.make(settings: inert, tailscaleInstalled: false) == .updateSteps([.movedToBuiltIn, .stayAwake]))
+
+        var user = Self.oneZero
+        user.tailscaleHTTPSEnabled = true
+        let done = user.answering(.tailscaleChoice).answering(.stayAwake)
+        #expect(SetupPlan.make(settings: done, tailscaleInstalled: true) == .nothing)
+    }
+
+    @Test("answering inserts the step and changes nothing else, and answering twice is the same as once")
+    func answeringChangesOnlyTheSet() {
+        var base = AppSettings.default
+        base.port = 4242
+        base.setupFinished = true
+        base.setupVersion = 1
+        base.movedFromLocalRoute = true
+        base.stayAwake = .off
+        for step in UpdateStep.allCases {
+            let answered = base.answering(step)
+            #expect(answered.answeredUpdateSteps == [step])
+            var restored = answered
+            restored.answeredUpdateSteps = base.answeredUpdateSteps
+            #expect(restored == base)
+            #expect(answered.answering(step) == answered)
+        }
+        let all = UpdateStep.allCases.reduce(base) { $0.answering($1) }
+        #expect(all.answeredUpdateSteps == Set(UpdateStep.allCases))
+    }
+
+    @Test("answeredUpdateSteps defaults to empty")
+    func defaultsEmpty() {
+        #expect(AppSettings.default.answeredUpdateSteps.isEmpty)
+    }
+
+    @Test("answered steps survive an encode and decode round trip")
+    func answeredStepsRoundTrip() throws {
+        let settings = Self.oneZero.answering(.movedToBuiltIn).answering(.stayAwake)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded.answeredUpdateSteps == [.movedToBuiltIn, .stayAwake])
+        #expect(decoded == settings)
+    }
+
+    @Test("an interrupted update resumes with only the unanswered step after a save and load")
+    func interruptedUpdateResumes() {
+        let suite = "cgmrelay.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var settings = Self.oneZero
+        settings.movedFromLocalRoute = true
+        let store = UserDefaultsSettingsStore(suiteName: suite)
+        store.save(settings.answering(.movedToBuiltIn))
+
+        let relaunched = UserDefaultsSettingsStore(suiteName: suite).load()
+        #expect(relaunched.answeredUpdateSteps == [.movedToBuiltIn])
+        #expect(relaunched.setupVersion == 1, "the update is not finished until finishingUpdate")
+        #expect(SetupPlan.make(settings: relaunched, tailscaleInstalled: false) == .updateSteps([.stayAwake]))
+    }
+
+    // MARK: - finishing
+
+    @Test("finishingUpdate sets the current setup version and changes nothing else, after which there is nothing to show")
+    func finishingUpdate() {
+        var s = Self.oneZero
+        s.port = 4242
+        s.units = .mmolL
+        s.movedFromLocalRoute = true
+        s.tailscaleHTTPSEnabled = true
+        s.stayAwake = .on
+        s.answeredUpdateSteps = [.movedToBuiltIn]
+        let finished = s.finishingUpdate()
+        #expect(finished.setupVersion == AppSettings.currentSetupVersion)
+        var restored = finished
+        restored.setupVersion = s.setupVersion
+        #expect(restored == s)
+        #expect(SetupPlan.make(settings: finished, tailscaleInstalled: false) == .nothing)
+        #expect(SetupPlan.make(settings: finished, tailscaleInstalled: true) == .nothing)
+
+        let unanswered = Self.oneZero.finishingUpdate()
+        #expect(unanswered.stayAwake == nil)
+        #expect(unanswered.answeredUpdateSteps.isEmpty)
+        #expect(unanswered.setupFinished == true)
+    }
+
+    // MARK: - decoding
+
+    @Test("a stored step this version does not know is dropped and every other field is kept")
+    func unknownStepIsDropped() throws {
+        let json = """
+        {
+          "port": 4242,
+          "retentionDays": 45,
+          "units": "mmolL",
+          "setupFinished": true,
+          "setupVersion": 1,
+          "movedFromLocalRoute": true,
+          "stayAwake": "on",
+          "answeredUpdateSteps": ["stayAwake", "somethingNew"]
+        }
+        """
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+        #expect(decoded.answeredUpdateSteps == [.stayAwake])
+        #expect(decoded.port == 4242)
+        #expect(decoded.retentionDays == 45)
+        #expect(decoded.units == .mmolL)
+        #expect(decoded.setupFinished == true)
+        #expect(decoded.setupVersion == 1)
+        #expect(decoded.movedFromLocalRoute == true)
+        #expect(decoded.stayAwake == .on)
+    }
+
+    @Test("a stored value without the key reads empty and keeps its other fields")
+    func missingKeyReadsEmpty() throws {
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "setupFinished": true}"#.utf8))
+        #expect(decoded.answeredUpdateSteps.isEmpty)
+        #expect(decoded.port == 4000)
+        #expect(decoded.setupFinished == true)
+    }
+
+    @Test("the settings 1.0.2 wrote, with the removed local network reach, decode and plan the move and the stay-awake question")
+    func releasedOneZeroTwoSettings() throws {
+        let json = """
+        {
+          "port": 4242,
+          "reach": "myLocalNetwork",
+          "retentionDays": 45,
+          "units": "mmolL",
+          "noReadingAlertEnabled": true,
+          "noReadingAlertMinutes": 45,
+          "signInFailingAlertEnabled": true,
+          "tailscaleHTTPSEnabled": false,
+          "setupFinished": true,
+          "showReadingInMenuBar": false,
+          "connectFollowerApp": "xDrip4iOS",
+          "localCertificateStepFinished": true
+        }
+        """
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+        #expect(decoded.port == 4242)
+        #expect(decoded.answeredUpdateSteps.isEmpty)
+        for installed in [false, true] {
+            #expect(SetupPlan.make(settings: decoded, tailscaleInstalled: installed) == .updateSteps([.movedToBuiltIn, .stayAwake]))
+        }
+    }
+}

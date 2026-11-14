@@ -31,3 +31,48 @@ struct EngineStatusTests {
         #expect(status.clients?.count == 1)
     }
 }
+
+@Suite("EngineStatus built-in route")
+struct EngineStatusBuiltInTests {
+    private func decode(_ json: String) throws -> EngineStatus {
+        try JSONDecoder.engineStatusDecoder.decode(EngineStatus.self, from: Data(json.utf8))
+    }
+
+    @Test("ts_state needs-login with ts_login_url decodes into builtIn carrying both")
+    func decodesNeedsLogin() throws {
+        let status = try decode(#"{"running": true, "sign_in_failing": false, "ts_state": "needs-login", "ts_login_url": "https://login.tailscale.com/a/abc123"}"#)
+
+        let builtIn = try #require(status.builtIn)
+        #expect(builtIn.loginURL == "https://login.tailscale.com/a/abc123")
+        #expect(builtIn.approveURL == nil)
+        #expect(builtIn.funnelURL == nil)
+        #expect(builtIn.publicHost == nil)
+        #expect(builtIn.error == nil)
+    }
+
+    @Test("a running state carries its public host")
+    func decodesRunningHost() throws {
+        let status = try decode(#"{"running": true, "sign_in_failing": false, "ts_state": "running", "ts_public_host": "relay.example-tailnet.ts.net"}"#)
+
+        #expect(status.builtIn?.publicHost == "relay.example-tailnet.ts.net")
+    }
+
+    @Test("with no ts_ keys builtIn is nil and the rest of the status decodes as before")
+    func absentKeysMeanNoBuiltIn() throws {
+        let status = try decode(#"{"running": true, "sign_in_failing": true, "last_error": "boom", "last_reading_mg_dl": 120}"#)
+
+        #expect(status.builtIn == nil)
+        #expect(status.running)
+        #expect(status.signInFailing)
+        #expect(status.lastError == "boom")
+        #expect(status.lastReadingMgDl == 120)
+    }
+
+    @Test("an unknown ts_state does not fail the decode of the rest of the status")
+    func unknownStateDoesNotFailDecode() throws {
+        let status = try decode(#"{"running": true, "sign_in_failing": false, "last_reading_mg_dl": 99, "ts_state": "from-the-future"}"#)
+
+        #expect(status.lastReadingMgDl == 99)
+        #expect(BuiltInRouteState.from(status.builtIn).isFailed, "an unknown state reads as a failed route")
+    }
+}

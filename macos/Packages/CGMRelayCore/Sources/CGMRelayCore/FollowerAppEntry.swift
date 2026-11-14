@@ -65,11 +65,13 @@ public enum FollowerAppEntry {
         let entry = hostAndPort(of: address)
         let token = tokenPlaceholder
         switch app {
-        case .xDrip4iOS:
+        case .xDrip4iOS, .zukka:
             // The Nightscout screen lists URL, API_SECRET, Token, then Port,
             // with Test Connection in the actions group below them.
             var fields = [Field(label: "URL", value: entry.host), Field(label: "Token", value: token)]
-            var steps = [
+            // Zukka is the App Store build of xDrip4iOS: same screens, same fields.
+            var steps = app == .zukka ? ["Zukka is the App Store build of xDrip4iOS, so the steps are the same."] : []
+            steps += [
                 "In Settings, set Master or Follower to Follower, and Data Source to Nightscout.",
                 "In Settings, open Sharing and Services, then Nightscout, and turn it on.",
                 entry.port == nil ? "In URL, enter the address." : "In URL, enter the address without its port.",
@@ -85,7 +87,9 @@ public enum FollowerAppEntry {
                 name: app.displayName,
                 steps: steps,
                 fields: fields,
-                links: [Link(label: "Open xDrip4iOS", url: "xdripswift://open")]
+                links: app == .zukka
+                    ? [Link(label: "Get Zukka on the App Store", url: "https://apps.apple.com/app/id6743448282")]
+                    : [Link(label: "Open xDrip4iOS", url: "xdripswift://open")]
             )
         case .xDripPlus:
             return Instructions(
@@ -113,6 +117,19 @@ public enum FollowerAppEntry {
                 steps: ["When Nightguard first opens, enter the address in Nightscout URL and the token in API Token."],
                 fields: [Field(label: "Nightscout URL", value: address), Field(label: "API Token", value: token)],
                 links: [Link(label: "Get Nightguard on the App Store", url: "https://apps.apple.com/us/app/nightguard/id1116430352")]
+            )
+        case .sweetDreams:
+            return Instructions(
+                name: app.displayName,
+                steps: [
+                    "Sweet Dreams reads from its own servers, so it needs the built-in Tailscale address, not your own Tailscale.",
+                    "Open Link Your Nightscout, then Nightscout Details.",
+                    "In the first field, enter the address.",
+                    "In the second field, enter the token.",
+                    "Tap Login.",
+                ],
+                fields: [Field(label: "Address", value: address), Field(label: "Token", value: token)],
+                links: []
             )
         }
     }

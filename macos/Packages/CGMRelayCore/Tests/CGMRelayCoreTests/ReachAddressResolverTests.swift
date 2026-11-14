@@ -309,3 +309,42 @@ struct FollowerAddressTests {
     }
 }
 
+
+@Suite("ConnectPaneAddressState built-in route")
+struct ConnectPaneAddressStateBuiltInTests {
+    private func decide(_ builtIn: BuiltInRouteState?, reach: NetworkReach = .thisMacOnly, boundHost: String? = "127.0.0.1", implied: String = "127.0.0.1", port: Int = 1337, availability: ReachAddressAvailability = .available("127.0.0.1")) -> ConnectPaneAddressState {
+        ConnectPaneAddressState.decide(reach: reach, boundHost: boundHost, impliedBindHost: implied, port: port, displayHostAvailability: availability, builtIn: builtIn)
+    }
+
+    @Test("a ready built-in route yields the https host with no port and no trailing slash")
+    func readyIsHTTPSHost() {
+        #expect(decide(.ready(host: "relay.example-tailnet.ts.net")) == .ready(address: "https://relay.example-tailnet.ts.net"))
+    }
+
+    @Test("a ready built-in route ignores reach, port, bound host and availability")
+    func readyIgnoresEverythingElse() {
+        let got = decide(.ready(host: "relay.example-tailnet.ts.net"), reach: .myTailnet, boundHost: nil, implied: "100.101.102.5", port: 8443, availability: .unavailable(reason: "n/a"))
+        #expect(got == .ready(address: "https://relay.example-tailnet.ts.net"))
+    }
+
+    @Test("every built-in state that is not ready yields no address", arguments: [
+        BuiltInRouteState.starting,
+        .signIn(URL(string: "https://login.tailscale.com/a/abc123")!),
+        .approve(URL(string: "https://login.tailscale.com/admin/machines")!),
+        .enableFunnel(URL(string: "https://login.tailscale.com/f/funnel")!),
+        .settingUp(host: "relay.example-tailnet.ts.net"),
+        .failed("synthetic failure"),
+    ])
+    func notReadyIsUnavailable(state: BuiltInRouteState) {
+        guard case .unavailable(let reason) = decide(state, reach: .myTailnet, boundHost: "100.101.102.5", implied: "100.101.102.5", availability: .available("100.101.102.5")) else {
+            Issue.record("\(state) must yield .unavailable")
+            return
+        }
+        #expect(!reason.isEmpty)
+    }
+
+    @Test("with no built-in route decide behaves as before")
+    func nilBuiltInIsUnchanged() {
+        #expect(decide(nil, reach: .myTailnet, boundHost: "100.101.102.5", implied: "100.101.102.5", availability: .available("100.101.102.5")) == .ready(address: "http://100.101.102.5:1337"))
+    }
+}

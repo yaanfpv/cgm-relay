@@ -1,13 +1,18 @@
 package tailnode_test
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/nightscout"
+	"github.com/yaanfpv/cgm-relay/internal/store"
 	"github.com/yaanfpv/cgm-relay/internal/tailnode"
 )
 
@@ -151,6 +156,42 @@ func TestPublicHandlerAllowlist(t *testing.T) {
 	}
 }
 
+// TestPublicHandlerAllowsV2Properties checks the v2 properties route and its
+// property-list forms reach the wrapped handler, and that deeper, longer or
+// misspelt paths do not.
+func TestPublicHandlerAllowsV2Properties(t *testing.T) {
+	allowed := []string{
+		"/api/v2/properties", "/api/v2/properties/iob,cob", "/api/v2/properties/notaproperty",
+	}
+	refused := []string{
+		"/api/v2/properties/a/b", "/api/v2/propertiesX", "/api/v2/props",
+	}
+	var reached bool
+	h := tailnode.PublicHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	serve := func(path string) (int, bool) {
+		reached = false
+		req := httptest.NewRequest(http.MethodGet, "http://relay.example-tailnet.ts.net/", nil)
+		req.URL.Path = path
+		req.RequestURI = path
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code, reached
+	}
+	for _, p := range allowed {
+		if code, hit := serve(p); code != http.StatusOK || !hit {
+			t.Errorf("%s: code %d, reached next %v; want 200 and reached", p, code, hit)
+		}
+	}
+	for _, p := range refused {
+		if code, hit := serve(p); code != http.StatusNotFound || hit {
+			t.Errorf("%s: code %d, reached next %v; want 404 and not reached", p, code, hit)
+		}
+	}
+}
+
 // TestLimitListener checks that with a cap of 2 a third Accept waits until a
 // held connection closes.
 func TestLimitListener(t *testing.T) {
@@ -207,4 +248,62 @@ func TestLimitListener(t *testing.T) {
 		t.Fatal("third Accept still blocked after a held connection closed")
 	}
 	held[1].Close()
+}
+
+// noReadings is a ReadingRange with nothing stored; the status route reads
+// no readings, so it is only here to build the real Nightscout handler.
+type noReadings struct{}
+
+func (noReadings) Range(context.Context, store.RangeQuery) ([]cgm.Reading, error) {
+	return nil, nil
+}
+
+// TestPublicStatusChecksPresentedCredential checks that on the
+// public listener's handler, wrapping the real Nightscout handler, status
+// answers 401 with Nightscout's body to a presented wrong credential (token
+// query, api-secret, Bearer), 200 with none, and 200 with the right one in
+// each accepted form.
+func TestPublicStatusChecksPresentedCredential(t *testing.T) {
+	const token = "public-token"
+	const wantBody = `{"status":401,"message":"Unauthorized","description":"Invalid/Missing"}`
+	ns, err := nightscout.New(noReadings{}, token, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := tailnode.PublicHandler(ns)
+	cases := []struct {
+		name   string
+		query  string
+		header map[string]string
+		want   int
+	}{
+		{"wrong token query", "?token=wrong", nil, 401},
+		{"wrong api-secret", "", map[string]string{"api-secret": "wrong"}, 401},
+		{"wrong bearer", "", map[string]string{"Authorization": "Bearer wrong"}, 401},
+		{"no credential", "", nil, 200},
+		{"right token query", "?token=" + token, nil, 200},
+		{"right api-secret raw", "", map[string]string{"api-secret": token}, 200},
+		{"right bearer", "", map[string]string{"Authorization": "Bearer " + token}, 200},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://relay.example-tailnet.ts.net/api/v1/status.json"+c.query, nil)
+			for k, v := range c.header {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != c.want {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, c.want, rec.Body.String())
+			}
+			if c.want == 401 {
+				if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+					t.Errorf("Content-Type = %q, want application/json prefix", ct)
+				}
+				if got := strings.TrimSpace(rec.Body.String()); got != wantBody {
+					t.Errorf("body = %s, want %s", got, wantBody)
+				}
+			}
+		})
+	}
 }

@@ -235,7 +235,7 @@ struct SetupView: View {
     /// yet, so Continue then steps back and the screen has one primary
     /// action. Once the chosen way works, Continue is the primary action.
     private var offersTailscaleHTTPS: Bool {
-        guard !isPhoneReachable else { return false }
+        guard !isPhoneReachable, !model.settings.useBuiltInTailscale else { return false }
         if case .off = model.httpsState { return true }
         return false
     }
@@ -269,7 +269,9 @@ struct SetupView: View {
     }
 }
 
-/// SetupReachStep is step 2. Tailscale's state and its HTTPS setting read as
+/// SetupReachStep is step 2. With Tailscale's Mac app installed it first asks
+/// whether to use it; without the app, or when the person picks the built-in
+/// one, the built-in route's status row is all there is. Otherwise Tailscale's state and its HTTPS setting read as
 /// status rows, and beneath them every way a phone can reach this Mac that
 /// Advanced has (without This Mac only, which no phone can use), Tailscale
 /// HTTPS among them. Continue waits for the chosen way to work, and one line
@@ -279,29 +281,41 @@ private struct SetupReachStep: View {
 
     var body: some View {
         Form {
-            Section {
-                tailscaleRow
-                if case .running = model.tailscaleStatus {
-                    TailscaleHTTPSControl(model: model, part: .statusRow)
-                }
-            } footer: {
-                switch model.tailscaleStatus {
-                case .running:
-                    TailscaleHTTPSControl(model: model, part: .notes)
-                case .unknown, .absent, .stopped:
-                    EmptyView()
-                }
+            if model.tailscaleAppInstalled {
+                TailscaleChoiceView(model: model)
             }
-            Section {
-                ReachChoicesView(model: model, offersThisMacOnly: false, showsAvailabilityNotes: false)
-            } header: {
-                Text("Choose how your phone reaches this Mac")
-            } footer: {
-                blockedReason
+            if model.settings.useBuiltInTailscale {
+                BuiltInRouteView(model: model)
+                Section {} footer: { blockedReason }
+            } else {
+                Section {
+                    tailscaleRow
+                    if case .running = model.tailscaleStatus {
+                        TailscaleHTTPSControl(model: model, part: .statusRow)
+                    }
+                } footer: {
+                    switch model.tailscaleStatus {
+                    case .running:
+                        TailscaleHTTPSControl(model: model, part: .notes)
+                    case .unknown, .absent, .stopped:
+                        EmptyView()
+                    }
+                }
+                Section {
+                    ReachChoicesView(model: model, offersThisMacOnly: false, showsAvailabilityNotes: false)
+                } header: {
+                    Text("Choose how your phone reaches this Mac")
+                } footer: {
+                    blockedReason
+                }
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+        .onAppear {
+            model.refreshTailscaleAppInstalled()
+            model.chooseBuiltInTailscaleWithoutTailscaleApp()
+        }
     }
 
     @ViewBuilder
@@ -333,7 +347,7 @@ private struct SetupReachStep: View {
 /// SetupStayAwakeStep is step 3: whether CGM Relay keeps this Mac awake. It
 /// is asked once; Not Now and Turn On each save the answer, and a closed
 /// password prompt leaves it unanswered.
-private struct SetupStayAwakeStep: View {
+struct SetupStayAwakeStep: View {
     @ObservedObject var model: AppModel
 
     var body: some View {

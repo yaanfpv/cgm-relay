@@ -381,8 +381,8 @@ var followerRequests = []followerRequest{
 		method:     http.MethodGet,
 		path:       "/api/v2/properties/dbsize",
 		credential: credentialTokenQuery,
-		wantStatus: http.StatusNotFound,
-		note:       "harmless: webLoadNSDBSize's .failure case only logs (DBSize.swift), which clears the db-size info pill via updateDBSize's own guard; dbSizeTaskAction reschedules itself unconditionally every 6 hours regardless of success or failure (DBSizeTask.swift), so a 404 here never blocks or delays any other periodic task",
+		wantStatus: http.StatusOK,
+		note:       "the relay answers Nightscout's v2 properties route and drops a name it does not model, so the db-size request gets an empty object; webLoadNSDBSize's failure case only logs (DBSize.swift), and the task reschedules itself every 6 hours either way",
 	},
 }
 
@@ -449,9 +449,10 @@ func TestAliasesAnswerAsTheirSibling(t *testing.T) {
 // fresh handler three times: with the right credential (must match
 // row.wantStatus, and for a 200 row must actually serve JSON), with no
 // credential, and with a wrong one of the row's own form (both of the
-// latter two must get 401 with a plain-text body, never the JSON shape a
+// latter two must get 401 with Nightscout's refusal body, never the JSON shape a
 // real reading would carry, except on an open endpoint, which answers
-// them 200 exactly as it does the right one). A row whose wantStatus is
+// them 200 exactly as it does the right one; status.json still answers a
+// presented wrong credential 401). A row whose wantStatus is
 // 404 is credential-independent by construction — this handler answers 404
 // before checkAuth ever runs (see TestUnimplementedPathReturns404BeforeAuth)
 // — so only the single request is checked, and row.note carries why that
@@ -491,7 +492,10 @@ func TestFollowerAppRequests(t *testing.T) {
 				t.Run(c.name, func(t *testing.T) {
 					rec := httptest.NewRecorder()
 					h.ServeHTTP(rec, row.request(c.secret))
-					if openEndpoints[row.path] {
+					// status.json refuses a presented wrong credential; only the
+					// other open endpoint answers it as it does the right one.
+					wrongOnStatus := c.secret != "" && row.path == "/api/v1/status.json"
+					if openEndpoints[row.path] && !wrongOnStatus {
 						if rec.Code != row.wantStatus {
 							t.Errorf("open endpoint: status = %d, want %d (body: %s)", rec.Code, row.wantStatus, rec.Body.String())
 						}
@@ -501,7 +505,7 @@ func TestFollowerAppRequests(t *testing.T) {
 						t.Errorf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnauthorized, rec.Body.String())
 					}
 					if ct := rec.Header().Get("Content-Type"); ct == "application/json" {
-						t.Errorf("Content-Type = %q on a 401, want the plain-text error body, never the JSON shape a served reading carries", ct)
+						t.Errorf("Content-Type = %q on a 401, want Nightscout's refusal content type, never the one a served reading carries", ct)
 					}
 				})
 			}

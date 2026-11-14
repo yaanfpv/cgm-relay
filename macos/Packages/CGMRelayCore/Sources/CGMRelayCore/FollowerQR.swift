@@ -27,7 +27,7 @@ public enum FollowerQRPlanner {
     /// for the longest one and keep what follows it in one place.
     public static func caption(for app: FollowerApp) -> String {
         switch app {
-        case .xDrip4iOS, .nightguard:
+        case .xDrip4iOS, .nightguard, .sweetDreams, .zukka:
             return "Scan with the iPhone camera. It opens a page where you copy each value into \(app.displayName). The code lasts \(pairingCodeLifetimeMinutes) minutes."
         case .xDripPlus:
             return "In xDrip+, open Settings, then Auto Configure, and scan this code. It holds your token, so keep it private."
@@ -43,7 +43,8 @@ public enum FollowerQRPlanner {
     ///
     /// xDrip4iOS registers `xdripswift://` only to come to the front and to
     /// import backup files, and Nightguard has no settings import at all,
-    /// so both open the pairing page. A future settings link would replace
+    /// so both open the pairing page, as do Sweet Dreams and Zukka, which
+    /// have no settings import either. A future settings link would replace
     /// the `.xDrip4iOS` case here and nowhere else.
     public static func qr(
         for app: FollowerApp,
@@ -53,7 +54,7 @@ public enum FollowerQRPlanner {
         now: Date = Date()
     ) -> FollowerQR? {
         switch app {
-        case .xDrip4iOS, .nightguard:
+        case .xDrip4iOS, .nightguard, .sweetDreams, .zukka:
             guard let pairingCode else { return nil }
             return FollowerQR(
                 payload: "\(address)/connect/\(pairingCode)",

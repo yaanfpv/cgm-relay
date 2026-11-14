@@ -133,8 +133,15 @@ public enum ConnectPaneAddressState: Sendable, Equatable {
         boundHost: String?,
         impliedBindHost: String,
         port: Int,
-        displayHostAvailability: ReachAddressAvailability
+        displayHostAvailability: ReachAddressAvailability,
+        builtIn: BuiltInRouteState? = nil
     ) -> ConnectPaneAddressState {
+        // The built-in route decides alone: its address is the public host,
+        // whatever the engine's own listener is bound to.
+        if let builtIn {
+            if let address = builtIn.address { return .ready(address: address) }
+            return .unavailable(reason: builtIn.notReadyReason)
+        }
         switch reach {
         case .thisMacOnly:
             return .thisMacOnly
@@ -183,8 +190,14 @@ public enum PhoneReachability: Sendable, Equatable {
         reach: NetworkReach,
         httpsChosen: Bool,
         https: TailscaleHTTPSState,
-        tailnetAvailable: Bool
+        tailnetAvailable: Bool,
+        builtIn: BuiltInRouteState? = nil
     ) -> PhoneReachability {
+        // The built-in route, when in use, reaches a phone only once its
+        // public address is ready.
+        if let builtIn {
+            return builtIn.address != nil ? .reachable : .blocked(reason: builtIn.notReadyReason)
+        }
         if httpsChosen {
             switch https {
             case .on:

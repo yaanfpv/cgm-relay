@@ -18,6 +18,41 @@ struct MenuDisplayStateTests {
         #expect(state.statusLine == "Setup needed")
     }
 
+    @Test("while no route a phone can use exists, current readings are not green and the state says phones cannot reach this Mac yet")
+    func phonesCannotReachYet() {
+        let fresh = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 120)
+        let state = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: fresh, now: Self.now, phonesCanReach: false)
+        #expect(state.dot == .amber)
+        #expect(state.hasProblem)
+        #expect(state.shortStatus == "Phones can't reach this Mac")
+        #expect(state.statusDetail == "Phones can't reach this Mac yet.")
+        #expect(state.readingValue == "120")
+
+        let stopped = MenuDisplayState.make(credentialsConfigured: true, engineState: .stopped, status: fresh, now: Self.now, phonesCanReach: false)
+        #expect(stopped.dot == .red)
+        #expect(stopped.shortStatus == "Stopped")
+        #expect(stopped.statusDetail == "Phones can't reach this Mac yet.")
+
+        let failing = EngineStatus(running: true, lastReadingTime: Self.now, lastReadingMgDl: 120, signInFailing: true)
+        let signIn = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: failing, now: Self.now, phonesCanReach: false)
+        #expect(signIn.statusDetail == "Check your LibreLinkUp email and password in Settings.")
+
+        let noAccount = MenuDisplayState.make(credentialsConfigured: false, engineState: .running, status: fresh, now: Self.now, phonesCanReach: false)
+        #expect(noAccount.statusLine == "Setup needed")
+        #expect(noAccount.statusDetail == nil)
+
+        // A built-in route chosen and left before its address was ready
+        // reads the same way, with the readings still current underneath.
+        let current = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-30), lastReadingMgDl: 118)
+        let unready = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: current, now: Self.now, phonesCanReach: false)
+        #expect(unready.dot != .green)
+        #expect(unready.statusDetail == "Phones can't reach this Mac yet.")
+
+        let reachable = MenuDisplayState.make(credentialsConfigured: true, engineState: .running, status: fresh, now: Self.now)
+        #expect(reachable.dot == .green)
+        #expect(reachable.statusDetail == nil)
+    }
+
     @Test("engine stopped shows red even with a recent reading on file")
     func engineStopped() {
         let status = EngineStatus(running: true, lastReadingTime: Self.now.addingTimeInterval(-30), lastReadingMgDl: 110)

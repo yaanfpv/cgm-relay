@@ -112,3 +112,37 @@ struct SettingsEngineConfigurationBuilderTests {
         #expect(config == nil)
     }
 }
+
+@Suite("SettingsEngineConfigurationBuilder built-in Tailscale")
+struct SettingsEngineConfigurationBuilderBuiltInTests {
+    private func encodedKeys(useBuiltIn: Bool) throws -> [String: Any] {
+        var settings = AppSettings.default
+        settings.useBuiltInTailscale = useBuiltIn
+        let config = try #require(try SettingsEngineConfigurationBuilder.build(
+            settings: settings,
+            from: SettingsEngineConfigurationBuilderTests.store(),
+            interfaces: [],
+            statusAddr: "127.0.0.1:1338",
+            databasePath: "/tmp/readings.db",
+            tailscaleStateDir: "/tmp/x/tailscale"
+        ))
+        let data = try config.encodedForStandardInput()
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test("with the built-in route on, stdin carries the state dir and the cgm-relay hostname")
+    func carriesBothWhenOn() throws {
+        let json = try encodedKeys(useBuiltIn: true)
+
+        #expect(json["tailscale_state_dir"] as? String == "/tmp/x/tailscale")
+        #expect(json["tailscale_hostname"] as? String == "cgm-relay")
+    }
+
+    @Test("with the built-in route off, neither key is sent")
+    func carriesNeitherWhenOff() throws {
+        let json = try encodedKeys(useBuiltIn: false)
+
+        #expect(json["tailscale_state_dir"] == nil)
+        #expect(json["tailscale_hostname"] == nil)
+    }
+}

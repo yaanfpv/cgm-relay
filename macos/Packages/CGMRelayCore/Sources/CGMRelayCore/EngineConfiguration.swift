@@ -35,6 +35,11 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
     /// caller of its local status listener. nil leaves the engine without
     /// one, so it refuses to mint pairing codes.
     public var statusSecret: String?
+    /// tailscaleStateDir and tailscaleHostname turn on the engine's built-in
+    /// Tailscale node: the folder it keeps its state in, and the name it
+    /// joins as. Both nil leaves that route off.
+    public var tailscaleStateDir: String?
+    public var tailscaleHostname: String?
 
     private enum CodingKeys: String, CodingKey {
         case librelinkupEmail = "librelinkup_email"
@@ -47,6 +52,8 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         case key
         case librelinkupBaseURL = "librelinkup_base_url"
         case statusSecret = "status_secret"
+        case tailscaleStateDir = "tailscale_state_dir"
+        case tailscaleHostname = "tailscale_hostname"
     }
 
     public init(
@@ -59,7 +66,9 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         retentionDays: Int,
         key: String,
         librelinkupBaseURL: String? = nil,
-        statusSecret: String? = nil
+        statusSecret: String? = nil,
+        tailscaleStateDir: String? = nil,
+        tailscaleHostname: String? = nil
     ) {
         self.librelinkupEmail = librelinkupEmail
         self.librelinkupPassword = librelinkupPassword
@@ -71,6 +80,8 @@ public struct EngineConfiguration: Codable, Equatable, Sendable {
         self.key = key
         self.librelinkupBaseURL = librelinkupBaseURL
         self.statusSecret = statusSecret
+        self.tailscaleStateDir = tailscaleStateDir
+        self.tailscaleHostname = tailscaleHostname
     }
 
     /// withStatusSecret returns this configuration carrying secret as its
