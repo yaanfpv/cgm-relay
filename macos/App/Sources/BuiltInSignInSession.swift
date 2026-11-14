@@ -12,9 +12,7 @@ import CGMRelayCore
 @MainActor
 final class BuiltInSignInSession: NSObject, ASWebAuthenticationPresentationContextProviding {
     private static let callbackScheme = "cgm-relay-built-in-never"
-    private var session: ASWebAuthenticationSession?
-    private var presentedURL: URL?
-    private var generation = 0
+    private let slot = SignInWindowSlot<ASWebAuthenticationSession>()
 
     /// pageURL is the page a state asks the person to complete, nil for a
     /// state with none.
@@ -32,36 +30,26 @@ final class BuiltInSignInSession: NSObject, ASWebAuthenticationPresentationConte
             let url = BuiltInRouteState.openable(page.absoluteString)
         else { return }
         cancel()
-        let token = generation
-        let next = ASWebAuthenticationSession(url: url, callback: .customScheme(Self.callbackScheme)) { [weak self] _, _ in
-            Task { @MainActor in self?.ended(token) }
-        }
+        let next = ASWebAuthenticationSession(
+            url: url,
+            callback: .customScheme(Self.callbackScheme),
+            completionHandler: slot.makeCompletion()
+        )
         next.presentationContextProvider = self
         next.prefersEphemeralWebBrowserSession = false
         guard next.start() else { return }
-        session = next
-        presentedURL = url
+        slot.started(next, url: url)
     }
 
     /// reconcile closes the sheet once the engine's state no longer asks for
     /// the page it shows.
     func reconcile(with route: BuiltInRouteState) {
-        guard let presentedURL else { return }
+        guard let presentedURL = slot.presentedURL else { return }
         if Self.pageURL(of: route) != presentedURL { cancel() }
     }
 
     func cancel() {
-        generation += 1
-        let old = session
-        session = nil
-        presentedURL = nil
-        old?.cancel()
-    }
-
-    private func ended(_ token: Int) {
-        guard token == generation else { return }
-        session = nil
-        presentedURL = nil
+        slot.clear()?.cancel()
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {

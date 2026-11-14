@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
+	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/logtail"
 	"tailscale.com/tsnet"
@@ -206,6 +207,10 @@ func (n *Node) run(ctx context.Context) {
 	// The node's own logs stay on this Mac: logtail would otherwise upload them to Tailscale's log service.
 	logtail.Disable()
 	quiet := func(string, ...any) {}
+	// Port mapping probes the local network for a router (SSDP and the
+	// gateway), which makes macOS ask the person to allow local network
+	// access. Funnel and the public listener do not use it.
+	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
 	s := &tsnet.Server{
 		Dir:        n.opts.StateDir,
 		Hostname:   n.opts.Hostname,
