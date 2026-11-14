@@ -78,7 +78,7 @@ public struct MenuDisplayState: Sendable, Equatable {
 
     /// showsStatusLine is whether the panel has a state to report: every
     /// state except an account not yet set up, where the panel's own
-    /// "Finish setup…" says the same thing.
+    /// "Finish Setup…" says the same thing.
     public var showsStatusLine: Bool { dot != .grey }
 
     /// freshWindow is how recent a reading has to be to still count as

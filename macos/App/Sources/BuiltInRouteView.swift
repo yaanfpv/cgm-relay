@@ -70,7 +70,7 @@ struct BuiltInRouteView: View {
 /// BuiltInRouteCopy is what the person is told before signing in: the
 /// address is public and opened only by the token.
 enum BuiltInRouteCopy {
-    static let disclosure = "This gives your Mac a private https address on the internet that only your token opens. Its name appears in public certificate logs. A Tailscale account is free, and your phone needs nothing installed."
+    static let disclosure = "This gives your Mac a public https address that only your token opens. Its name appears in public certificate logs. A Tailscale account is free, and your phone needs nothing installed."
 }
 
 /// TailscaleChoiceView asks "Use your Tailscale?" where Tailscale's Mac app

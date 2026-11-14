@@ -154,7 +154,7 @@ private struct UpdateMovedStep: View {
     var body: some View {
         Form {
             Section {
-                Text("The local network route is gone in this version, because it stopped working whenever you were away from home. CGM Relay now gives this Mac its own private address through a built-in Tailscale, so your phone can reach it from anywhere.")
+                Text("The local network route is gone in this version, because it stopped working whenever you were away from home. CGM Relay now gives this Mac its own public https address through a built-in Tailscale, so your phone can reach it from anywhere.")
                     .fixedSize(horizontal: false, vertical: true)
             }
             BuiltInRouteView(model: model)
