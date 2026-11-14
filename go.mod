@@ -3,8 +3,8 @@ module github.com/yaanfpv/cgm-relay
 go 1.27.4
 
 require (
-	golang.org/x/sys v0.49.0
-	golang.org/x/term v0.47.0
+	golang.org/x/sys v0.50.0
+	golang.org/x/term v0.48.0
 	modernc.org/sqlite v1.61.1
 	tailscale.com v1.104.7
 )
