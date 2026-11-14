@@ -64,14 +64,13 @@ public final class SystemIdleSleepAssertion: IdleSleepAsserting {
 /// setting off then needs nothing (nothing could have turned it on), and
 /// turning it on is an error. Otherwise the call blocks until the command
 /// finishes or its time is up: at most the timeout, plus the runner's 2 s
-/// to end a child that ignores the request, plus a 1 s margin before this
-/// stops waiting.
+/// to end a child that ignores the request.
 ///
-/// The wait blocks its thread until a task of Swift's thread pool has run
-/// the command, so it must never be called from a Swift concurrency task:
-/// pool threads blocked here can leave none to run the command, and the
-/// write fails after its time is up. Its callers are the main thread and the
-/// dedicated thread of willQuitInBackground.
+/// The command runs on the calling thread, with no Swift concurrency task in
+/// the path, so a busy app can never keep it from running. It blocks that
+/// thread, so it must not be called from a Swift concurrency task, which
+/// would hold one of the pool's few threads for the wait. Its callers are
+/// the main thread and the dedicated thread of willQuitInBackground.
 public struct PrivilegedSleepSettingWriter: SleepSettingWriting, Sendable {
     private let runner: any BoundedProcessRunning
     private let timeout: Duration
@@ -94,37 +93,13 @@ public struct PrivilegedSleepSettingWriter: SleepSettingWriting, Sendable {
             if on { throw StayAwakeFailure.permissionNotInstalled }
             return
         }
-        let runner = runner
-        let timeout = timeout
-        let arguments = ["-n", "/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"]
-        let outcome = BlockingResult()
-        Task.detached {
-            let result = await runner.run(
-                executableURL: URL(fileURLWithPath: "/usr/bin/sudo"),
-                arguments: arguments,
-                standardInputData: Data(),
-                timeout: timeout
-            )
-            outcome.finish(result)
-        }
-        guard outcome.wait(seconds: Double(timeout.components.seconds) + 3) == .exited(0) else { throw StayAwakeFailure.sleepSettingNotChanged }
-    }
-}
-
-/// BlockingResult hands one value from a task to a thread that waits for it.
-private final class BlockingResult: @unchecked Sendable {
-    private let done = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
-    private var value: BoundedProcessResult = .failedToLaunch
-
-    func finish(_ result: BoundedProcessResult) {
-        lock.withLock { value = result }
-        done.signal()
-    }
-
-    func wait(seconds: Double) -> BoundedProcessResult {
-        guard done.wait(timeout: .now() + seconds) == .success else { return .timedOut }
-        return lock.withLock { value }
+        let result = runner.runOnCallingThread(
+            executableURL: URL(fileURLWithPath: "/usr/bin/sudo"),
+            arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"],
+            standardInputData: Data(),
+            timeout: timeout
+        )
+        guard result == .exited(0) else { throw StayAwakeFailure.sleepSettingNotChanged }
     }
 }
 
