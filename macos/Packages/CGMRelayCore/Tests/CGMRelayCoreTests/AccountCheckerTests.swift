@@ -51,6 +51,10 @@ private struct ScriptedRunner: BoundedProcessRunning {
         output.result
     }
 
+    func runOnCallingThread(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) -> BoundedProcessResult {
+        output.result
+    }
+
     func runCapturingOutput(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessOutput {
         output
     }
