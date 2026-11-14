@@ -144,3 +144,63 @@ struct RealBoundedProcessRunnerTests {
         #expect(run.output.count == 8 + 200_000)
     }
 }
+
+@Suite("RealBoundedProcessRunner on the calling thread")
+struct RealBoundedProcessRunnerCallingThreadTests {
+    /// Runs body on a thread of its own, so the call is made from a plain
+    /// thread and never from one of Swift's pool threads.
+    private func onPlainThread<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            Thread { continuation.resume(returning: body()) }.start()
+        }
+    }
+
+    @Test("reports an exit code, a death by signal and a missing executable")
+    func reportsOutcomes() async {
+        let runner = RealBoundedProcessRunner()
+        let results: [BoundedProcessResult] = await onPlainThread {
+            [
+                runner.runOnCallingThread(executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "exit 12"], standardInputData: Data(), timeout: .seconds(5)),
+                runner.runOnCallingThread(executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "kill -QUIT $$"], standardInputData: Data(), timeout: .seconds(5)),
+                runner.runOnCallingThread(executableURL: URL(fileURLWithPath: "/no/such/executable-cgmrelay-test"), arguments: [], standardInputData: Data(), timeout: .seconds(5)),
+            ]
+        }
+        #expect(results == [.exited(12), .exited(-3), .failedToLaunch])
+    }
+
+    @Test("writes standardInputData to the child's stdin")
+    func writesStandardInput() async {
+        let runner = RealBoundedProcessRunner()
+        let result = await onPlainThread {
+            runner.runOnCallingThread(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "read line; [ \"$line\" = hello ]"],
+                standardInputData: Data("hello\n".utf8),
+                timeout: .seconds(5)
+            )
+        }
+        #expect(result == .exited(0))
+    }
+
+    @Test("a child that outlives the timeout is ended and reported as timedOut", arguments: [false, true])
+    func timeoutEndsTheProcess(ignoresTerminate: Bool) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-sync-timeout-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("marker")
+        let script = (ignoresTerminate ? "$SIG{TERM}='IGNORE'; " : "")
+            + "sleep 30; open(my $m,\">\",$ARGV[0]) or die; print $m \"done\"; close($m) or die"
+
+        let runner = RealBoundedProcessRunner()
+        let result = await onPlainThread {
+            runner.runOnCallingThread(
+                executableURL: URL(fileURLWithPath: "/usr/bin/perl"),
+                arguments: ["-e", script, marker.path],
+                standardInputData: Data(),
+                timeout: .milliseconds(300)
+            )
+        }
+        #expect(result == .timedOut)
+        #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
+    }
+}
