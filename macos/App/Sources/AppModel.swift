@@ -932,7 +932,7 @@ final class AppModel: ObservableObject {
             && !settings.answeredUpdateSteps.contains(.movedToBuiltIn)
     }
 
-    /// offersFinishSetup is whether the menu panel offers "Finish setup…":
+    /// offersFinishSetup is whether the menu panel offers "Finish Setup…":
     /// while setup is unfinished, and while the chosen route cannot reach a
     /// phone.
     var offersFinishSetup: Bool { needsSetup || phonesCannotReachYet }

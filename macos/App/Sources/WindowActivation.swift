@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// SetupWindow names the first-launch setup window and is the one way the
-/// app opens it, so a launch and the menu's "Finish setup…" behave alike.
+/// app opens it, so a launch and the menu's "Finish Setup…" behave alike.
 enum SetupWindow {
     static let id = "setup"
 }

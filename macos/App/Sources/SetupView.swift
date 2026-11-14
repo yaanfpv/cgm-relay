@@ -18,7 +18,7 @@ struct SetupView: View {
         func title(phoneReachable: Bool) -> String {
             switch self {
             case .signIn: "Sign In"
-            case .reach: "Reach Your Phone"
+            case .reach: "Reach This Mac"
             case .stayAwake: "Keep This Mac Awake"
             case .connect: "Connect Your App"
             case .ready: phoneReachable ? "You're All Set" : "Your Phone Isn't Connected Yet"
@@ -274,8 +274,9 @@ struct SetupView: View {
 /// one, the built-in route's status row is all there is. Otherwise Tailscale's state and its HTTPS setting read as
 /// status rows, and beneath them every way a phone can reach this Mac that
 /// Advanced has (without This Mac only, which no phone can use), Tailscale
-/// HTTPS among them. Continue waits for the chosen way to work, and one line
-/// under the choices says what is missing.
+/// HTTPS among them. Continue waits for the chosen way to work. Under the
+/// choices one line says what is missing; the built-in route's status row
+/// says it itself.
 private struct SetupReachStep: View {
     @ObservedObject var model: AppModel
 
@@ -286,7 +287,6 @@ private struct SetupReachStep: View {
             }
             if model.settings.useBuiltInTailscale {
                 BuiltInRouteView(model: model)
-                Section {} footer: { blockedReason }
             } else {
                 Section {
                     tailscaleRow

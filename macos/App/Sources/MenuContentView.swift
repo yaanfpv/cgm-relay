@@ -49,7 +49,7 @@ struct MenuContentView: View {
             }
 
             if model.offersFinishSetup {
-                AccessibleButton("Finish setup…", style: actionsRowHasPrimary ? .secondary : .primary, action: actions.openSetup)
+                AccessibleButton("Finish Setup…", style: actionsRowHasPrimary ? .secondary : .primary, action: actions.openSetup)
             }
 
             if updates.pending != .none {
@@ -113,7 +113,7 @@ struct MenuContentView: View {
     }
 
     /// actionsRowHasPrimary is whether the actions row shows a primary
-    /// button (Start or Try Again), in which case "Finish setup…" steps
+    /// button (Start or Try Again), in which case "Finish Setup…" steps
     /// back so the panel keeps one primary action.
     private var actionsRowHasPrimary: Bool {
         model.canStart || model.canTryAgain
