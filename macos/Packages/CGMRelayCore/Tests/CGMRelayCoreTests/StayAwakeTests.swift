@@ -238,6 +238,27 @@ struct StayAwakeControllerTests {
         #expect(rig.log.drain().contains("setDisableSleep(false)"))
     }
 
+    @Test("a failure reported on the quit thread reaches a handler the app set from the main actor, and the handler's hop back to the main actor completes")
+    @MainActor
+    func failureOnQuitThreadReachesMainActorHandler() async {
+        let rig = Rig(choice: .on, power: laptopOnAC)
+        rig.controller.launched()
+        rig.controller.relayStarted()
+        rig.sleep.failNextWrite = true
+        // The handler is set from the main actor, the way the app sets it,
+        // and does what the app's does: hop to the main actor to record.
+        let (updates, deliver) = AsyncStream.makeStream(of: StayAwakeFailure.self)
+        rig.controller.onFailure = { failure in
+            Task { @MainActor in deliver.yield(failure) }
+        }
+        // willQuit runs on a thread of its own and its clearing write fails.
+        await rig.controller.willQuitInBackground()
+        deliver.finish()
+        var seen: [StayAwakeFailure] = []
+        for await failure in updates { seen.append(failure) }
+        #expect(seen == [.sleepSettingNotChanged])
+    }
+
     @Test("a failed hold does not stop the sleep setting following the target")
     func failedHold() {
         let rig = Rig(choice: .on, power: laptopOnAC)
