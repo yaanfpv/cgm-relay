@@ -190,9 +190,19 @@ public final class StayAwakeController: @unchecked Sendable {
 
     /// willQuitInBackground is willQuit run off the calling thread and
     /// awaited, so a slow privileged write never holds the main thread. Its
-    /// time is bounded by the writer's.
+    /// time is bounded by the writer's. It runs on a thread of its own, never
+    /// a task: the privileged writer blocks its thread until a task of
+    /// Swift's thread pool has run the command, and a pool thread blocked
+    /// that way can starve the very task it waits for.
     public func willQuitInBackground() async {
-        await Task.detached { self.willQuit() }.value
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let thread = Thread {
+                self.willQuit()
+                continuation.resume()
+            }
+            thread.name = "cgm-relay.will-quit"
+            thread.start()
+        }
     }
 
     /// knownDisableSleep is what the setting is known to be, nil when that

@@ -66,7 +66,13 @@ public final class SystemIdleSleepAssertion: IdleSleepAsserting {
 /// finishes or its time is up: at most the timeout, plus the runner's 2 s
 /// to end a child that ignores the request, plus a 1 s margin before this
 /// stops waiting.
-public struct PrivilegedSleepSettingWriter: SleepSettingWriting {
+///
+/// The wait blocks its thread until a task of Swift's thread pool has run
+/// the command, so it must never be called from a Swift concurrency task:
+/// pool threads blocked here can leave none to run the command, and the
+/// write fails after its time is up. Its callers are the main thread and the
+/// dedicated thread of willQuitInBackground.
+public struct PrivilegedSleepSettingWriter: SleepSettingWriting, Sendable {
     private let runner: any BoundedProcessRunning
     private let timeout: Duration
     private let ruleExists: @Sendable () -> Bool

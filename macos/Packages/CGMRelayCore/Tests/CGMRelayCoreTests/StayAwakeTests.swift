@@ -341,23 +341,42 @@ private final class CountingRunner: BoundedProcessRunning, @unchecked Sendable {
     }
 }
 
+/// onDedicatedThread runs body on a thread of its own and waits for it
+/// without blocking one of Swift's pool threads, the way the app calls the
+/// writer: the writer blocks until a pool task has run its command, so
+/// calling it from a pool thread can starve that task.
+private func onDedicatedThread<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        Thread { continuation.resume(returning: body()) }.start()
+    }
+}
+
 @Suite("PrivilegedSleepSettingWriter")
 struct PrivilegedSleepSettingWriterTests {
     @Test("without the rule file sudo never runs: off is a no-op, on is a clear error")
-    func ruleMissing() throws {
+    func ruleMissing() async {
         let runner = CountingRunner()
         let writer = PrivilegedSleepSettingWriter(runner: runner, ruleExists: { false })
-        try writer.setDisableSleep(false)
-        #expect(throws: StayAwakeFailure.permissionNotInstalled) { try writer.setDisableSleep(true) }
+        let failures: [StayAwakeFailure?] = await onDedicatedThread {
+            [false, true].map { on in
+                do {
+                    try writer.setDisableSleep(on)
+                    return nil
+                } catch {
+                    return error as? StayAwakeFailure
+                }
+            }
+        }
+        #expect(failures == [nil, .permissionNotInstalled])
         #expect(runner.calls.isEmpty)
     }
 
     @Test("with the rule file it runs exactly sudo -n pmset -a disablesleep")
-    func ruleThere() throws {
+    func ruleThere() async throws {
         let runner = CountingRunner()
         let writer = PrivilegedSleepSettingWriter(runner: runner, ruleExists: { true })
-        try writer.setDisableSleep(true)
-        try writer.setDisableSleep(false)
+        let outcome = await onDedicatedThread { Result { try writer.setDisableSleep(true); try writer.setDisableSleep(false) } }
+        try outcome.get()
         #expect(runner.calls == [
             ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"],
             ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"],
