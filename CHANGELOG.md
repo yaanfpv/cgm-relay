@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Keeping the Mac awake no longer fails when CGM Relay is busy.
 - Opening CGM Relay while it is already running brings the running copy forward instead of starting a second one.
 - A second copy started at the same moment can no longer undo the sign-in or keys the first one saved.
 - Stopping the relay, or giving up on a check that took too long, now signals only the process CGM Relay started and the processes it started in turn. CGM Relay keeps hold of each process until it has ended, so its number cannot pass to another process while a stop could still be sent, and nothing is sent once it has ended.

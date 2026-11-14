@@ -326,14 +326,48 @@ struct SleepRuleInstallerTests {
 
 // MARK: - Privileged writer
 
+/// CountingRunner records every command it is asked to run. Its async `run`
+/// always reports success and counts its use, so a caller that goes through
+/// it is told apart from one that uses runOnCallingThread, which answers
+/// with `syncResult` and records the thread it was called on.
 private final class CountingRunner: BoundedProcessRunning, @unchecked Sendable {
+    struct Call: Equatable {
+        let executableURL: URL
+        let arguments: [String]
+        let standardInputData: Data
+        let timeout: Duration
+    }
+
     private let lock = NSLock()
-    private var recorded: [[String]] = []
-    var calls: [[String]] { lock.withLock { recorded } }
+    private var recorded: [Call] = []
+    private var threads: [mach_port_t] = []
+    private var asyncRunCount = 0
+    private let syncResult: BoundedProcessResult
+
+    init(syncResult: BoundedProcessResult = .exited(0)) {
+        self.syncResult = syncResult
+    }
+
+    var calls: [[String]] { lock.withLock { recorded.map(\.arguments) } }
+    var fullCalls: [Call] { lock.withLock { recorded } }
+    var asyncRuns: Int { lock.withLock { asyncRunCount } }
+    var callingThreads: [mach_port_t] { lock.withLock { threads } }
 
     func run(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessResult {
-        lock.withLock { recorded.append(arguments) }
+        lock.withLock {
+            asyncRunCount += 1
+            recorded.append(Call(executableURL: executableURL, arguments: arguments, standardInputData: standardInputData, timeout: timeout))
+        }
         return .exited(0)
+    }
+
+    func runOnCallingThread(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) -> BoundedProcessResult {
+        let thread = pthread_mach_thread_np(pthread_self())
+        lock.withLock {
+            threads.append(thread)
+            recorded.append(Call(executableURL: executableURL, arguments: arguments, standardInputData: standardInputData, timeout: timeout))
+        }
+        return syncResult
     }
 
     func runCapturingOutput(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessOutput {
@@ -380,6 +414,57 @@ struct PrivilegedSleepSettingWriterTests {
         #expect(runner.calls == [
             ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"],
             ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"],
+        ])
+    }
+
+    @Test("the command runs on the thread that called the writer, and the runner's async entry is never used")
+    func commandRunsOnCallingThread() async {
+        let runner = CountingRunner()
+        let writer = PrivilegedSleepSettingWriter(runner: runner, ruleExists: { true })
+        let writerThread: mach_port_t = await onDedicatedThread {
+            try? writer.setDisableSleep(true)
+            try? writer.setDisableSleep(false)
+            return pthread_mach_thread_np(pthread_self())
+        }
+        #expect(runner.asyncRuns == 0, "the write went through the async run")
+        #expect(runner.callingThreads == [writerThread, writerThread])
+    }
+
+    @Test("the write succeeds only when the command itself exited 0", arguments: [
+        BoundedProcessResult.exited(0),
+        .exited(1),
+        .exited(-9),
+        .timedOut,
+        .failedToLaunch,
+    ])
+    func outcomeFollowsTheCommandsExit(_ result: BoundedProcessResult) async {
+        for on in [true, false] {
+            let runner = CountingRunner(syncResult: result)
+            let writer = PrivilegedSleepSettingWriter(runner: runner, ruleExists: { true })
+            let failure: StayAwakeFailure? = await onDedicatedThread {
+                do {
+                    try writer.setDisableSleep(on)
+                    return nil
+                } catch {
+                    return error as? StayAwakeFailure
+                }
+            }
+            #expect(failure == (result == .exited(0) ? nil : .sleepSettingNotChanged), "result \(result) on \(on)")
+        }
+    }
+
+    @Test("the command, its empty stdin and the timeout it was given are passed on unchanged")
+    func commandAndTimeoutUnchanged() async {
+        let runner = CountingRunner()
+        let writer = PrivilegedSleepSettingWriter(runner: runner, timeout: .seconds(7), ruleExists: { true })
+        await onDedicatedThread {
+            try? writer.setDisableSleep(true)
+            try? writer.setDisableSleep(false)
+        }
+        let sudo = URL(fileURLWithPath: "/usr/bin/sudo")
+        #expect(runner.fullCalls == [
+            .init(executableURL: sudo, arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"], standardInputData: Data(), timeout: .seconds(7)),
+            .init(executableURL: sudo, arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"], standardInputData: Data(), timeout: .seconds(7)),
         ])
     }
 }

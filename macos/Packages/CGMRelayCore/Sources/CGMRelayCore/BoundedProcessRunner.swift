@@ -46,6 +46,18 @@ public protocol BoundedProcessRunning: Sendable {
         standardInputData: Data,
         timeout: Duration
     ) async -> BoundedProcessOutput
+
+    /// runOnCallingThread is `run` for a caller that must not depend on
+    /// Swift's thread pool: it starts the child, waits for it and returns on
+    /// the calling thread, with no Swift concurrency task in the path. It
+    /// blocks that thread for up to the timeout plus the time a child that
+    /// ignores the request to exit is given before it is killed.
+    func runOnCallingThread(
+        executableURL: URL,
+        arguments: [String],
+        standardInputData: Data,
+        timeout: Duration
+    ) -> BoundedProcessResult
 }
 
 /// RealBoundedProcessRunner runs the process with Foundation.Process,
@@ -95,6 +107,56 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
             timeout: timeout,
             captureOutput: true
         )
+    }
+
+    public func runOnCallingThread(
+        executableURL: URL,
+        arguments: [String],
+        standardInputData: Data,
+        timeout: Duration
+    ) -> BoundedProcessResult {
+        let environment = RealProcessLauncher.childEnvironment(from: ProcessInfo.processInfo.environment)
+            .merging(extraEnvironment) { _, added in added }
+        let inputPipe = Pipe()
+        disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
+
+        let exit = SynchronousExit()
+        let child: SpawnedChild
+        do {
+            child = try ChildSpawner.spawn(
+                executableURL: executableURL,
+                arguments: arguments,
+                environment: environment,
+                standardInput: inputPipe.fileHandleForReading.fileDescriptor,
+                standardOutput: nil,
+                standardError: nil
+            ) { exitCode in
+                exit.finish(exitCode)
+            }
+        } catch {
+            return .failedToLaunch
+        }
+        // The child's own end of its stdin closes here: without that the
+        // child never sees end of file.
+        try? inputPipe.fileHandleForReading.close()
+
+        let writeHandle = inputPipe.fileHandleForWriting
+        // A write that fails means the child already exited or closed its
+        // stdin; its own exit is still reported below.
+        try? writeHandle.write(contentsOf: standardInputData)
+        try? writeHandle.close()
+
+        if let exitCode = exit.wait(timeout: timeout) {
+            return .exited(exitCode)
+        }
+        // The exit code of a child ended here is discarded: the caller asked
+        // for a timeout, however this call happened to end the process.
+        child.signaller.send(SIGTERM)
+        if exit.wait(timeout: Self.terminateGrace) == nil {
+            child.signaller.send(SIGKILL)
+            _ = exit.wait(timeout: nil)
+        }
+        return .timedOut
     }
 
     private func execute(
@@ -238,5 +300,33 @@ private actor BoundedProcessExitSignal {
     func wait() async -> Int32 {
         if let result { return result }
         return await withCheckedContinuation { continuation = $0 }
+    }
+}
+
+/// SynchronousExit carries a child's exit code from the thread that reaps it
+/// to a thread that waits for it, remembering it for a later waiter.
+private final class SynchronousExit: @unchecked Sendable {
+    private let done = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var code: Int32?
+
+    func finish(_ exitCode: Int32) {
+        lock.withLock { code = exitCode }
+        done.signal()
+    }
+
+    /// wait returns the exit code, or nil if the child had not exited within
+    /// timeout (no limit when nil). A returned code stays available to a
+    /// later call.
+    func wait(timeout: Duration?) -> Int32? {
+        if let timeout {
+            let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+            if done.wait(timeout: .now() + seconds) == .timedOut { return nil }
+        } else {
+            done.wait()
+        }
+        // Put the token back so a later wait sees the exit again.
+        done.signal()
+        return lock.withLock { code }
     }
 }
