@@ -1,29 +1,29 @@
 import Foundation
 
-/// RealProcess wraps a live Foundation.Process and the write end of its
-/// stdin lifeline pipe. Access to both is never shared outside this file:
+/// RealProcess wraps a live spawned child and the write end of its stdin
+/// lifeline pipe. Access to both is never shared outside this file:
 /// EngineSupervisor only ever sees it through the RunningProcess protocol,
 /// so the @unchecked Sendable below is safe -- nothing here reads or
 /// writes this state from more than one place at a time.
 final class RealProcess: RunningProcess, @unchecked Sendable {
-    private let process: Process
+    private let child: SpawnedChild
     private let stdinHandle: FileHandle
 
-    init(process: Process, stdinHandle: FileHandle) {
-        self.process = process
+    init(child: SpawnedChild, stdinHandle: FileHandle) {
+        self.child = child
         self.stdinHandle = stdinHandle
     }
 
-    var processIdentifier: Int32 { process.processIdentifier }
+    var processIdentifier: Int32 { child.processIdentifier }
 
     func terminate() {
         try? stdinHandle.close()
-        process.terminate()
+        child.signaller.send(SIGTERM)
     }
 
     func waitUntilExit(timeout: Duration) async -> Bool {
         let deadline = ContinuousClock.now + timeout
-        while process.isRunning {
+        while !child.hasExited {
             if ContinuousClock.now >= deadline { return false }
             try? await Task.sleep(for: .milliseconds(25))
         }
@@ -31,7 +31,7 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
     }
 
     func kill() {
-        Foundation.kill(process.processIdentifier, SIGKILL)
+        child.signaller.send(SIGKILL)
     }
 }
 
@@ -93,32 +93,25 @@ public struct RealProcessLauncher: ProcessLauncher {
         onReady: @escaping @Sendable () -> Void,
         onExit: @escaping @Sendable (Int32) -> Void
     ) throws -> any RunningProcess {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.environment = Self.childEnvironment(from: ProcessInfo.processInfo.environment)
-
         let inputPipe = Pipe()
-        process.standardInput = inputPipe
         let errorPipe = Pipe()
-        process.standardError = errorPipe
         let outputPipe = Pipe()
-        process.standardOutput = outputPipe
         disableSIGPIPE(for: inputPipe.fileHandleForWriting.fileDescriptor)
-        process.terminationHandler = { finished in
-            // terminationStatus is the SIGNAL number, not an exit code,
-            // when terminationReason is .uncaughtSignal -- reporting it
-            // unchanged would let a death by signal 3 read as
-            // EngineSupervisor.storeKeyMismatchExitCode. Negating it
-            // keeps every real exit code (always >= 0) distinguishable
-            // from every signal death (always reported as <= 0 here).
-            let exitCode = finished.terminationReason == .uncaughtSignal
-                ? -finished.terminationStatus
-                : finished.terminationStatus
-            onExit(exitCode)
-        }
 
-        try process.run()
+        // onExit gets every real exit code unchanged and a death by signal as
+        // the negative of the signal number (see ChildSpawner.exitCode), so a
+        // death by signal 3 never reads as
+        // EngineSupervisor.storeKeyMismatchExitCode.
+        let child = try ChildSpawner.spawn(
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: Self.childEnvironment(from: ProcessInfo.processInfo.environment),
+            standardInput: inputPipe.fileHandleForReading.fileDescriptor,
+            standardOutput: outputPipe.fileHandleForWriting.fileDescriptor,
+            standardError: errorPipe.fileHandleForWriting.fileDescriptor,
+            onExit: onExit
+        )
+        try? inputPipe.fileHandleForReading.close()
 
         // This end must close here, or the forwarder never sees EOF once
         // the engine exits, since the parent would still hold a writer.
@@ -146,7 +139,7 @@ public struct RealProcessLauncher: ProcessLauncher {
             }
         }
 
-        return RealProcess(process: process, stdinHandle: writeHandle)
+        return RealProcess(child: child, stdinHandle: writeHandle)
     }
 
     /// watchForReady reads handle until its writer closes it, calling onReady
