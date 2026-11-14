@@ -3,14 +3,15 @@ import SwiftUI
 
 /// GeneralPaneView holds the settings almost every install touches once:
 /// whether CGM Relay opens at login, which unit the menu shows readings
-/// in, whether the reading sits beside the menu bar icon, and how long
-/// readings are kept.
+/// in, whether the reading sits beside the menu bar icon, whether the Mac
+/// is kept awake, and how long readings are kept.
 struct GeneralPaneView: View {
     @ObservedObject var model: AppModel
     @State private var retentionText = ""
     @State private var retentionErrorMessage: String?
     @State private var pendingRetentionValue: Int?
     @State private var isConfirmingLowerRetention = false
+    @State private var isOfferingPermissionRemoval = false
     @State private var retentionSettler = RetentionChangeSettler()
     @FocusState private var retentionFocus: RetentionFocus?
 
@@ -60,6 +61,20 @@ struct GeneralPaneView: View {
                 Text("Menu Bar")
             } footer: {
                 Text("Shows the latest reading and its trend beside the icon while readings are current. Off, the icon alone tells you when something is wrong.")
+            }
+
+            Section {
+                Toggle(StayAwakeCopy.title, isOn: stayAwakeBinding)
+                    .disabled(model.isChangingStayAwake)
+                if let notice = model.stayAwakeNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            } header: {
+                Text("Sleep")
+            } footer: {
+                Text(StayAwakeCopy.explanation(isLaptop: model.isLaptop))
             }
 
             Section {
@@ -128,6 +143,21 @@ struct GeneralPaneView: View {
             }
         }
         .confirmationDialog(
+            StayAwakeCopy.removeDialogTitle,
+            isPresented: $isOfferingPermissionRemoval,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Permission") {
+                Task { await model.turnOffStayAwake(removePermission: true) }
+            }
+            Button("Turn Off and Keep Permission") {
+                Task { await model.turnOffStayAwake() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(StayAwakeCopy.removeDialogMessage)
+        }
+        .confirmationDialog(
             "Delete Older Readings?",
             isPresented: $isConfirmingLowerRetention,
             titleVisibility: .visible
@@ -147,6 +177,28 @@ struct GeneralPaneView: View {
         Binding(
             get: { model.loginItemStatus == .enabled || model.loginItemStatus == .requiresApproval },
             set: { model.setOpenAtLogin($0) }
+        )
+    }
+
+    /// stayAwakeBinding turns it on at once (which may ask for the Mac's
+    /// password) and, turning it off, first offers to remove the permission
+    /// when one is installed.
+    private var stayAwakeBinding: Binding<Bool> {
+        Binding(
+            get: { model.stayAwakeChoice == .on },
+            set: { on in
+                if on {
+                    Task { await model.turnOnStayAwake() }
+                } else {
+                    Task {
+                        if await model.stayAwakePermissionIsInstalled() {
+                            isOfferingPermissionRemoval = true
+                        } else {
+                            await model.turnOffStayAwake()
+                        }
+                    }
+                }
+            }
         )
     }
 

@@ -20,7 +20,17 @@ BUILD_DIR="${MACOS_DIR}/.build"
 ENGINE_DIR="${BUILD_DIR}/engine"
 DERIVED_DATA_DIR="${BUILD_DIR}/DerivedData"
 
-echo "==> Building the engine for arm64 and amd64 concurrently (CGO_ENABLED=0)"
+# The engine is built with the Go version go.mod names, the same one CI installs from go.mod. The go
+# command switches to that version on its own unless GOTOOLCHAIN is pinned to an older local one, so
+# check what a build here will use and stop with a clear message instead of a compiler error.
+REQUIRED_GO="go$(awk '$1 == "go" { print $2; exit }' "${REPO_ROOT}/go.mod")"
+BUILD_GO="$(cd "${REPO_ROOT}" && go env GOVERSION)"
+if [ "$(printf '%s\n%s\n' "${REQUIRED_GO}" "${BUILD_GO}" | sort -V | head -n 1)" != "${REQUIRED_GO}" ]; then
+  echo "==> The engine needs ${REQUIRED_GO} (from go.mod), but a build here would use ${BUILD_GO}. Install ${REQUIRED_GO} or unset GOTOOLCHAIN." >&2
+  exit 1
+fi
+
+echo "==> Building the engine for arm64 and amd64 concurrently (CGO_ENABLED=0, ${BUILD_GO})"
 mkdir -p "${ENGINE_DIR}"
 (
   cd "${REPO_ROOT}"
@@ -30,10 +40,12 @@ mkdir -p "${ENGINE_DIR}"
   # running them side by side and waiting on each by its own PID is safe.
   # Both PIDs are always waited on, even when one fails first, so a
   # failure never leaves the other build running past this subshell.
-  # -trimpath keeps the paths of this checkout and the module cache out of the binary.
-  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
+  # -trimpath keeps the paths of this checkout and the module cache out of the binary. -s -w drops
+  # the symbol table and DWARF debug data, which a Go panic trace does not use: it prints function
+  # names from the runtime's own tables.
+  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o "${ENGINE_DIR}/cgm-relay-arm64" ./cmd/cgm-relay &
   arm64_pid=$!
-  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
+  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "${ENGINE_DIR}/cgm-relay-amd64" ./cmd/cgm-relay &
   amd64_pid=$!
 
   arm64_status=0

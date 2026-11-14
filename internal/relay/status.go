@@ -13,6 +13,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
+	"github.com/yaanfpv/cgm-relay/internal/tailnode"
 )
 
 // unknownUserAgent is the client tracker's key for a request that carried
@@ -144,6 +145,21 @@ type statusResponse struct {
 	// Clients maps each follower client's User-Agent to the last time it
 	// made an authenticated request.
 	Clients map[string]time.Time `json:"clients,omitempty"`
+	// Tailnode carries the ts_* fields of the built-in Tailscale route, and
+	// only when that route is configured.
+	*tailnode.Status
+}
+
+// statusOption configures newStatusHandler.
+type statusOption func(*statusConfig)
+
+type statusConfig struct {
+	tailnode func() tailnode.Status
+}
+
+// withTailnode adds the built-in Tailscale route's status to GET /status.
+func withTailnode(status func() tailnode.Status) statusOption {
+	return func(c *statusConfig) { c.tailnode = status }
 }
 
 // pollerStatus is the subset of *poller.Poller the status handler needs:
@@ -169,7 +185,11 @@ type pollerStatus interface {
 // headless install reading its config from a file or the environment, which
 // has no Mac app), /status stays open on loopback as documented and
 // /pairing does not exist, since only the Mac app mints pairing codes.
-func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.Store, statusSecret string) http.Handler {
+func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.Store, statusSecret string, opts ...statusOption) http.Handler {
+	var sc statusConfig
+	for _, opt := range opts {
+		opt(&sc)
+	}
 	mux := http.NewServeMux()
 	statusRoute := func(w http.ResponseWriter, r *http.Request) {
 		s := p.Status()
@@ -188,6 +208,10 @@ func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.
 			if s.LastReadingTrend != cgm.TrendUnknown && s.LastReadingTrend != cgm.TrendNotComputable {
 				resp.LastReadingTrend = s.LastReadingTrend.String()
 			}
+		}
+		if sc.tailnode != nil {
+			ts := sc.tailnode()
+			resp.Status = &ts
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)

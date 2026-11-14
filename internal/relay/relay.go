@@ -24,18 +24,21 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
 	"github.com/yaanfpv/cgm-relay/internal/store"
+	"github.com/yaanfpv/cgm-relay/internal/tailnode"
 )
 
-// shutdownTimeout bounds how long Run waits for the HTTP servers to
-// finish in-flight requests once ctx is done, so a slow client can never
-// turn a requested shutdown into a hang.
-const shutdownTimeout = 5 * time.Second
+// shutdownTimeout bounds how long Run waits for each HTTP server to finish
+// in-flight requests once ctx is done, so a slow client can never turn a
+// requested shutdown into a hang. The app gives the engine three seconds to
+// exit: up to three servers at this bound plus the built-in node's own
+// bound (tailnode's closeTimeout, one second) come to two and a half.
+const shutdownTimeout = 500 * time.Millisecond
 
 // statusLogInterval is how often Run checks the poller's status for a
 // message worth logging, such as a sign-in failure starting or clearing.
 const statusLogInterval = time.Second
 
-// The following timeouts are applied to both HTTP servers Run starts.
+// The following timeouts are applied to every HTTP server Run starts.
 // readHeaderTimeout bounds a slow or stalled client during the request
 // line and headers; readTimeout and writeTimeout bound the body and the
 // response; idleTimeout bounds how long an idle keep-alive connection is
@@ -151,7 +154,25 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 	}
 	defer nsServer.shutdown()
 
-	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings, cfg.StatusSecret))
+	// The built-in Tailscale node, when configured, starts in the
+	// background: signing in can take as long as the person takes, and the
+	// engine is ready without it. Its Close runs before the Nightscout
+	// server's and before the store closes, since its public server reads
+	// the store.
+	var statusOpts []statusOption
+	if cfg.TailscaleStateDir != "" {
+		node := tailnode.Start(tailnode.Options{
+			StateDir:  cfg.TailscaleStateDir,
+			Hostname:  cfg.TailscaleHostname,
+			Handler:   nsAPI,
+			NewServer: newHTTPServer,
+			Logf:      logger.Printf,
+		})
+		defer node.Close()
+		statusOpts = append(statusOpts, withTailnode(node.Status))
+	}
+
+	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings, cfg.StatusSecret, statusOpts...))
 	if err != nil {
 		return fmt.Errorf("relay: listen on %s: %w", cfg.StatusAddr, err)
 	}
@@ -234,7 +255,7 @@ func watchPollerStatus(ctx context.Context, p *poller.Poller, logger *log.Logger
 	}
 }
 
-// runningServer is one of the two HTTP servers Run starts.
+// runningServer is one of the HTTP servers Run starts on its own listeners.
 type runningServer struct {
 	srv *http.Server
 	ln  net.Listener
@@ -255,13 +276,7 @@ func startServer(addr string, handler http.Handler) (*runningServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	srv := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
-	}
+	srv := newHTTPServer(handler)
 	rs := &runningServer{srv: srv, ln: ln, errCh: make(chan error, 1)}
 	go func() {
 		serveErr := srv.Serve(ln)
@@ -273,6 +288,23 @@ func startServer(addr string, handler http.Handler) (*runningServer, error) {
 		close(rs.errCh)
 	}()
 	return rs, nil
+}
+
+// newHTTPServer builds an HTTP server around handler with the fixed
+// timeouts every server Run starts needs.
+//
+// ErrorLog discards net/http's own connection-level messages (a panicking
+// handler, a failed TLS handshake): they name the requester's address, and
+// the relay never logs who asked.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ErrorLog:          log.New(io.Discard, "", 0),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 }
 
 // addr returns the address the server actually bound to.
@@ -287,6 +319,8 @@ func (rs *runningServer) addr() string {
 func (rs *runningServer) shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	_ = rs.srv.Shutdown(ctx)
+	if rs.srv.Shutdown(ctx) != nil {
+		_ = rs.srv.Close()
+	}
 	<-rs.errCh
 }

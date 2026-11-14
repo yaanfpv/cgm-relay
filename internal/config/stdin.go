@@ -2,8 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +20,8 @@ import (
 // a key file, so a caller holding the configuration somewhere else -- a
 // system keychain, say -- can hand it over without ever writing it to disk
 // or the process environment.
+// An optional "tailscale_state_dir" and "tailscale_hostname" turn on the
+// built-in Tailscale route (see Config.TailscaleStateDir).
 // key_path, if present in the JSON, is ignored: the key always comes from
 // "key" instead, and the returned Config's KeyPath is left empty.
 // Defaults and every validation Load applies -- the default database path
@@ -44,6 +49,10 @@ func LoadFromReader(r io.Reader) (Config, error) {
 		Key           *string `json:"key"`
 		RetentionDays *int    `json:"retention_days"`
 		StatusSecret  string  `json:"status_secret"`
+		// The built-in Tailscale route's two settings are stdin-only, like
+		// StatusSecret, so they never reach the config file.
+		TailscaleStateDir string `json:"tailscale_state_dir"`
+		TailscaleHostname string `json:"tailscale_hostname"`
 	}
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -66,6 +75,11 @@ func LoadFromReader(r io.Reader) (Config, error) {
 		return Config{}, fmt.Errorf("config: stdin config: status_secret must be at least %d characters", minStatusSecretLength)
 	}
 	cfg.StatusSecret = in.StatusSecret
+	if err := validateTailscale(in.TailscaleStateDir, in.TailscaleHostname); err != nil {
+		return Config{}, fmt.Errorf("config: stdin config: %w", err)
+	}
+	cfg.TailscaleStateDir = in.TailscaleStateDir
+	cfg.TailscaleHostname = in.TailscaleHostname
 	if !IsAllowedLibreLinkUpBaseURL(cfg.LibreLinkUpBaseURL) {
 		return Config{}, fmt.Errorf("config: stdin config: librelinkup_base_url must be https, or plain http to a loopback address, got %q", cfg.LibreLinkUpBaseURL)
 	}
@@ -95,3 +109,25 @@ func LoadFromReader(r io.Reader) (Config, error) {
 
 	return cfg, nil
 }
+
+// validateTailscale checks the built-in route's two settings: both or
+// neither, the directory absolute, and the hostname one lowercase DNS label.
+// The hostname becomes part of a name published in public certificate logs,
+// so it is held to a plain label rather than anything a person typed.
+func validateTailscale(stateDir, hostname string) error {
+	if stateDir == "" && hostname == "" {
+		return nil
+	}
+	if stateDir == "" {
+		return errors.New("tailscale_hostname needs tailscale_state_dir")
+	}
+	if !filepath.IsAbs(stateDir) {
+		return fmt.Errorf("tailscale_state_dir must be an absolute path, got %q", stateDir)
+	}
+	if !genericHostname.MatchString(hostname) {
+		return fmt.Errorf("tailscale_hostname must be one lowercase DNS label of letters, digits and hyphens, got %q", hostname)
+	}
+	return nil
+}
+
+var genericHostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)

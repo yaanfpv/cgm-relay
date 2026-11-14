@@ -80,6 +80,12 @@ final class AppModel: ObservableObject {
     /// a word that follower apps on the old address stop reading. It is
     /// shown while the panel is open and ends when the panel closes.
     @Published private(set) var portChangeMenuNotice = false
+    /// stayAwakeNotice is why keeping this Mac awake could not be done as
+    /// chosen, in a plain sentence, nil when nothing is wrong.
+    @Published private(set) var stayAwakeNotice: String?
+    /// isChangingStayAwake is true while the administrator prompt for the
+    /// sleep permission is open.
+    @Published private(set) var isChangingStayAwake = false
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
     /// did not work, with Tailscale's own page where one helps.
@@ -102,6 +108,14 @@ final class AppModel: ObservableObject {
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
     private let portBinder: any PortBinding
+    private let stayAwake: StayAwakeController
+    private let powerSource: any PowerSourceReading
+    private let sleepRules: any SleepRuleManaging
+    private var powerWatcher: PowerSourceWatcher?
+    /// stopRequested is whether the person (or quitting) stopped the relay
+    /// since it was last started, so a state report that was still on its
+    /// way when they stopped it cannot hold the Mac awake again.
+    private var stopRequested = false
 
     private var latestStatus: EngineStatus?
 
@@ -209,8 +223,14 @@ final class AppModel: ObservableObject {
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
         loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
-        portBinder: any PortBinding = SystemPortBinder()
+        portBinder: any PortBinding = SystemPortBinder(),
+        powerSource: any PowerSourceReading = SystemPowerSource(),
+        sleepRules: any SleepRuleManaging,
+        sleepSetting: any SleepSettingWriting,
+        idleSleepAssertion: any IdleSleepAsserting
     ) {
+        self.powerSource = powerSource
+        self.sleepRules = sleepRules
         self.tailscale = tailscale
         self.portBinder = portBinder
         self.credentialStore = credentialStore
@@ -231,6 +251,12 @@ final class AppModel: ObservableObject {
         self.librelinkupBaseURL = librelinkupBaseURL
         let loaded = settingsStore.load()
         settings = loaded
+        stayAwake = StayAwakeController(
+            choice: loaded.stayAwake,
+            power: powerSource,
+            assertion: idleSleepAssertion,
+            sleepSetting: sleepSetting
+        )
         portIsPersonChosen = loaded.setupFinished || loaded.port != AppSettings.defaultPort
         accountSignIn = AccountSignIn(checker: RealAccountChecker(engineURL: engineURL), store: credentialStore)
         alertEngine = AlertEngine()
@@ -251,6 +277,15 @@ final class AppModel: ObservableObject {
             Task { @MainActor in ref.value?.handleStatusUpdate(status) }
         }
         ref.value = self
+        stayAwake.onFailure = { failure in
+            Task { @MainActor in ref.value?.stayAwakeNotice = failure.message }
+        }
+        let watcher = PowerSourceWatcher { [weak self] in
+            guard let self else { return }
+            self.stayAwake.powerChanged(self.powerSource.snapshot())
+        }
+        watcher.start()
+        powerWatcher = watcher
 
         // Scene has no equivalent of a view's own .task, so the app's
         // one-time launch sequence starts here instead, the moment the
@@ -270,6 +305,7 @@ final class AppModel: ObservableObject {
         removeRetiredCertificateSecrets()
         refreshCredentialsConfigured()
         launchChecked = true
+        stayAwake.launched()
         if needsSetup || needsSafetyNotice {
             setupPresentationRequest += 1
         }
@@ -315,8 +351,10 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        stopRequested = true
         Task {
             await supervisor.stop()
+            stayAwake.relayStopped()
             boundHost = nil
             await alertEngine.pauseForEngineStop()
         }
@@ -377,6 +415,8 @@ final class AppModel: ObservableObject {
     /// for the engine process to be gone, so a relaunch never meets a store
     /// the old engine still holds.
     func shutDown() async {
+        stopRequested = true
+        await stayAwake.willQuitInBackground()
         await statusPoller.stop()
         await supervisor.stopAndWait(timeout: .seconds(3))
         boundHost = nil
@@ -408,7 +448,9 @@ final class AppModel: ObservableObject {
     /// were gone.
     @discardableResult
     func signOut() async -> Bool {
+        stopRequested = true
         await supervisor.stop()
+        stayAwake.relayStopped()
         boundHost = nil
         await alertEngine.pauseForEngineStop()
         let succeeded: Bool
@@ -818,6 +860,67 @@ final class AppModel: ObservableObject {
         loginItemStatus = loginItemManager.status
     }
 
+    // MARK: - Keep awake
+
+    /// isLaptop is whether this Mac has a battery, which decides how
+    /// keeping it awake is described and done.
+    var isLaptop: Bool { powerSource.snapshot().isLaptop }
+
+    /// stayAwakeChoice is the saved answer, nil until the person is asked.
+    var stayAwakeChoice: StayAwakeChoice? { settings.stayAwake }
+
+    /// turnOnStayAwake keeps this Mac awake while CGM Relay runs. A laptop
+    /// first needs the permission to change the sleep setting, which asks
+    /// for the Mac's password once; the answer is saved only when that
+    /// worked, so a closed prompt leaves things as they were.
+    func turnOnStayAwake() async {
+        guard !isChangingStayAwake else { return }
+        stayAwakeNotice = nil
+        if isLaptop {
+            isChangingStayAwake = true
+            defer { isChangingStayAwake = false }
+            if await !sleepRules.isInstalled() {
+                switch await sleepRules.install() {
+                case .done:
+                    break
+                case .cancelled:
+                    return
+                case .failed:
+                    stayAwakeNotice = "CGM Relay couldn't get permission to change the sleep setting, so it is still off."
+                    return
+                }
+            }
+        }
+        saveStayAwake(.on)
+    }
+
+    /// turnOffStayAwake saves the answer and puts the Mac back to sleeping
+    /// as usual; removePermission also takes the permission away, which
+    /// asks for the Mac's password again.
+    func turnOffStayAwake(removePermission: Bool = false) async {
+        guard !isChangingStayAwake else { return }
+        stayAwakeNotice = nil
+        saveStayAwake(.off)
+        guard removePermission, isLaptop else { return }
+        isChangingStayAwake = true
+        defer { isChangingStayAwake = false }
+        if await sleepRules.remove() == .failed {
+            stayAwakeNotice = "CGM Relay couldn't remove its permission to change the sleep setting."
+        }
+    }
+
+    /// stayAwakePermissionIsInstalled is whether turning the choice off can
+    /// also offer to remove the permission.
+    func stayAwakePermissionIsInstalled() async -> Bool {
+        isLaptop ? await sleepRules.isInstalled() : false
+    }
+
+    private func saveStayAwake(_ choice: StayAwakeChoice) {
+        settings.stayAwake = choice
+        persistSettings()
+        stayAwake.choiceChanged(choice)
+    }
+
     // MARK: - Menu bar
 
     /// requestMenuPanel asks the status item to open the menu panel, the
@@ -906,6 +1009,7 @@ final class AppModel: ObservableObject {
     /// Start Fresh itself reports keeps that recovery path the only way
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
+        stopRequested = false
         if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
             boundHost = nil
             await supervisor.fail(.recoveryMoveFailed)
@@ -994,9 +1098,14 @@ final class AppModel: ObservableObject {
     /// it, since it restarts with the same configuration.
     private func handleEngineStateChange(_ state: EngineSupervisor.RunState) {
         switch state {
-        case .stopped, .failed:
+        case .stopped:
             boundHost = nil
-        case .starting, .running, .waitingToRestart:
+        case .failed:
+            boundHost = nil
+            stayAwake.relayStopped()
+        case .running:
+            if !stopRequested { stayAwake.relayStarted() }
+        case .starting, .waitingToRestart:
             break
         }
         engineState = state

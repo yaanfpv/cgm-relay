@@ -3,9 +3,12 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/config"
 	"github.com/yaanfpv/cgm-relay/internal/pairing"
 	"github.com/yaanfpv/cgm-relay/internal/poller"
+	"github.com/yaanfpv/cgm-relay/internal/tailnode"
 )
 
 // fixedNow returns a now func that always reports t, so a test can assert
@@ -461,6 +465,58 @@ func TestStartServerAppliesTimeouts(t *testing.T) {
 	}
 }
 
+// lockedBuilder is a strings.Builder safe to write from the server's
+// goroutines while the test reads it.
+type lockedBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuilder) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuilder) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestStartServerKeepsRequesterAddressOutOfTheLog protects the rule that
+// the relay never logs who asked. net/http reports a handler that panics
+// with the requester's address, and by default writes that to the process
+// log; the servers Run starts for the Nightscout API and the status
+// endpoint must not. It fails if a server goes back to the default error
+// log. It is not parallel because it captures the process-wide log.
+func TestStartServerKeepsRequesterAddressOutOfTheLog(t *testing.T) {
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	var captured lockedBuilder
+	log.SetOutput(&captured)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	rs, err := startServer("127.0.0.1:0", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("handler failed")
+	}))
+	if err != nil {
+		t.Fatalf("startServer: %v", err)
+	}
+	// The panic closes the connection, so the client sees an error; what
+	// matters is that the server has handled the request before the check.
+	resp, err := http.Get("http://" + rs.addr() + "/")
+	if err == nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	rs.shutdown()
+
+	if got := captured.String(); strings.Contains(got, "127.0.0.1") {
+		t.Errorf("process log carries the requester's address: %q", got)
+	}
+}
+
 // ContainsValue reports whether text carries value, a plain decimal
 // numeral, as a standalone number rather than as a digit run inside some
 // other number: it is exported so relay_test's own leak checks can share
@@ -517,5 +573,40 @@ func TestContainsValue(t *testing.T) {
 				t.Errorf("ContainsValue(%q, %q) = %v, want %v", c.text, "111", got, c.want)
 			}
 		})
+	}
+}
+
+// TestStatusCarriesTailnodeOnlyWhenConfigured checks the ts_* fields appear
+// beside today's fields when the built-in route is configured, and no ts_*
+// key appears when it is not.
+func TestStatusCarriesTailnodeOnlyWhenConfigured(t *testing.T) {
+	get := func(opts ...statusOption) map[string]any {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), "", opts...)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		req.Host = "127.0.0.1:1338"
+		h.ServeHTTP(rec, req)
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("decode /status: %v (%s)", err, rec.Body.String())
+		}
+		return m
+	}
+
+	without := get()
+	for k := range without {
+		if strings.HasPrefix(k, "ts_") {
+			t.Errorf("unconfigured status has %s", k)
+		}
+	}
+
+	with := get(withTailnode(func() tailnode.Status {
+		return tailnode.Status{State: tailnode.StateNeedsLogin, LoginURL: "https://login.example.test/a"}
+	}))
+	if with["ts_state"] != "needs-login" || with["ts_login_url"] != "https://login.example.test/a" {
+		t.Errorf("configured status = %v, want ts_state and ts_login_url", with)
+	}
+	if with["running"] != true {
+		t.Errorf("configured status lost its own fields: %v", with)
 	}
 }

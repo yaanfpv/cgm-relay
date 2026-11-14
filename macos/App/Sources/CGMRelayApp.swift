@@ -30,7 +30,9 @@ struct CGMRelayApp: App {
     init() {
         CGMRelayApp.yieldToRunningCopy()
         let explicitKeychainServiceOverride = CGMRelayApp.explicitKeychainServiceOverride()
-        let keychainServiceOverride = CGMRelayApp.validatedThrowawayKeychainService(explicitOverride: explicitKeychainServiceOverride)
+        let keychainServiceDecision = CGMRelayApp.keychainServiceDecision(explicitOverride: explicitKeychainServiceOverride)
+        let keychainServiceOverride = CGMRelayApp.validatedThrowawayKeychainService(decision: keychainServiceDecision)
+        let sleepAuthority = SleepAuthorityLocator.resolve(service: keychainServiceDecision)
         let store = CGMRelayApp.credentialStore(keychainServiceOverride: keychainServiceOverride)
         CGMRelayApp.seedSyntheticAccountIfRequested(into: store, explicitKeychainServiceOverride: explicitKeychainServiceOverride)
         let model = AppModel(
@@ -43,7 +45,11 @@ struct CGMRelayApp: App {
             tailscale: RealTailscaleController(
                 executableURL: CGMRelayApp.tailscaleExecutable(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
             ),
-            loginItemManager: CGMRelayApp.loginItemManager(explicitKeychainServiceOverride: explicitKeychainServiceOverride)
+            loginItemManager: CGMRelayApp.loginItemManager(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
+            powerSource: CGMRelayApp.powerSource(),
+            sleepRules: sleepAuthority.rules,
+            sleepSetting: sleepAuthority.setting,
+            idleSleepAssertion: sleepAuthority.assertion
         )
         let updates = UpdatesModel(feedURLOverride: CGMRelayApp.updateFeedURL(explicitKeychainServiceOverride: explicitKeychainServiceOverride))
         _model = StateObject(wrappedValue: model)
@@ -135,21 +141,30 @@ struct CGMRelayApp: App {
         #endif
     }
 
-    /// validatedThrowawayKeychainService turns explicitOverride into the
+    /// keychainServiceDecision is SyntheticAccountSeeder.resolveKeychainService
+    /// for this build, the one decision everything downstream follows. A
+    /// release build never reads the override at all.
+    private static func keychainServiceDecision(explicitOverride: String?) -> SyntheticAccountSeeder.KeychainServiceDecision {
+        #if DEBUG
+        SyntheticAccountSeeder.resolveKeychainService(isDebugBuild: true, override: explicitOverride)
+        #else
+        .useRealService
+        #endif
+    }
+
+    /// validatedThrowawayKeychainService turns the decision into the
     /// one Keychain service every downstream call (credentialStore,
-    /// databasePath) is backed by. The actual decision is
-    /// SyntheticAccountSeeder.resolveKeychainService: a debug build always
+    /// databasePath) is backed by: a debug build always
     /// ends up on a throwaway service, whether that is the override it was
     /// given or, when none was given at all, a fixed development default,
     /// so a plain debug launch with no argument still never reaches the
     /// real Keychain item or database. An override that fails
     /// isThrowawayService (empty, the app's own real service name, or
     /// anything not safe to use as a single folder name) fails loudly
-    /// instead of silently falling back to anything. Absent entirely in
-    /// Release, where the result is always the real service.
-    private static func validatedThrowawayKeychainService(explicitOverride: String?) -> String? {
-        #if DEBUG
-        switch SyntheticAccountSeeder.resolveKeychainService(isDebugBuild: true, override: explicitOverride) {
+    /// instead of silently falling back to anything. In Release the
+    /// decision is always the real service.
+    private static func validatedThrowawayKeychainService(decision: SyntheticAccountSeeder.KeychainServiceDecision) -> String? {
+        switch decision {
         case .useRealService:
             return nil
         case .useThrowawayService(let service):
@@ -157,9 +172,6 @@ struct CGMRelayApp: App {
         case .refused(let service):
             fatalError("cgm-relay: -CGMRelayKeychainService \(service) is not a throwaway service (it is empty, names the app's own real Keychain service, or is not a single plain name safe to use as a folder name -- \".\", \"..\", and anything containing \"/\" are refused); refusing to start rather than risk touching the real Keychain item or database")
         }
-        #else
-        return nil
-        #endif
     }
 
     /// yieldToRunningCopy runs before anything reads or writes credentials:
@@ -294,6 +306,18 @@ struct CGMRelayApp: App {
         #endif
     }
 
+    /// powerSource is the Mac's real power state. A development build can be
+    /// told to read as a desktop with `-CGMRelayForceDesktop YES`, to see
+    /// that wording on a laptop.
+    private static func powerSource() -> any PowerSourceReading {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "CGMRelayForceDesktop") {
+            return FixedPowerSource(PowerSnapshot(isLaptop: false, onACPower: true))
+        }
+        #endif
+        return SystemPowerSource()
+    }
+
     /// seedSyntheticAccountIfRequested writes CGM Relay's fixed
     /// development account into store when the app is launched with
     /// `-CGMRelaySeedSyntheticAccount YES`, so a development run can
@@ -389,3 +413,12 @@ struct AppMenuCommands: Commands {
         }
     }
 }
+
+#if DEBUG
+/// FixedPowerSource always reads the one power state it was given.
+private struct FixedPowerSource: PowerSourceReading {
+    private let value: PowerSnapshot
+    init(_ value: PowerSnapshot) { self.value = value }
+    func snapshot() -> PowerSnapshot { value }
+}
+#endif
