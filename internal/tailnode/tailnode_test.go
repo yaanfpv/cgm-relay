@@ -1,6 +1,7 @@
 package tailnode_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net"
@@ -262,7 +263,7 @@ func (noReadings) Range(context.Context, store.RangeQuery) ([]cgm.Reading, error
 // public listener's handler, wrapping the real Nightscout handler, status
 // answers 401 with Nightscout's body to a presented wrong credential (token
 // query, api-secret, Bearer), 200 with none, and 200 with the right one in
-// each accepted form.
+// each accepted form, and judges a credential sent twice by every occurrence.
 func TestPublicStatusChecksPresentedCredential(t *testing.T) {
 	const token = "public-token"
 	const wantBody = `{"status":401,"message":"Unauthorized","description":"Invalid/Missing"}`
@@ -275,19 +276,36 @@ func TestPublicStatusChecksPresentedCredential(t *testing.T) {
 		name   string
 		query  string
 		header map[string]string
+		lines  []string // header lines sent verbatim, repeats included
 		want   int
 	}{
-		{"wrong token query", "?token=wrong", nil, 401},
-		{"wrong api-secret", "", map[string]string{"api-secret": "wrong"}, 401},
-		{"wrong bearer", "", map[string]string{"Authorization": "Bearer wrong"}, 401},
-		{"no credential", "", nil, 200},
-		{"right token query", "?token=" + token, nil, 200},
-		{"right api-secret raw", "", map[string]string{"api-secret": token}, 200},
-		{"right bearer", "", map[string]string{"Authorization": "Bearer " + token}, 200},
+		{"wrong token query", "?token=wrong", nil, nil, 401},
+		{"wrong api-secret", "", map[string]string{"api-secret": "wrong"}, nil, 401},
+		{"wrong bearer", "", map[string]string{"Authorization": "Bearer wrong"}, nil, 401},
+		{"no credential", "", nil, nil, 200},
+		{"right token query", "?token=" + token, nil, nil, 200},
+		{"right api-secret raw", "", map[string]string{"api-secret": token}, nil, 200},
+		{"right bearer", "", map[string]string{"Authorization": "Bearer " + token}, nil, 200},
+		{"blank then wrong token query", "?token=&token=wrong", nil, nil, 401},
+		{"blank then wrong api-secret", "", nil, []string{"Api-Secret: ", "Api-Secret: wrong"}, 401},
+		{"blank then wrong bearer", "", nil, []string{"Authorization: ", "Authorization: Bearer wrong"}, 401},
+		{"wrong then right token query", "?token=wrong&token=" + token, nil, nil, 200},
+		{"wrong then right api-secret", "", nil, []string{"Api-Secret: wrong", "Api-Secret: " + token}, 200},
+		{"wrong then right bearer", "", nil, []string{"Authorization: Bearer wrong", "Authorization: Bearer " + token}, 200},
+		{"blank token query twice", "?token=&token=", nil, nil, 200},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "http://relay.example-tailnet.ts.net/api/v1/status.json"+c.query, nil)
+			if len(c.lines) > 0 {
+				// Parse the lines with Go's own request reader so a repeated
+				// header arrives as separate lines, as it does on the wire.
+				raw := "GET /api/v1/status.json" + c.query + " HTTP/1.1\r\nHost: " + host + "\r\n" + strings.Join(c.lines, "\r\n") + "\r\n\r\n"
+				var err error
+				if req, err = http.ReadRequest(bufio.NewReader(strings.NewReader(raw))); err != nil {
+					t.Fatalf("ReadRequest: %v", err)
+				}
+			}
 			for k, v := range c.header {
 				req.Header.Set(k, v)
 			}

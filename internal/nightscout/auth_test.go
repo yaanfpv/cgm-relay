@@ -1,6 +1,7 @@
 package nightscout_test
 
 import (
+	"bufio"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -9,7 +10,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 )
 
@@ -390,6 +393,152 @@ func TestAuthorizationSubjectsStaysUnanswered(t *testing.T) {
 		rec := propertiesRequest(t, "/api/v2/authorization/subjects"+q, nil)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("subjects%s: status = %d, want 404 (body: %s)", q, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// sentinelMgDl is a glucose value no other fixture uses, so finding it in a
+// body proves the route served stored data rather than only answering 200.
+const sentinelMgDl = 237
+
+// rawRequest parses raw (CRLF lines, as a client writes them) with Go's own
+// request reader, so a repeated header arrives as several lines exactly as
+// it does on the wire, then answers it through the real handler.
+func rawRequest(t *testing.T, raw string) *httptest.ResponseRecorder {
+	t.Helper()
+	h, err := nightscout.New(&fakeStore{readings: []cgm.Reading{reading(time.Now(), sentinelMgDl)}}, testToken, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// getRaw builds the raw text of a GET for target carrying each header line
+// in order, repeats included.
+func getRaw(target string, headerLines ...string) string {
+	return "GET " + target + " HTTP/1.1\r\nHost: relay.test\r\n" + strings.Join(append(headerLines, ""), "\r\n") + "\r\n"
+}
+
+// TestRepeatedCredentialsAnyValidWins checks that a credential sent more
+// than once is judged by every occurrence: a right one wins wherever it
+// sits, a blank one is no credential, and a request whose only non-blank
+// values are wrong is refused. Reading only the first occurrence lets a
+// blank value hide a wrong one (a wrong token answered as if none was
+// sent) and a wrong or blank one hide a right one (a follower app whose
+// settings add a stale value ahead of the real one is locked out).
+func TestRepeatedCredentialsAnyValidWins(t *testing.T) {
+	t.Parallel()
+	const status = "/api/v1/status.json"
+	secretSHA1 := sha1Hex(testToken)
+	const (
+		refused = http.StatusUnauthorized
+		served  = http.StatusOK
+	)
+	cases := []struct {
+		name   string
+		target string
+		header []string
+		want   int
+	}{
+		{"blank then wrong token query", status + "?token=&token=wrong", nil, refused},
+		{"whitespace then wrong token query", status + "?token=%20&token=wrong", nil, refused},
+		{"blank then wrong api-secret", status, []string{"Api-Secret: ", "Api-Secret: wrong"}, refused},
+		{"blank then wrong bearer", status, []string{"Authorization: ", "Authorization: Bearer wrong"}, refused},
+		{"wrong then wrong token query", status + "?token=wrong&token=other", nil, refused},
+		{"wrong then right token query", status + "?token=wrong&token=" + testToken, nil, served},
+		{"blank then right token query", status + "?token=&token=" + testToken, nil, served},
+		{"wrong then right api-secret raw", status, []string{"Api-Secret: wrong", "Api-Secret: " + testToken}, served},
+		{"wrong then right api-secret sha1", status, []string{"Api-Secret: wrong", "Api-Secret: " + secretSHA1}, served},
+		{"wrong then right bearer", status, []string{"Authorization: Bearer wrong", "Authorization: Bearer " + testToken}, served},
+		{"right then wrong token query", status + "?token=" + testToken + "&token=wrong", nil, served},
+		{"right then wrong api-secret", status, []string{"Api-Secret: " + testToken, "Api-Secret: wrong"}, served},
+		{"right then wrong bearer", status, []string{"Authorization: Bearer " + testToken, "Authorization: Bearer wrong"}, served},
+		{"blank token query twice", status + "?token=&token=", nil, served},
+		{"whitespace token query twice", status + "?token=%20&token=%09", nil, served},
+		{"blank api-secret twice", status, []string{"Api-Secret: ", "Api-Secret:  "}, served},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := rawRequest(t, getRaw(c.target, c.header...))
+			if rec.Code != c.want {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, c.want, rec.Body.String())
+			}
+			if c.want == refused {
+				if got := rec.Body.String(); got != `{"status":401,"message":"Unauthorized","description":"Invalid/Missing"}`+"\n" {
+					t.Errorf("body = %q, want Nightscout's refusal", got)
+				}
+			} else if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+				t.Errorf("body = %s, want the ordinary status object", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestRepeatedCredentialsOnProtectedRoutes checks every route that needs a
+// credential: a right token query or api-secret still lets the request in
+// when a blank or wrong one of the same kind comes first, a request whose
+// only non-blank values are wrong is refused, and a lone Bearer header
+// stays no credential there. A reading with a value no other test uses is
+// stored so a data route answering 200 has to have served it.
+func TestRepeatedCredentialsOnProtectedRoutes(t *testing.T) {
+	t.Parallel()
+	routes := []string{"/api/v2/properties"}
+	for _, p := range nightscoutEndpoints {
+		if !openEndpoints[p] {
+			routes = append(routes, p)
+		}
+	}
+	servesReadings := map[string]bool{
+		"/api/v1/entries/sgv.json":     true,
+		"/api/v1/entries.json":         true,
+		"/api/v1/entries/current.json": true,
+	}
+	type variant struct {
+		name   string
+		query  []string
+		header []string
+		ok     bool
+	}
+	variants := []variant{
+		{"blank then right token query", []string{"token=", "token=" + testToken}, nil, true},
+		{"wrong then right token query", []string{"token=wrong", "token=" + testToken}, nil, true},
+		{"blank then right api-secret", nil, []string{"Api-Secret: ", "Api-Secret: " + testToken}, true},
+		{"wrong then right api-secret raw", nil, []string{"Api-Secret: wrong", "Api-Secret: " + testToken}, true},
+		{"wrong then right api-secret sha1", nil, []string{"Api-Secret: wrong", "Api-Secret: " + sha1Hex(testToken)}, true},
+		{"wrong then wrong token query", []string{"token=wrong", "token=other"}, nil, false},
+		{"blank then wrong token query", []string{"token=", "token=wrong"}, nil, false},
+		{"wrong then wrong api-secret", nil, []string{"Api-Secret: wrong", "Api-Secret: other"}, false},
+		{"blank then wrong api-secret", nil, []string{"Api-Secret: ", "Api-Secret: wrong"}, false},
+		{"bearer alone", nil, []string{"Authorization: Bearer " + testToken}, false},
+		{"wrong then right bearer", nil, []string{"Authorization: Bearer wrong", "Authorization: Bearer " + testToken}, false},
+	}
+	for _, route := range routes {
+		for _, v := range variants {
+			t.Run(route+" "+v.name, func(t *testing.T) {
+				target := route
+				if len(v.query) > 0 {
+					target += "?" + strings.Join(v.query, "&")
+				}
+				rec := rawRequest(t, getRaw(target, v.header...))
+				if !v.ok {
+					if rec.Code != http.StatusUnauthorized {
+						t.Fatalf("status = %d, want 401 (body: %s)", rec.Code, rec.Body.String())
+					}
+					return
+				}
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+				}
+				if servesReadings[route] && !strings.Contains(rec.Body.String(), "237") {
+					t.Errorf("body = %s, want the stored reading %d", rec.Body.String(), sentinelMgDl)
+				}
+			})
 		}
 	}
 }

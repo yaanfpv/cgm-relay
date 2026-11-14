@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - Follower apps that ask for Nightscout's insulin and carbs on board now get Nightscout's own empty answer, and a refused request gets Nightscout's error body.
-- A follower app that checks the connection with a wrong token now gets Nightscout's "unauthorized" answer instead of a success, so a mistyped token shows up at setup. Asking without a token still works as before.
+- A follower app that checks the connection with a wrong token now gets Nightscout's "unauthorized" answer instead of a success, so a mistyped token shows up at setup. A token sent twice counts if either copy is right, and a wrong one is caught even after a blank one. Asking without a token still works as before.
 - The local network route is removed in favour of Tailscale. If you used it, CGM Relay keeps the relay on this Mac only until you choose a Tailscale way to reach it, and deletes the certificate it had saved.
 - The libraries CGM Relay is built on are up to date, the Go SQLite and system packages among them. Nothing changes in how it works.
 

@@ -40,25 +40,31 @@ func (h *handler) statusRefuses(r *http.Request) bool {
 
 // credentials reports whether r presents any credential (a non-blank token
 // query, api-secret header or, with bearer set, Bearer token) and whether any
-// presented one is right. A blank value counts as not presented.
+// presented one is right. A blank value counts as not presented. A credential
+// repeated in the query or as several header lines is read occurrence by
+// occurrence, so a blank or wrong one never hides a right one after it, nor
+// a blank one a wrong one. Every value is compared, whether or not an earlier
+// one already matched.
 func (h *handler) credentials(r *http.Request, bearer bool) (presented, accepted bool) {
-	if token := trimCredential(r.URL.Query().Get("token")); token != "" {
-		presented = true
-		if constantTimeEqual(token, h.token) {
-			accepted = true
+	for _, value := range r.URL.Query()["token"] {
+		if token := trimCredential(value); token != "" {
+			presented = true
+			accepted = constantTimeEqual(token, h.token) || accepted
 		}
 	}
-	if secret := trimCredential(r.Header.Get("api-secret")); secret != "" {
-		presented = true
-		if constantTimeEqual(strings.ToLower(secret), h.tokenSHA1Hex) || constantTimeEqual(secret, h.token) {
-			accepted = true
+	for _, value := range r.Header.Values("api-secret") {
+		if secret := trimCredential(value); secret != "" {
+			presented = true
+			sha := constantTimeEqual(strings.ToLower(secret), h.tokenSHA1Hex)
+			raw := constantTimeEqual(secret, h.token)
+			accepted = sha || raw || accepted
 		}
 	}
 	if bearer {
-		if token := bearerToken(r); token != "" {
-			presented = true
-			if constantTimeEqual(token, h.token) {
-				accepted = true
+		for _, value := range r.Header.Values("Authorization") {
+			if token := bearerToken(value); token != "" {
+				presented = true
+				accepted = constantTimeEqual(token, h.token) || accepted
 			}
 		}
 	}
@@ -66,9 +72,10 @@ func (h *handler) credentials(r *http.Request, bearer bool) (presented, accepted
 }
 
 // bearerToken returns the trimmed token of an "Authorization: Bearer"
-// header, or "" when there is none. The scheme name is case-insensitive.
-func bearerToken(r *http.Request) string {
-	scheme, token, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " ")
+// header value, or "" when it is not one. The scheme name is
+// case-insensitive.
+func bearerToken(value string) string {
+	scheme, token, ok := strings.Cut(strings.TrimSpace(value), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return ""
 	}
