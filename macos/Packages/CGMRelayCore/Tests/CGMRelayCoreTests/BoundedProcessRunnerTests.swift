@@ -40,19 +40,64 @@ struct RealBoundedProcessRunnerTests {
         #expect(result == .exited(0))
     }
 
-    @Test("a process that outlives timeout is terminated and reported as timedOut")
-    func timeoutTerminatesTheProcess() async throws {
+    /// TimeoutCase names one perl child that must outlive the runner's timeout.
+    struct TimeoutCase: Sendable, CustomTestStringConvertible {
+        let label: String
+        let ignoresTerminate: Bool
+        var testDescription: String { label }
+    }
+
+    /// One single-process child (perl forks nothing). It sleeps and writes
+    /// its file only if it gets to finish naturally.
+    private static func perlScript(ignoringTerminate: Bool) -> String {
+        (ignoringTerminate ? "$SIG{TERM}='IGNORE'; " : "")
+            + "sleep 30; "
+            + "open(my $m,\">\",$ARGV[0]) or die; print $m \"done\"; close($m) or die"
+    }
+
+    @Test(
+        "a process that outlives the timeout is ended by the runner and reported as timedOut",
+        arguments: [
+            TimeoutCase(label: "an ordinary child", ignoresTerminate: false),
+            TimeoutCase(label: "a child that ignores SIGTERM", ignoresTerminate: true),
+        ]
+    )
+    func timeoutEndsTheProcess(_ testCase: TimeoutCase) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-timeout-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("marker")
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+
         let runner = RealBoundedProcessRunner()
-        let start = ContinuousClock.now
         let result = await runner.run(
-            executableURL: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "sleep 30"],
+            executableURL: URL(fileURLWithPath: "/usr/bin/perl"),
+            arguments: ["-e", Self.perlScript(ignoringTerminate: testCase.ignoresTerminate), marker.path],
             standardInputData: Data(),
-            timeout: .milliseconds(200)
+            timeout: .seconds(3)
         )
-        let elapsed = ContinuousClock.now - start
+
+        // The runner returns only after it has observed the child's own exit,
+        // which the launcher's real-child tests cover, so a number read back
+        // from a file is not probed here: it could name someone else by then.
+        // A runner that waited for the child to finish by itself would
+        // write the marker.
         #expect(result == .timedOut)
-        #expect(elapsed < .seconds(5), "must not wait anywhere near the process's own sleep duration")
+        #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
+    }
+
+    @Test("a timeout that races the child's own exit gives one of the two outcomes and always returns")
+    func timeoutRacingNaturalExitReturns() async throws {
+        let runner = RealBoundedProcessRunner()
+        for _ in 0..<25 {
+            let result = await runner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                arguments: [],
+                standardInputData: Data(),
+                timeout: .milliseconds(1)
+            )
+            #expect(result == .timedOut || result == .exited(0), "got \(result)")
+        }
     }
 
     @Test("a child that exits immediately without reading a stdin payload larger than a pipe buffer never raises SIGPIPE into this process")
