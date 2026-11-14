@@ -242,7 +242,7 @@ final class AppModel: ObservableObject {
         sleepRules: any SleepRuleManaging,
         sleepSetting: any SleepSettingWriting,
         idleSleepAssertion: any IdleSleepAsserting,
-        tailscaleAppInstalled: Bool = TailscaleAppDetector.isInstalled()
+        tailscaleAppInstalled: Bool = AppModel.detectTailscaleApp()
     ) {
         self.tailscaleAppInstalled = tailscaleAppInstalled
         self.powerSource = powerSource
@@ -591,10 +591,21 @@ final class AppModel: ObservableObject {
 
     // MARK: - Built-in Tailscale
 
+    /// detectTailscaleApp is TailscaleAppDetector's answer. A development
+    /// build can be told to read Tailscale's Mac app as absent with
+    /// `-CGMRelayAssumeNoTailscaleApp YES`, to see that setup on a Mac that
+    /// has it.
+    nonisolated static func detectTailscaleApp() -> Bool {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "CGMRelayAssumeNoTailscaleApp") { return false }
+        #endif
+        return TailscaleAppDetector.isInstalled()
+    }
+
     /// refreshTailscaleAppInstalled re-reads whether Tailscale's Mac app is
     /// installed, as setup and Settings open.
     func refreshTailscaleAppInstalled() {
-        let installed = TailscaleAppDetector.isInstalled()
+        let installed = AppModel.detectTailscaleApp()
         if installed != tailscaleAppInstalled { tailscaleAppInstalled = installed }
     }
 
