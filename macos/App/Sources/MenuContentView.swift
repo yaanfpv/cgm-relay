@@ -48,7 +48,7 @@ struct MenuContentView: View {
                 AccessibleButton("Show New Address…", action: actions.openConnect)
             }
 
-            if model.needsSetup {
+            if model.offersFinishSetup {
                 AccessibleButton("Finish setup…", style: actionsRowHasPrimary ? .secondary : .primary, action: actions.openSetup)
             }
 
@@ -109,7 +109,7 @@ struct MenuContentView: View {
     /// panelHasOtherPrimary is whether another button already is the panel's
     /// one primary action, so the update steps back.
     private var panelHasOtherPrimary: Bool {
-        model.needsSetup || actionsRowHasPrimary
+        model.offersFinishSetup || actionsRowHasPrimary
     }
 
     /// actionsRowHasPrimary is whether the actions row shows a primary

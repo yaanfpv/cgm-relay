@@ -7,6 +7,8 @@ public enum FollowerApp: String, CaseIterable, Sendable, Identifiable, Codable {
     case xDripPlus
     case loopFollow
     case nightguard
+    case sweetDreams
+    case zukka
 
     public var id: String { rawValue }
 
@@ -16,6 +18,8 @@ public enum FollowerApp: String, CaseIterable, Sendable, Identifiable, Codable {
         case .xDripPlus: return "xDrip+"
         case .loopFollow: return "LoopFollow"
         case .nightguard: return "Nightguard"
+        case .sweetDreams: return "Sweet Dreams"
+        case .zukka: return "Zukka"
         }
     }
 }

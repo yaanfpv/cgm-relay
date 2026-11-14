@@ -51,6 +51,53 @@ public enum StayAwakeChoice: String, Codable, Sendable {
     case on
 }
 
+/// UpdateStep is one thing an update asks a person who already finished an
+/// earlier setup. Stored answers use the raw value, so a name never changes.
+public enum UpdateStep: String, Codable, Sendable, CaseIterable {
+    /// movedToBuiltIn tells a person the route they used is gone and takes
+    /// them through the Tailscale built into CGM Relay.
+    case movedToBuiltIn
+    /// tailscaleChoice asks someone using their own Tailscale whether to keep
+    /// it or use the built-in one.
+    case tailscaleChoice
+    /// stayAwake asks whether to keep this Mac awake.
+    case stayAwake
+}
+
+/// SetupPlan is what the app shows at launch: the whole setup, only the
+/// steps an update adds, or nothing.
+public enum SetupPlan: Equatable, Sendable {
+    case fullSetup
+    case updateSteps([UpdateStep])
+    case nothing
+
+    /// make decides from the saved settings and whether Tailscale's Mac app
+    /// is installed. Setup never finished is the full setup; a setup finished
+    /// at the current version or later has nothing to show; otherwise the
+    /// steps that apply and are not yet answered, in the order they are
+    /// asked.
+    public static func make(settings: AppSettings, tailscaleInstalled: Bool) -> SetupPlan {
+        guard settings.setupFinished else { return .fullSetup }
+        guard settings.setupVersion < AppSettings.currentSetupVersion else { return .nothing }
+        let answered = settings.answeredUpdateSteps
+        let usedOwnTailscale = settings.tailscaleHTTPSEnabled || settings.reach == .myTailnet
+        let leavesOwnTailscale = usedOwnTailscale && !tailscaleInstalled
+        var steps: [UpdateStep] = []
+        if !answered.contains(.movedToBuiltIn), !settings.useBuiltInTailscale,
+           settings.movedFromLocalRoute || leavesOwnTailscale {
+            steps.append(.movedToBuiltIn)
+        }
+        if !answered.contains(.tailscaleChoice), !settings.useBuiltInTailscale,
+           !settings.movedFromLocalRoute, usedOwnTailscale, tailscaleInstalled {
+            steps.append(.tailscaleChoice)
+        }
+        if settings.stayAwake == nil, !answered.contains(.stayAwake) {
+            steps.append(.stayAwake)
+        }
+        return steps.isEmpty ? .nothing : .updateSteps(steps)
+    }
+}
+
 /// AppSettings is every non-secret setting the Settings window's General,
 /// Advanced, and Alerts panes expose. It carries no LibreLinkUp account,
 /// token, or store key -- those stay in CredentialStore -- so this whole
@@ -95,6 +142,13 @@ public struct AppSettings: Equatable, Sendable {
     /// stayAwake is the person's answer to keeping this Mac awake, nil
     /// until they have been asked.
     public var stayAwake: StayAwakeChoice?
+    /// useBuiltInTailscale is the person's choice to reach the relay through
+    /// the Tailscale built into CGM Relay, which gives it its own public
+    /// https address, instead of their own Tailscale.
+    public var useBuiltInTailscale: Bool
+    /// answeredUpdateSteps are the update steps the person has already
+    /// answered, so an update interrupted halfway asks only what is left.
+    public var answeredUpdateSteps: Set<UpdateStep>
 
     /// currentSetupVersion is the version of setup this build runs.
     public static let currentSetupVersion = 2
@@ -108,13 +162,32 @@ public struct AppSettings: Equatable, Sendable {
         return next
     }
 
+    /// finishingUpdate is these settings with the current setup version
+    /// recorded, after the person has been through the steps an update adds,
+    /// and nothing else changed.
+    public func finishingUpdate() -> AppSettings {
+        var next = self
+        next.setupVersion = AppSettings.currentSetupVersion
+        return next
+    }
+
+    /// answering is these settings with step recorded as answered, and
+    /// nothing else changed. It records only that the step was answered, never
+    /// what the answer was.
+    public func answering(_ step: UpdateStep) -> AppSettings {
+        var next = self
+        next.answeredUpdateSteps.insert(step)
+        return next
+    }
+
     /// effectiveReach is the reach the relay is actually bound to: this
-    /// Mac only whenever the person chose Tailscale HTTPS, whatever reach
+    /// Mac only whenever the person chose Tailscale HTTPS or the built-in
+    /// Tailscale, which reach the relay from outside the listener, whatever reach
     /// was chosen before it, and the chosen reach otherwise. Following the
     /// choice rather than Tailscale's live state is the safe direction: the
     /// relay never widens while Tailscale is down or being re-read.
     public var effectiveReach: NetworkReach {
-        tailscaleHTTPSEnabled ? .thisMacOnly : reach
+        (tailscaleHTTPSEnabled || useBuiltInTailscale) ? .thisMacOnly : reach
     }
 
     /// chosenWay is the way the person has picked, as the list shows it: a
@@ -186,7 +259,9 @@ public struct AppSettings: Equatable, Sendable {
         lastHandlerObservation: HandlerObservation? = nil,
         movedFromLocalRoute: Bool = false,
         setupVersion: Int = 0,
-        stayAwake: StayAwakeChoice? = nil
+        stayAwake: StayAwakeChoice? = nil,
+        useBuiltInTailscale: Bool = false,
+        answeredUpdateSteps: Set<UpdateStep> = []
     ) {
         self.port = port
         self.reach = reach
@@ -204,6 +279,8 @@ public struct AppSettings: Equatable, Sendable {
         self.movedFromLocalRoute = movedFromLocalRoute
         self.setupVersion = setupVersion
         self.stayAwake = stayAwake
+        self.useBuiltInTailscale = useBuiltInTailscale
+        self.answeredUpdateSteps = answeredUpdateSteps
     }
 }
 
@@ -219,7 +296,7 @@ extension AppSettings: Codable {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
         case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
         case lastHandlerObservation
-        case movedFromLocalRoute, setupVersion, stayAwake
+        case movedFromLocalRoute, setupVersion, stayAwake, useBuiltInTailscale, answeredUpdateSteps
     }
 
     public init(from decoder: Decoder) throws {
@@ -265,6 +342,10 @@ extension AppSettings: Codable {
         lastHandlerObservation = ((try? container.decodeIfPresent(HandlerObservation.self, forKey: .lastHandlerObservation)) ?? nil)
         // An answer this version does not know reads as not yet asked.
         stayAwake = ((try? container.decodeIfPresent(StayAwakeChoice.self, forKey: .stayAwake)) ?? nil)
+        useBuiltInTailscale = ((try? container.decodeIfPresent(Bool.self, forKey: .useBuiltInTailscale)) ?? nil) ?? fallback.useBuiltInTailscale
+        // A step this version does not know is dropped, and the rest kept.
+        let storedSteps = ((try? container.decodeIfPresent([String].self, forKey: .answeredUpdateSteps)) ?? nil) ?? []
+        answeredUpdateSteps = Set(storedSteps.compactMap(UpdateStep.init(rawValue:)))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -285,6 +366,8 @@ extension AppSettings: Codable {
         try container.encode(movedFromLocalRoute, forKey: .movedFromLocalRoute)
         try container.encode(setupVersion, forKey: .setupVersion)
         try container.encodeIfPresent(stayAwake, forKey: .stayAwake)
+        try container.encode(useBuiltInTailscale, forKey: .useBuiltInTailscale)
+        try container.encode(answeredUpdateSteps.map(\.rawValue).sorted(), forKey: .answeredUpdateSteps)
     }
 }
 

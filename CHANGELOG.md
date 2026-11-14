@@ -9,9 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - Keep this Mac awake, in setup and in Settings: while CGM Relay runs and the Mac is plugged in it doesn't sleep, lid closed included on a laptop, and on battery it sleeps as usual. Turning it on asks for your Mac's password once.
+- Use the Tailscale built into CGM Relay, in setup and in Settings. If you already have Tailscale you choose between yours and the built-in one; if not, you sign in once in a window CGM Relay opens and get a public https address that only your token opens, so your phone needs nothing installed.
+- Sweet Dreams and Zukka join the follower apps in Connect. Sweet Dreams reads from its own servers, so it needs the built-in Tailscale address, and Connect offers to switch if you are on your own Tailscale. Zukka, the App Store build of xDrip4iOS, gets the same Connect steps as xDrip4iOS.
+- People updating from an earlier version see only the new steps, in a short "What's new in this update" window, instead of the whole setup again. Each answer is saved as you give it, and Later closes the window until the next launch.
 
 ### Changed
 
+- Follower apps that ask for Nightscout's insulin and carbs on board now get Nightscout's own empty answer, and a refused request gets Nightscout's error body.
+- A follower app that checks the connection with a wrong token now gets Nightscout's "unauthorized" answer instead of a success, so a mistyped token shows up at setup. A token sent twice counts if either copy is right, and a wrong one is caught even after a blank one. Asking without a token still works as before.
 - The local network route is removed in favour of Tailscale. If you used it, CGM Relay keeps the relay on this Mac only until you choose a Tailscale way to reach it, and deletes the certificate it had saved.
 - The libraries CGM Relay is built on are up to date, the Go SQLite and system packages among them. Nothing changes in how it works.
 

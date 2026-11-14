@@ -65,7 +65,14 @@ final class AppModel: ObservableObject {
     /// first-launch setup to open: once, after launch finds setup
     /// incomplete. The scene that owns the window watches it.
     @Published private(set) var setupPresentationRequest = 0
+    /// updatePresentationRequest counts the times the app itself asks for the
+    /// "What's new" window to open: after a launch that finds steps an update
+    /// adds, and once the safety notice has been accepted if it was in the way.
+    @Published private(set) var updatePresentationRequest = 0
     private var launchChecked = false
+    /// networkAddressesRead is whether this launch has read this Mac's
+    /// network addresses at least once.
+    private var networkAddressesRead = false
     /// setupPortNotice is the sentence setup shows when no port in the
     /// search range was free, with a way to open Advanced; nil otherwise.
     @Published private(set) var setupPortNotice: String?
@@ -86,6 +93,13 @@ final class AppModel: ObservableObject {
     /// isChangingStayAwake is true while the administrator prompt for the
     /// sleep permission is open.
     @Published private(set) var isChangingStayAwake = false
+    /// tailscaleAppInstalled is whether Tailscale's Mac app is installed, which
+    /// decides whether setup asks if the person wants to use it.
+    @Published private(set) var tailscaleAppInstalled: Bool
+    /// builtInRoute is where the built-in Tailscale route is in its setup,
+    /// from the engine's own status; starting while that route is not in use.
+    @Published private(set) var builtInRoute: BuiltInRouteState = .starting
+    private let builtInSession = BuiltInSignInSession()
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
     /// did not work, with Tailscale's own page where one helps.
@@ -227,8 +241,10 @@ final class AppModel: ObservableObject {
         powerSource: any PowerSourceReading = SystemPowerSource(),
         sleepRules: any SleepRuleManaging,
         sleepSetting: any SleepSettingWriting,
-        idleSleepAssertion: any IdleSleepAsserting
+        idleSleepAssertion: any IdleSleepAsserting,
+        tailscaleAppInstalled: Bool = TailscaleAppDetector.isInstalled()
     ) {
+        self.tailscaleAppInstalled = tailscaleAppInstalled
         self.powerSource = powerSource
         self.sleepRules = sleepRules
         self.tailscale = tailscale
@@ -306,8 +322,13 @@ final class AppModel: ObservableObject {
         refreshCredentialsConfigured()
         launchChecked = true
         stayAwake.launched()
+        refreshTailscaleAppInstalled()
+        tailnetAvailable = ReachAddressResolver.tailscaleIPv4(among: SystemNetworkInterfaces.currentIPv4Addresses()) != nil
+        networkAddressesRead = true
         if needsSetup || needsSafetyNotice {
             setupPresentationRequest += 1
+        } else {
+            presentUpdateStepsIfNeeded()
         }
         await alertEngine.setNoReadingAlert(enabled: settings.noReadingAlertEnabled, minutes: settings.noReadingAlertMinutes)
         await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
@@ -416,6 +437,7 @@ final class AppModel: ObservableObject {
     /// the old engine still holds.
     func shutDown() async {
         stopRequested = true
+        builtInSession.cancel()
         await stayAwake.willQuitInBackground()
         await statusPoller.stop()
         await supervisor.stopAndWait(timeout: .seconds(3))
@@ -513,6 +535,8 @@ final class AppModel: ObservableObject {
         let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
 
         tailnetAvailable = ReachAddressResolver.tailscaleIPv4(among: interfaces) != nil
+        networkAddressesRead = true
+        recomputeMenuState()
         connectAddressAvailability = ReachAddressResolver.displayHostAvailability(for: settings.effectiveReach, interfaces: interfaces)
         impliedBindHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
 
@@ -530,6 +554,16 @@ final class AppModel: ObservableObject {
     /// (impliedBindHost), the settings port, and the current display-host
     /// availability. No address logic lives here.
     var connectPaneAddressState: ConnectPaneAddressState {
+        if settings.useBuiltInTailscale {
+            return ConnectPaneAddressState.decide(
+                reach: settings.reach,
+                boundHost: boundHost,
+                impliedBindHost: impliedBindHost,
+                port: settings.port,
+                displayHostAvailability: connectAddressAvailability,
+                builtIn: builtInRoute
+            )
+        }
         if settings.tailscaleHTTPSEnabled {
             return ConnectPaneAddressState.decideTailscaleHTTPS(boundHost: boundHost, tailscale: tailscaleStatus, https: httpsState)
         }
@@ -550,8 +584,115 @@ final class AppModel: ObservableObject {
             reach: settings.reach,
             httpsChosen: settings.tailscaleHTTPSEnabled,
             https: httpsState,
-            tailnetAvailable: tailnetAvailable
+            tailnetAvailable: tailnetAvailable,
+            builtIn: settings.useBuiltInTailscale ? builtInRoute : nil
         )
+    }
+
+    // MARK: - Built-in Tailscale
+
+    /// refreshTailscaleAppInstalled re-reads whether Tailscale's Mac app is
+    /// installed, as setup and Settings open.
+    func refreshTailscaleAppInstalled() {
+        let installed = TailscaleAppDetector.isInstalled()
+        if installed != tailscaleAppInstalled { tailscaleAppInstalled = installed }
+    }
+
+    /// chooseBuiltInTailscaleWithoutTailscaleApp takes the person straight
+    /// into the built-in route when Tailscale's Mac app is not installed and
+    /// no way has been chosen yet.
+    func chooseBuiltInTailscaleWithoutTailscaleApp() {
+        guard !tailscaleAppInstalled, settings.chosenWay == .thisMacOnly else { return }
+        chooseBuiltInTailscale()
+    }
+
+    /// chooseBuiltInTailscale moves the choice to the Tailscale built into
+    /// CGM Relay and restarts the engine with its state folder.
+    func chooseBuiltInTailscale() {
+        guard !settings.useBuiltInTailscale else { return }
+        settings.useBuiltInTailscale = true
+        settings.tailscaleHTTPSEnabled = false
+        persistSettings()
+        refreshBuiltInRoute()
+        recomputeMenuState()
+        refreshNetworkAddresses()
+        Task { await restartEngineIfRunning() }
+    }
+
+    /// chooseOwnTailscale moves the choice back to the person's own
+    /// Tailscale and restarts the engine without the built-in node.
+    func chooseOwnTailscale() {
+        guard settings.useBuiltInTailscale else { return }
+        settings.useBuiltInTailscale = false
+        persistSettings()
+        refreshBuiltInRoute()
+        recomputeMenuState()
+        refreshNetworkAddresses()
+        Task { await restartEngineIfRunning() }
+    }
+
+    /// openBuiltInStep opens the page the current step asks for, in the
+    /// system's web authentication sheet.
+    func openBuiltInStep() {
+        builtInSession.present(builtInRoute)
+    }
+
+    /// retryBuiltInRoute restarts the engine, whatever state it is in, so the
+    /// node starts over.
+    func retryBuiltInRoute() {
+        builtInSession.cancel()
+        Task {
+            switch engineState {
+            case .failed:
+                await supervisor.clearFailure()
+                await startEngine()
+            case .stopped:
+                if canStart { await startEngine() }
+            case .starting, .running, .waitingToRestart:
+                await restartEngineIfRunning()
+            }
+        }
+    }
+
+    /// pollBuiltInRouteUntilReady asks the engine for its status every two
+    /// seconds while the route is not ready and a screen showing it is open,
+    /// so each step shows within moments of the engine reaching it; it ends
+    /// with the screen or once the address is ready.
+    func pollBuiltInRouteUntilReady() async {
+        while !Task.isCancelled, settings.useBuiltInTailscale, builtInRoute.address == nil {
+            await statusPoller.pollNow()
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    /// refreshBuiltInRoute recomputes builtInRoute from the engine's status
+    /// and closes the sign-in sheet once its step is done.
+    private func refreshBuiltInRoute() {
+        var next: BuiltInRouteState = .starting
+        if settings.useBuiltInTailscale {
+            if case .failed = engineState {
+                next = .failed("CGM Relay couldn't start. Try Again.")
+            } else {
+                next = BuiltInRouteState.from(latestStatus?.builtIn)
+            }
+        }
+        if next != builtInRoute { builtInRoute = next }
+        builtInSession.reconcile(with: next)
+    }
+
+    /// builtInStateDirectory is where the built-in node keeps its state,
+    /// beside the database, readable only by this user. nil if it cannot be
+    /// made, which keeps the engine from starting without one.
+    private func builtInStateDirectory() -> String? {
+        let directory = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            return directory.path
+        } catch {
+            recoveryLogger.error("could not make the Tailscale state folder: \(error, privacy: .public)")
+            return nil
+        }
     }
 
     // MARK: - Settings
@@ -638,6 +779,7 @@ final class AppModel: ObservableObject {
         }
         tailscaleStatus = status
         tailscaleServe = serve
+        recomputeMenuState()
         // A read that confirms the handler's state is remembered, so the port
         // lock still follows it when Tailscale later cannot be asked.
         if let observed = HandlerObservation.observing(httpsState), observed != settings.lastHandlerObservation {
@@ -738,6 +880,95 @@ final class AppModel: ObservableObject {
     func acceptSafetyNotice() {
         settings.safetyNoticeAcceptance = SafetyNotice.acceptance(appVersion: AppVersion.short)
         persistSettings()
+        if !needsSetup { presentUpdateStepsIfNeeded() }
+    }
+
+    // MARK: - Update steps
+
+    /// updatePlan is what this launch's saved settings and Tailscale's Mac
+    /// app being installed or not ask of the person.
+    var updatePlan: SetupPlan {
+        SetupPlan.make(settings: settings, tailscaleInstalled: tailscaleAppInstalled)
+    }
+
+    /// phonesCannotReachYet is whether setup is finished but the chosen
+    /// route cannot give a phone an address, which includes a built-in route
+    /// chosen and left before its address was ready. The menu says so and
+    /// offers to finish.
+    /// It stays false until this launch has had a first real answer about the
+    /// chosen route (routeAnswerArrived), so a route that is merely not read
+    /// yet never shows as down. The decision lives here, in the app's own
+    /// state, because the answers it waits on are the model's; the text it
+    /// leads to is covered in MenuDisplayStateTests.
+    var phonesCannotReachYet: Bool {
+        launchChecked && settings.setupFinished && credentialsConfigured
+            && routeAnswerArrived && !phoneReachability.isReachable
+    }
+
+    /// routeAnswerArrived is whether this launch has heard back about the
+    /// chosen route: the engine's first status or failure for the built-in
+    /// route, Tailscale's own state for Tailscale HTTPS, and this Mac's
+    /// network addresses for My tailnet.
+    private var routeAnswerArrived: Bool {
+        if settings.useBuiltInTailscale {
+            if case .failed = engineState { return true }
+            return latestStatus != nil
+        }
+        if settings.tailscaleHTTPSEnabled { return tailscaleStatus != .unknown }
+        switch settings.reach {
+        case .myTailnet: return networkAddressesRead
+        case .thisMacOnly: return true
+        }
+    }
+
+    /// movedStepOwed is whether an update still owes someone whose local
+    /// network route is gone the move to the built-in route. It stays owed
+    /// until answered, even after the built-in route was chosen, so leaving
+    /// before its address is ready still leaves the way back to it.
+    private var movedStepOwed: Bool {
+        phonesCannotReachYet
+            && settings.setupVersion < AppSettings.currentSetupVersion
+            && settings.movedFromLocalRoute
+            && !settings.answeredUpdateSteps.contains(.movedToBuiltIn)
+    }
+
+    /// offersFinishSetup is whether the menu panel offers "Finish setup…":
+    /// while setup is unfinished, and while the chosen route cannot reach a
+    /// phone.
+    var offersFinishSetup: Bool { needsSetup || phonesCannotReachYet }
+
+    /// updateWindowSteps are the steps the "What's new" window shows now, in
+    /// order: the plan's own, with the move first while it is still owed.
+    var updateWindowSteps: [UpdateStep] {
+        var steps: [UpdateStep] = []
+        if case .updateSteps(let planned) = updatePlan { steps = planned }
+        if movedStepOwed, !steps.contains(.movedToBuiltIn) {
+            steps.insert(.movedToBuiltIn, at: 0)
+        }
+        return steps
+    }
+
+    /// presentUpdateStepsIfNeeded asks for the "What's new" window when the
+    /// update has steps left to show.
+    func presentUpdateStepsIfNeeded() {
+        guard !updateWindowSteps.isEmpty else { return }
+        updatePresentationRequest += 1
+    }
+
+    /// answerUpdateStep saves that step was answered, at once, so a relaunch
+    /// brings back only the steps still unanswered.
+    func answerUpdateStep(_ step: UpdateStep) {
+        settings = settings.answering(step)
+        persistSettings()
+        recomputeMenuState()
+    }
+
+    /// finishUpdate records that the person has been through every step the
+    /// update added.
+    func finishUpdate() {
+        settings = settings.finishingUpdate()
+        persistSettings()
+        recomputeMenuState()
     }
 
     /// completeSetup is setup's Done. It marks setup finished only while a
@@ -1021,6 +1252,15 @@ final class AppModel: ObservableObject {
             await supervisor.fail(refusal)
             return
         }
+        var stateDirectory: String?
+        if settings.useBuiltInTailscale {
+            stateDirectory = builtInStateDirectory()
+            if stateDirectory == nil {
+                boundHost = nil
+                await supervisor.fail(.configurationUnreadable)
+                return
+            }
+        }
         guard
             let configuration = try? SettingsEngineConfigurationBuilder.build(
                 settings: settings,
@@ -1028,6 +1268,7 @@ final class AppModel: ObservableObject {
                 interfaces: interfaces,
                 statusAddr: statusAddr,
                 databasePath: databasePath,
+                tailscaleStateDir: stateDirectory,
                 librelinkupBaseURL: librelinkupBaseURL
             )
         else {
@@ -1036,6 +1277,9 @@ final class AppModel: ObservableObject {
             return
         }
         boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+        // A status from before this start must not read as this node's.
+        latestStatus?.builtIn = nil
+        refreshBuiltInRoute()
         await alertEngine.resumeAfterEngineStart()
         await supervisor.start(configuration: configuration)
     }
@@ -1109,6 +1353,7 @@ final class AppModel: ObservableObject {
             break
         }
         engineState = state
+        refreshBuiltInRoute()
         recomputeMenuState()
     }
 
@@ -1125,6 +1370,7 @@ final class AppModel: ObservableObject {
         if let status {
             latestStatus = status
         }
+        refreshBuiltInRoute()
         recomputeMenuState()
 
         Task {
@@ -1160,7 +1406,8 @@ final class AppModel: ObservableObject {
             status: latestStatus,
             now: Date(),
             units: settings.units,
-            port: settings.port
+            port: settings.port,
+            phonesCanReach: !phonesCannotReachYet
         )
         if next != menuState {
             menuState = next

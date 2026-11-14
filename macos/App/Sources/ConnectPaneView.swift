@@ -84,6 +84,9 @@ struct ConnectPaneView<Extra: View>: View {
                 Task { await model.refreshTailscale() }
             }
         }
+        .task(id: model.builtInRoute.address) {
+            await model.pollBuiltInRouteUntilReady()
+        }
     }
 
     /// blockedSection is every state a follower app cannot yet connect
@@ -234,6 +237,17 @@ struct ConnectPaneView<Extra: View>: View {
                 singleValueRow(single)
                     .padding(.top, 4)
             }
+            if followerApp == .sweetDreams, !model.settings.useBuiltInTailscale {
+                HStack {
+                    Text("You are on your own Tailscale, which Sweet Dreams can't reach.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 12)
+                    AccessibleButton("Use Built-In Tailscale", style: .primary) { model.chooseBuiltInTailscale() }
+                        .fixedSize()
+                }
+                .padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -244,7 +258,7 @@ struct ConnectPaneView<Extra: View>: View {
     private func singleValueField(_ instructions: FollowerAppEntry.Instructions) -> FollowerAppEntry.Field? {
         switch followerApp {
         case .xDripPlus: instructions.fields.first
-        case .xDrip4iOS, .loopFollow, .nightguard: nil
+        case .xDrip4iOS, .zukka, .loopFollow, .nightguard, .sweetDreams: nil
         }
     }
 
@@ -483,7 +497,7 @@ extension ConnectPaneView where Extra == EmptyView {
     init(model: AppModel, openAdvancedPane: @escaping () -> Void) {
         self.init(
             model: model,
-            blockedSecondary: "Choose Tailscale HTTPS or My tailnet in Advanced to change that.",
+            blockedSecondary: "Choose how your phone reaches this Mac in Advanced to change that.",
             blockedAction: ("Open Advanced…", openAdvancedPane),
             showsTokenRotation: true,
             isCompact: false,

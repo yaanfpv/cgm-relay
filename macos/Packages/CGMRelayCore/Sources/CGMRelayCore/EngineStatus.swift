@@ -27,6 +27,9 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
     /// clients maps each follower app's User-Agent to the last time it
     /// made an authenticated request to the Nightscout API.
     public var clients: [String: Date]?
+    /// builtIn is the built-in Tailscale node's report; nil when the engine
+    /// sent no `ts_*` field, as when that route is not in use.
+    public var builtIn: BuiltInStatus?
 
     private enum CodingKeys: String, CodingKey {
         case running
@@ -37,6 +40,35 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         case signInFailing = "sign_in_failing"
         case lastError = "last_error"
         case clients
+        case tsState = "ts_state"
+        case tsLoginURL = "ts_login_url"
+        case tsApproveURL = "ts_approve_url"
+        case tsFunnelURL = "ts_funnel_url"
+        case tsPublicHost = "ts_public_host"
+        case tsError = "ts_error"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        running = try c.decode(Bool.self, forKey: .running)
+        lastFetchTime = try c.decodeIfPresent(Date.self, forKey: .lastFetchTime)
+        lastReadingTime = try c.decodeIfPresent(Date.self, forKey: .lastReadingTime)
+        lastReadingMgDl = try c.decodeIfPresent(Int.self, forKey: .lastReadingMgDl)
+        lastReadingTrend = try c.decodeIfPresent(String.self, forKey: .lastReadingTrend)
+        signInFailing = try c.decode(Bool.self, forKey: .signInFailing)
+        lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
+        clients = try c.decodeIfPresent([String: Date].self, forKey: .clients)
+        let tsKeys: [CodingKeys] = [.tsState, .tsLoginURL, .tsApproveURL, .tsFunnelURL, .tsPublicHost, .tsError]
+        if tsKeys.contains(where: { c.contains($0) }) {
+            builtIn = BuiltInStatus(
+                state: try c.decodeIfPresent(String.self, forKey: .tsState),
+                loginURL: try c.decodeIfPresent(String.self, forKey: .tsLoginURL),
+                approveURL: try c.decodeIfPresent(String.self, forKey: .tsApproveURL),
+                funnelURL: try c.decodeIfPresent(String.self, forKey: .tsFunnelURL),
+                publicHost: try c.decodeIfPresent(String.self, forKey: .tsPublicHost),
+                error: try c.decodeIfPresent(String.self, forKey: .tsError)
+            )
+        }
     }
 
     public init(
@@ -47,7 +79,8 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         lastReadingTrend: String? = nil,
         signInFailing: Bool = false,
         lastError: String? = nil,
-        clients: [String: Date]? = nil
+        clients: [String: Date]? = nil,
+        builtIn: BuiltInStatus? = nil
     ) {
         self.running = running
         self.lastFetchTime = lastFetchTime
@@ -57,6 +90,7 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         self.signInFailing = signInFailing
         self.lastError = lastError
         self.clients = clients
+        self.builtIn = builtIn
     }
 }
 

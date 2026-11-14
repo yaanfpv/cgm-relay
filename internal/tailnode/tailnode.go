@@ -126,7 +126,8 @@ func running(o Observation) Status {
 
 // allowedExact are the paths of the follower API the relay serves. They are
 // the paths internal/nightscout registers; a path added there is not public
-// until it is added here.
+// until it is added here. The v2 properties route is admitted by publicPath,
+// since its names are a segment after the prefix.
 var allowedExact = map[string]bool{
 	"/":                            true,
 	"/api/v1/status.json":          true,
@@ -145,6 +146,10 @@ var allowedExact = map[string]bool{
 // connectPrefix is the pairing page, which carries a one-time code after it.
 const connectPrefix = "/connect/"
 
+// propertiesPath is the v2 properties route: bare, or with one segment of
+// comma-separated names after it.
+const propertiesPath = "/api/v2/properties"
+
 // PublicHandler wraps next for the public listener: only the paths a
 // follower app or a pairing page uses reach next, and every other path
 // answers 404 without reaching it.
@@ -161,6 +166,12 @@ func PublicHandler(next http.Handler) http.Handler {
 func publicPath(p string) bool {
 	if allowedExact[p] {
 		return true
+	}
+	if p == propertiesPath {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(p, propertiesPath+"/"); ok {
+		return rest != "" && !strings.Contains(rest, "/")
 	}
 	rest, ok := strings.CutPrefix(p, connectPrefix)
 	return ok && rest != "" && !strings.Contains(rest, "/")

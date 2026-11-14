@@ -229,7 +229,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func openSetup() {
         popover.performClose(nil)
         WindowActivation.bringAppForward()
-        sceneActions.openWindow?(id: SetupWindow.id)
+        if model.needsSetup {
+            sceneActions.openWindow?(id: SetupWindow.id)
+        } else if !model.updateWindowSteps.isEmpty {
+            sceneActions.openWindow?(id: UpdateStepsWindow.id)
+        } else {
+            sceneActions.showSettings(tab: .advanced)
+        }
     }
 
     @objc private func reportBug() {
@@ -337,6 +343,7 @@ struct SceneBridgeView: View {
                 actions.openSettings = { openSettings() }
             }
             .modifier(SetupPresenter(model: model))
+            .modifier(UpdateStepsPresenter(model: model))
     }
 }
 

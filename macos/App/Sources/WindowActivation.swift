@@ -7,6 +7,12 @@ enum SetupWindow {
     static let id = "setup"
 }
 
+/// UpdateStepsWindow names the "What's new in this update" window, which
+/// shows only the steps an update adds to a finished setup.
+enum UpdateStepsWindow {
+    static let id = "update-steps"
+}
+
 enum WindowActivation {
     /// bringAppForward is what opening any window of this menu-bar-only app
     /// starts with: macOS will not bring forward a window of an app with no
@@ -80,6 +86,21 @@ struct SetupPresenter: ViewModifier {
             guard model.setupPresentationRequest > 0 else { return }
             WindowActivation.bringAppForward()
             openWindow(id: SetupWindow.id)
+        }
+    }
+}
+
+/// UpdateStepsPresenter opens the "What's new" window once when the model
+/// asks for it. It rides on SceneBridgeView beside SetupPresenter.
+struct UpdateStepsPresenter: ViewModifier {
+    @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.task(id: model.updatePresentationRequest) {
+            guard model.updatePresentationRequest > 0 else { return }
+            WindowActivation.bringAppForward()
+            openWindow(id: UpdateStepsWindow.id)
         }
     }
 }

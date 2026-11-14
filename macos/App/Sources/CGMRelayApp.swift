@@ -86,6 +86,16 @@ struct CGMRelayApp: App {
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
 
+        // What an update adds to a finished setup: opened by
+        // UpdateStepsPresenter after a launch that finds new steps, and by the
+        // menu's "Finish setup…" while the move to the built-in route is owed.
+        Window("What's New in This Update", id: UpdateStepsWindow.id) {
+            UpdateStepsView(model: model)
+        }
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+
         // A Settings scene, not a plain Window: the system titles and
         // manages the window itself (a Cmd-, shortcut and a Settings…/
         // Preferences… app-menu item come for free), and .contentSize

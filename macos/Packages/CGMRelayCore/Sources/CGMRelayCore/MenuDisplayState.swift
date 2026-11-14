@@ -133,13 +133,47 @@ public struct MenuDisplayState: Sendable, Equatable {
     ///   mg/dL so every existing caller keeps its current behaviour.
     /// - port: the follower port the engine was asked to listen on, named
     ///   in the explanation when another app already holds it.
+    /// - phonesCanReach: false while no route a phone can use exists yet
+    ///   for someone whose earlier route is gone. A signed-in account then
+    ///   never reads as fine: current readings turn amber and the state
+    ///   says phones cannot reach this Mac yet.
     public static func make(
         credentialsConfigured: Bool,
         engineState: EngineSupervisor.RunState,
         status: EngineStatus?,
         now: Date,
         units: GlucoseUnit = .mgDl,
-        port: Int? = nil
+        port: Int? = nil,
+        phonesCanReach: Bool = true
+    ) -> MenuDisplayState {
+        var state = makeEngineState(
+            credentialsConfigured: credentialsConfigured,
+            engineState: engineState,
+            status: status,
+            now: now,
+            units: units,
+            port: port
+        )
+        guard credentialsConfigured, !phonesCanReach else { return state }
+        let notice = "Phones can't reach this Mac yet."
+        if state.dot == .green {
+            state.dot = .amber
+            state.statusLine = "Phones can't reach this Mac yet"
+            state.shortStatus = "Phones can't reach this Mac"
+        }
+        if state.statusDetail == nil {
+            state.statusDetail = notice
+        }
+        return state
+    }
+
+    private static func makeEngineState(
+        credentialsConfigured: Bool,
+        engineState: EngineSupervisor.RunState,
+        status: EngineStatus?,
+        now: Date,
+        units: GlucoseUnit,
+        port: Int?
     ) -> MenuDisplayState {
         guard credentialsConfigured else {
             return MenuDisplayState(

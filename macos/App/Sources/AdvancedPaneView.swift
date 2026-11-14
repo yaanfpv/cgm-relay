@@ -62,23 +62,32 @@ struct AdvancedPaneView: View {
                 }
             }
 
-            if model.settings.tailscaleHTTPSEnabled || isTailscaleRunning {
-                Section {
-                    TailscaleHTTPSControl(model: model, part: .statusRow)
-                } footer: {
-                    TailscaleHTTPSControl(model: model, part: .notes)
-                }
+            if model.tailscaleAppInstalled {
+                TailscaleChoiceView(model: model)
             }
 
-            Section {
-                ReachChoicesView(model: model)
-            } header: {
-                Text("Who can reach it")
+            if model.settings.useBuiltInTailscale {
+                BuiltInRouteView(model: model)
+            } else {
+                if model.settings.tailscaleHTTPSEnabled || isTailscaleRunning {
+                    Section {
+                        TailscaleHTTPSControl(model: model, part: .statusRow)
+                    } footer: {
+                        TailscaleHTTPSControl(model: model, part: .notes)
+                    }
+                }
+
+                Section {
+                    ReachChoicesView(model: model)
+                } header: {
+                    Text("Who can reach it")
+                }
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
         .onAppear {
+            model.refreshTailscaleAppInstalled()
             model.refreshNetworkAddresses()
             portText = String(model.settings.port)
             Task { await model.refreshTailscale() }
