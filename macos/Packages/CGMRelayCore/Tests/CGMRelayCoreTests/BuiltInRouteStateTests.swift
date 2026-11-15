@@ -212,6 +212,14 @@ struct BuiltInRouteStateHealthTests {
         let slow = BuiltInStatus(state: "not-answering", publicHost: host, notAnsweringSince: since)
         #expect(BuiltInRouteState.resolve(engineState: .running, status: slow) == .notAnswering(host: host, since: since))
     }
+
+    @Test("a Ready whose last test is older than six minutes is no longer Ready, however long ago the report arrived")
+    func readyExpiresWhenReportsStopArriving() {
+        let ready = BuiltInRouteState.ready(host: host, checkedAt: checked)
+        #expect(ready.expiredAt(checked.addingTimeInterval(359)) == ready)
+        #expect(ready.expiredAt(checked.addingTimeInterval(361)) == .settingUp(host: host))
+        #expect(BuiltInRouteState.notAnswering(host: host, since: since).expiredAt(checked.addingTimeInterval(3600)) == .notAnswering(host: host, since: since))
+    }
 }
 
 extension BuiltInRouteState {

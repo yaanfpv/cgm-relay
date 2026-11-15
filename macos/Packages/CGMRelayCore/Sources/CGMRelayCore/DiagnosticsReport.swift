@@ -23,7 +23,8 @@ public enum DiagnosticsReport {
         noReadingAlertEnabled: Bool,
         noReadingAlertMinutes: Int,
         signInFailingAlertEnabled: Bool,
-        followerAges: [(client: String, age: String)]
+        followerAges: [(client: String, age: String)],
+        routeCounts: [String: Int] = [:]
     ) -> String {
         var lines: [String] = [
             "CGM Relay \(appVersion) (\(buildNumber))",
@@ -47,8 +48,26 @@ public enum DiagnosticsReport {
             }
         }
 
+        let counted = countNames.compactMap { name in
+            routeCounts[name].map { "\(name) \(max($0, 0))" }
+        }
+        if !counted.isEmpty {
+            lines.append("Address checks: \(counted.joined(separator: ", "))")
+        }
+
         return lines.joined(separator: "\n")
     }
+
+    /// countNames are the only names the engine counts under (its Tailscale
+    /// log lines and its failure classes). A count under any other name is
+    /// dropped, so a report can never carry an address or a host the engine
+    /// did not mean as a count.
+    private static let countNames = [
+        "ingress_denied", "handshake",
+        "dropped_during_tls", "tls_failure", "server_error",
+        "dns_failure", "no_route", "connect_refused", "connect_timeout",
+        "tailnet_address", "node_offline", "node_unhealthy", "status_read_failed",
+    ]
 
     private static func describe(_ state: EngineSupervisor.RunState) -> String {
         switch state {
