@@ -404,6 +404,19 @@ struct BuiltInKeyExpiryTests {
         #expect(BuiltInKeyExpiry.signInAgainURL(from: nil) == nil)
     }
 
+    @Test("a press of Sign In Again opens the page, or says plainly why it did not")
+    func signInAgainOutcome() throws {
+        let page = try #require(URL(string: "https://login.tailscale.com/a/abc123"))
+        #expect(BuiltInKeyExpiry.outcome(engineStarted: true, page: page) == .open(page))
+        #expect(BuiltInKeyExpiry.outcome(engineStarted: true, page: page).message == nil)
+        #expect(BuiltInKeyExpiry.outcome(engineStarted: false, page: nil) == .refused)
+        #expect(BuiltInKeyExpiry.outcome(engineStarted: false, page: page) == .refused)
+        #expect(BuiltInKeyExpiry.outcome(engineStarted: true, page: nil) == .timedOut)
+        for outcome in [BuiltInKeyExpiry.SignInAgainOutcome.refused, .timedOut] {
+            #expect(outcome.message == "Couldn't start Tailscale sign-in. Try again in a moment.")
+        }
+    }
+
     @Test("an expiry date never makes the route a failure or hides Ready")
     func routeUntouched() {
         let status = BuiltInStatus(state: "running", publicHost: "relay.example-tailnet.ts.net", checkedAt: now, keyExpiry: now.addingTimeInterval(2 * day))

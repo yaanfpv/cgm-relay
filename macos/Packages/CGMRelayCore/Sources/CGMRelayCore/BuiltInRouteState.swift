@@ -269,6 +269,36 @@ public struct BuiltInKeyExpiry: Equatable, Sendable {
         return "Tailscale sign-in expires on \(formatter.string(from: expiresAt))"
     }
 
+    /// SignInAgainOutcome is what the person is shown after pressing Sign In
+    /// Again: the page, or why there is none.
+    public enum SignInAgainOutcome: Equatable, Sendable {
+        case open(URL)
+        /// refused is an engine that did not start the sign-in.
+        case refused
+        /// timedOut is a sign-in the engine started that named no page in time.
+        case timedOut
+
+        /// message is the plain text shown beside the button, nil when a
+        /// page opened.
+        public var message: String? {
+            switch self {
+            case .open: return nil
+            case .refused, .timedOut: return BuiltInKeyExpiry.couldNotStartText
+            }
+        }
+    }
+
+    public static let couldNotStartText = "Couldn't start Tailscale sign-in. Try again in a moment."
+
+    /// outcome decides what a press of Sign In Again shows: engineStarted is
+    /// whether the engine accepted the request, and page the sign-in page it
+    /// named within the wait, if any.
+    public static func outcome(engineStarted: Bool, page: URL?) -> SignInAgainOutcome {
+        guard engineStarted else { return .refused }
+        guard let page else { return .timedOut }
+        return .open(page)
+    }
+
     /// signInAgainURL is the page the engine named for a sign-in it started,
     /// only when it is an https page on Tailscale.
     public static func signInAgainURL(from status: BuiltInStatus?) -> URL? {

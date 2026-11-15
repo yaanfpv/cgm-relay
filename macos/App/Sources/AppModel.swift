@@ -104,6 +104,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var builtInTailscaleError: String?
     /// builtInKeyExpiry is the warning that the Tailscale sign-in expires soon.
     @Published private(set) var builtInKeyExpiry: BuiltInKeyExpiry?
+    /// builtInSignInMessage is why Sign In Again opened nothing, until it does.
+    @Published private(set) var builtInSignInMessage: String?
     private let builtInSession = BuiltInSignInSession()
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
@@ -688,15 +690,19 @@ final class AppModel: ObservableObject {
     /// sheet. The page is opened only when it is an https page on Tailscale.
     func signInBuiltInAgain() {
         Task {
-            guard (try? await signInStarter.startSignIn()) != nil else { return }
-            for _ in 0..<10 {
-                await statusPoller.pollNow()
-                if let page = BuiltInKeyExpiry.signInAgainURL(from: latestStatus?.builtIn) {
-                    builtInSession.presentPage(page)
-                    return
+            let started = (try? await signInStarter.startSignIn()) != nil
+            var page: URL?
+            if started {
+                for _ in 0..<10 {
+                    await statusPoller.pollNow()
+                    page = BuiltInKeyExpiry.signInAgainURL(from: latestStatus?.builtIn)
+                    if page != nil { break }
+                    try? await Task.sleep(for: .milliseconds(500))
                 }
-                try? await Task.sleep(for: .milliseconds(500))
             }
+            let outcome = BuiltInKeyExpiry.outcome(engineStarted: started, page: page)
+            if case .open(let url) = outcome { builtInSession.presentPage(url) }
+            builtInSignInMessage = outcome.message
         }
     }
 

@@ -21,7 +21,8 @@ struct BuiltInRouteView: View {
                 SetupStatusRow(
                     name: "built-in-key",
                     title: notice.text(timeZone: .current),
-                    caption: "Sign in again before then to keep your address.",
+                    caption: model.builtInSignInMessage ?? "Sign in again before then to keep your address.",
+                    captionIsError: model.builtInSignInMessage != nil,
                     wrapsCaption: true,
                     slot: .action(BuiltInKeyExpiry.signInAgainTitle, accessibleName: "Sign in to Tailscale again") { model.signInBuiltInAgain() }
                 )
