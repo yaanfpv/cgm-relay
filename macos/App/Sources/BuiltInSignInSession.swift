@@ -14,6 +14,13 @@ final class BuiltInSignInSession: NSObject, ASWebAuthenticationPresentationConte
     private static let callbackScheme = "cgm-relay-built-in-never"
     private let slot = SignInWindowSlot<ASWebAuthenticationSession>()
 
+    /// onClosedByPerson is called when the sheet ends because the person
+    /// closed it or finished its page, never when the app cancelled it: the
+    /// slot makes a cancelled sheet's completion stale.
+    var onClosedByPerson: (() -> Void)? {
+        didSet { slot.onClosedByPerson = { [weak self] _ in self?.onClosedByPerson?() } }
+    }
+
     /// pageURL is the page a state asks the person to complete, nil for a
     /// state with none.
     static func pageURL(of route: BuiltInRouteState) -> URL? {

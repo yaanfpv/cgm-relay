@@ -106,6 +106,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var builtInKeyExpiry: BuiltInKeyExpiry?
     /// builtInSignInMessage is why Sign In Again opened nothing, until it does.
     @Published private(set) var builtInSignInMessage: String?
+    /// builtInFunnelSheetClosedAt is when the person closed the Enable Funnel
+    /// page, until the engine reports a state past it.
+    @Published private(set) var builtInFunnelSheetClosedAt: Date?
     private let builtInSession = BuiltInSignInSession()
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
@@ -656,6 +659,7 @@ final class AppModel: ObservableObject {
     /// openBuiltInStep opens the page the current step asks for, in the
     /// system's web authentication sheet.
     func openBuiltInStep() {
+        builtInSession.onClosedByPerson = { [weak self] in self?.builtInSheetClosedByPerson() }
         builtInSession.present(builtInRoute)
     }
 
@@ -683,6 +687,13 @@ final class AppModel: ObservableObject {
             try? await addressRetrier.tryAgain()
             await statusPoller.pollNow()
         }
+    }
+
+    /// builtInSheetClosedByPerson notes that the Enable Funnel page was closed,
+    /// so the row says the address is being turned on while the engine
+    /// notices. A sheet the app cancelled never gets here.
+    private func builtInSheetClosedByPerson() {
+        if case .enableFunnel = builtInRoute { builtInFunnelSheetClosedAt = Date() }
     }
 
     /// signInBuiltInAgain has the engine start Tailscale's sign-in while the
@@ -725,6 +736,9 @@ final class AppModel: ObservableObject {
             next = BuiltInRouteState.resolve(engineState: engineState, status: latestStatus?.builtIn).expiredAt(Date())
         }
         if next != builtInRoute { builtInRoute = next }
+        if builtInFunnelSheetClosedAt != nil {
+            if case .enableFunnel = next {} else { builtInFunnelSheetClosedAt = nil }
+        }
         let report = settings.useBuiltInTailscale && engineState == .running ? latestStatus?.builtIn : nil
         let error = BuiltInRouteState.tailscaleErrorText(from: report)
         if error != builtInTailscaleError { builtInTailscaleError = error }
@@ -1251,7 +1265,8 @@ final class AppModel: ObservableObject {
             signInFailingAlertEnabled: settings.signInFailingAlertEnabled,
             followerAges: followerAges,
             routeCounts: latestStatus?.builtIn?.counts ?? [:],
-            routeErrorClass: latestStatus?.builtIn?.errorClass
+            routeErrorClass: latestStatus?.builtIn?.errorClass,
+            builtIn: settings.useBuiltInTailscale ? builtInRoute : nil
         )
     }
 

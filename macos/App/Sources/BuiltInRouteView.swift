@@ -55,12 +55,20 @@ struct BuiltInRouteView: View {
                 slot: .action("Approve", accessibleName: "Approve this Mac in Tailscale", style: .primary) { model.openBuiltInStep() }
             )
         case .enableFunnel:
-            SetupStatusRow(
-                name: "built-in",
-                title: "Turn on your public address",
-                caption: "One click in Tailscale.",
-                slot: .action("Turn On", accessibleName: "Turn on your public address", style: .primary) { model.openBuiltInStep() }
-            )
+            // After the page closes the engine needs a moment to see the
+            // change, so the row says so until the recheck window has passed.
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                if BuiltInFunnelRecheck.isChecking(route: model.builtInRoute, sheetClosedAt: model.builtInFunnelSheetClosedAt, now: context.date) {
+                    SetupStatusRow(name: "built-in", title: BuiltInFunnelRecheck.checkingTitle, caption: "This can take a moment.", slot: .checking)
+                } else {
+                    SetupStatusRow(
+                        name: "built-in",
+                        title: "Turn on your public address",
+                        caption: "One click in Tailscale.",
+                        slot: .action("Turn On", accessibleName: "Turn on your public address", style: .primary) { model.openBuiltInStep() }
+                    )
+                }
+            }
         case .settingUp:
             SetupStatusRow(
                 name: "built-in",
