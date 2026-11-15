@@ -703,9 +703,11 @@ func TestMonitorBackoffAfterFailure(t *testing.T) {
 // members are the status-read-failed case too, so a failed read can never
 // leave the old state standing.
 func TestMonitorMacSideFailureWaitsAndNeverRepairs(t *testing.T) {
-	macSide := func(t *testing.T, r *rig, class tailnode.ProbeClass, d time.Duration) {
+	// A node-side class explains a public test that failed, so each is paired
+	// with a failing probe: a route failure and a failure on the Mac's side.
+	macSide := func(t *testing.T, r *rig, class, probe tailnode.ProbeClass, d time.Duration) {
 		t.Helper()
-		r.node, r.probe = tailnode.ProbeOK, tailnode.ProbeOK
+		r.node, r.probe = tailnode.ProbeOK, probe
 		if class.NodeSide() {
 			r.node = class
 		} else {
@@ -714,12 +716,20 @@ func TestMonitorMacSideFailureWaitsAndNeverRepairs(t *testing.T) {
 		r.at(d)
 		r.m.Step(context.Background(), host)
 	}
-	for _, class := range append(append([]tailnode.ProbeClass{}, macClasses...), nodeClasses...) {
-		t.Run(class.String(), func(t *testing.T) {
+	type pair struct{ class, probe tailnode.ProbeClass }
+	var pairs []pair
+	for _, class := range macClasses {
+		pairs = append(pairs, pair{class, tailnode.ProbeOK})
+	}
+	for _, class := range nodeClasses {
+		pairs = append(pairs, pair{class, tailnode.ProbeRouteDropped}, pair{class, tailnode.ProbeMacDNS})
+	}
+	for _, p := range pairs {
+		t.Run(p.class.String()+"/"+p.probe.String(), func(t *testing.T) {
 			r := newRig(t)
 			r.ready()
 			for i := 0; i < 10; i++ {
-				macSide(t, r, class, time.Duration(i)*5*time.Minute)
+				macSide(t, r, p.class, p.probe, time.Duration(i)*5*time.Minute)
 				if got := r.state(); got != "waiting-for-internet" {
 					t.Fatalf("step %d: ts_state = %q, want waiting-for-internet", i+1, got)
 				}
@@ -734,15 +744,33 @@ func TestMonitorMacSideFailureWaitsAndNeverRepairs(t *testing.T) {
 			}
 		})
 	}
+	// A public test that succeeds is Ready whatever the node reports.
+	for _, class := range nodeClasses {
+		t.Run("answered while the node reports "+class.String(), func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			r.node = class
+			r.step(0, tailnode.ProbeOK)
+			if got := r.state(); got != "running" {
+				t.Errorf("ts_state = %q, want running", got)
+			}
+			if got := r.m.Counts()[class.String()]; got != 0 {
+				t.Errorf("count of %s = %d after an answered test, want 0", class, got)
+			}
+			if len(r.rep.kinds) != 0 {
+				t.Errorf("repairs after an answered test: %v", r.rep.kinds)
+			}
+		})
+	}
 	t.Run("while not answering", func(t *testing.T) {
 		r := newRig(t)
 		r.ready()
 		r.notAnswering()
 		before := len(r.rep.kinds)
-		for i, class := range append(append([]tailnode.ProbeClass{}, macClasses...), nodeClasses...) {
-			macSide(t, r, class, 5*time.Minute+time.Duration(i)*5*time.Minute)
+		for i, p := range pairs {
+			macSide(t, r, p.class, p.probe, 5*time.Minute+time.Duration(i)*5*time.Minute)
 			if got := r.state(); got != "waiting-for-internet" {
-				t.Errorf("%v: ts_state = %q, want waiting-for-internet", class, got)
+				t.Errorf("%v with %v: ts_state = %q, want waiting-for-internet", p.class, p.probe, got)
 			}
 		}
 		if len(r.rep.kinds) != before {
@@ -965,7 +993,8 @@ func TestMonitorCountsEachFailureClass(t *testing.T) {
 		for i := 1; i <= 2; i++ {
 			r.node, r.probe = tailnode.ProbeOK, tailnode.ProbeOK
 			if class.NodeSide() {
-				r.node = class
+				// Only a failed public test is explained by the node.
+				r.node, r.probe = class, tailnode.ProbeRouteDropped
 			} else {
 				r.probe = class
 			}

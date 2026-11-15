@@ -103,12 +103,14 @@ func (m *Monitor) TryAgain(ctx context.Context, host string) time.Duration {
 }
 
 func (m *Monitor) test(ctx context.Context, host string) time.Duration {
-	class := ProbeOK
-	if m.opts.Node != nil {
-		class = m.opts.Node(ctx)
-	}
-	if class == ProbeOK {
-		class = m.opts.Probe(ctx, host)
+	// The public test always runs, and an answer is Ready whatever the node
+	// reports. Only a failed test is explained by the node: one that is
+	// offline, unhealthy or unreadable makes it waiting, not a route fault.
+	class := m.opts.Probe(ctx, host)
+	if class != ProbeOK && class != ProbeTailnetAddress && m.opts.Node != nil {
+		if node := m.opts.Node(ctx); node != ProbeOK {
+			class = node
+		}
 	}
 	if ctx.Err() != nil {
 		// The test was cut off by the node closing, which says nothing about
