@@ -282,6 +282,7 @@ type fakeTailnet struct {
 	stateCh  chan string
 	sleeping chan time.Duration
 	release  chan struct{}
+	holdAll  atomic.Bool // hold every wait, even before the first public test
 	nextAsk  chan struct{}
 	evNotify chan struct{} // a nudge for every event the fake logs
 }
@@ -358,7 +359,7 @@ func (tn *fakeTailnet) sleep(ctx context.Context, d time.Duration) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	if tn.probes.Load() == 0 {
+	if tn.probes.Load() == 0 && !tn.holdAll.Load() {
 		tn.clock.advance(d)
 		return true
 	}
@@ -633,51 +634,136 @@ func statusJSON(t *testing.T, n *Node) (map[string]any, string) {
 	return m, strings.ToLower(string(b))
 }
 
-// TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed protects the
-// first public test of a new address. A node that ran while its tailnet did
-// not allow Funnel, and finds it allowed, registers Funnel the way
-// Tailscale's own example does: it asks the same running node to listen for
-// Funnel again. Restarting the node just before registering lets the
-// server's cleanup of the old session remove the new session's registration,
-// which is the drop the address is meant to be cured of.
-func TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed(t *testing.T) {
-	tn := newFakeTailnet(t)
+// holdWaits makes every wait the node makes stand at the injected sleep, also
+// before the first public test, so a test can look at the node while it waits.
+func (tn *fakeTailnet) holdWaits() { tn.holdAll.Store(true) }
+
+// untilState releases the waits the node makes until it logs state.
+func (tn *fakeTailnet) untilState(state string) {
+	tn.t.Helper()
+	for {
+		select {
+		case s := <-tn.stateCh:
+			if s == state {
+				return
+			}
+		case <-tn.sleeping:
+			go func() {
+				select {
+				case tn.release <- struct{}{}:
+				case <-time.After(hangCeiling):
+				}
+			}()
+		case <-time.After(hangCeiling):
+			tn.t.Fatalf("the node never logged %q; events %v", state, tn.log())
+		}
+	}
+}
+
+// waitForEvent returns once an event with prefix has been logged.
+func (tn *fakeTailnet) waitForEvent(prefix string) {
+	tn.t.Helper()
+	for tn.count(prefix) == 0 {
+		select {
+		case <-tn.evNotify:
+		case <-time.After(hangCeiling):
+			tn.t.Fatalf("no %q event; events %v", prefix, tn.log())
+		}
+	}
+}
+
+// waitingForFunnel runs a node whose tailnet does not allow Funnel yet, lets
+// Funnel become allowed while the node stands in a wait, and returns when the
+// node next stands in a wait, with the length of that wait.
+func (tn *fakeTailnet) waitingForFunnel() time.Duration {
+	tn.t.Helper()
 	tn.allowed = false
 	tn.listenErr = errors.New("Funnel not available; \"funnel\" node attribute not set")
-	tn.onRefusal = func(n int) {
-		if n == 2 {
-			tn.setAllowed(true)
-		}
-	}
+	tn.holdWaits()
 	tn.run()
 	tn.waitSleep()
-	evs := tn.log()
-	if !slices.Contains(evs, "listen-refused") {
-		t.Fatalf("the node was never refused, so the check cannot tell: %v", evs)
+	if tn.count("listen-refused") == 0 {
+		tn.t.Fatalf("the node was never refused, so the check cannot tell: %v", tn.log())
 	}
-	first, listened := slices.Index(evs, "probe"), slices.Index(evs, "listen-ok#1")
-	if listened < 0 || first < listened {
-		t.Errorf("the first public test came before the node listened for Funnel on the running node: %v", evs)
-	}
-	if tn.count("start#") != 1 || tn.count("close#") != 0 {
-		t.Errorf("a node was started or closed because Funnel turned on: %v", evs)
-	}
-	tn.mu.Lock()
-	starts := slices.Clone(tn.starts)
-	tn.mu.Unlock()
-	if len(starts) != 1 || starts[0].dir != tn.dir {
-		t.Errorf("starts %+v, want one on the folder %s", starts, tn.dir)
-	}
-	tn.setResult(ProbeOK)
+	tn.setAllowed(true)
 	tn.letGo()
-	tn.waitState("running")
-	if tn.count("start#") != 1 || tn.count("close#") != 0 {
-		t.Errorf("a node was started or closed by the time the address answered: %v", tn.log())
+	d := tn.waitSleep()
+	if tn.count("listen-ok#") != 0 {
+		tn.t.Fatalf("the node registered Funnel before any reconnect: %v", tn.log())
 	}
-	for _, s := range tn.stateHistory() {
-		if s == StateError {
-			t.Errorf("setup passed through the error state: %v", tn.stateHistory())
+	return d
+}
+
+// TestNodeListensAfterTheReconnectWhenFunnelBecomesAllowed protects the first
+// public test of a new address. A node that ran while its tailnet did not
+// allow Funnel, and finds it allowed, waits for the control server to reset
+// its session before it registers Funnel, because a registration made just
+// before that reset is dropped a minute later. It registers on the same
+// running node within seconds of the reset, and shows publishing while it waits.
+func TestNodeListensAfterTheReconnectWhenFunnelBecomesAllowed(t *testing.T) {
+	for _, line := range reconnectLogLines {
+		t.Run(line, func(t *testing.T) {
+			tn := newFakeTailnet(t)
+			tn.waitingForFunnel()
+			m, text := statusJSON(t, tn.node)
+			if m["ts_state"] != "publishing" || m["ts_error"] != nil || m["ts_tailscale_error"] != nil || strings.Contains(text, "error") {
+				t.Errorf("status while waiting for the reconnect: %v", m)
+			}
+			tn.nodeLog(line)
+			tn.waitForEvent("listen-ok#")
+			evs := tn.log()
+			if slices.Index(evs, "listen-ok#1") < slices.Index(evs, "log:"+line) {
+				t.Errorf("Funnel was registered before the reconnect line: %v", evs)
+			}
+			if slices.Contains(evs, "probe") && slices.Index(evs, "probe") < slices.Index(evs, "listen-ok#1") {
+				t.Errorf("the first public test came before Funnel was registered: %v", evs)
+			}
+			if tn.count("start#") != 1 || tn.count("close#") != 0 {
+				t.Errorf("a node was started or closed because Funnel turned on: %v", evs)
+			}
+			tn.mu.Lock()
+			starts := slices.Clone(tn.starts)
+			tn.mu.Unlock()
+			if len(starts) != 1 || starts[0].dir != tn.dir {
+				t.Errorf("starts %+v, want one on the folder %s", starts, tn.dir)
+			}
+			tn.setResult(ProbeOK)
+			tn.untilState("running")
+			if tn.count("start#") != 1 || tn.count("close#") != 0 {
+				t.Errorf("a node was started or closed by the time the address answered: %v", tn.log())
+			}
+			for _, s := range tn.stateHistory() {
+				if s == StateError {
+					t.Errorf("setup passed through the error state: %v", tn.stateHistory())
+				}
+			}
+		})
+	}
+}
+
+// TestNodeListensAfterAMinuteWithoutAReconnect protects the address from a
+// wait that never ends: when Funnel became allowed without the control server
+// resetting the session, the node registers Funnel after 60 seconds of its own
+// clock anyway.
+func TestNodeListensAfterAMinuteWithoutAReconnect(t *testing.T) {
+	tn := newFakeTailnet(t)
+	d := tn.waitingForFunnel()
+	waited := d
+	for tn.count("listen-ok#") == 0 {
+		if waited > time.Minute {
+			t.Fatalf("waited %v of the node's clock with no registration: %v", waited, tn.log())
 		}
+		tn.letGo()
+		select {
+		case d := <-tn.sleeping:
+			waited += d
+		case <-tn.evNotify:
+		case <-time.After(hangCeiling):
+			t.Fatalf("the node neither waited nor registered: %v", tn.log())
+		}
+	}
+	if waited > time.Minute {
+		t.Errorf("registered after %v of the node's clock, want at most a minute", waited)
 	}
 }
 
@@ -686,8 +772,13 @@ func TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed(t *testing.T) {
 // for it, and a restart there would only delay the address.
 func TestNodeDoesNotRestartWhenFunnelWasAllowedAllAlong(t *testing.T) {
 	tn := newFakeTailnet(t)
+	tn.holdWaits()
 	tn.run()
 	tn.waitSleep()
+	evs := tn.log()
+	if l, s := slices.Index(evs, "listen-ok#1"), slices.IndexFunc(evs, func(e string) bool { return strings.HasPrefix(e, "sleep:") }); l < 0 || (s >= 0 && s < l) {
+		t.Errorf("the node waited before registering Funnel although it was allowed from the start: %v", evs)
+	}
 	tn.setResult(ProbeOK)
 	tn.letGo()
 	tn.waitState("running")
