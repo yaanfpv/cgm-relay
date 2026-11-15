@@ -166,8 +166,9 @@ func withTailnode(status func() tailnode.Status) statusOption {
 }
 
 // withTailnodeTryAgain adds POST /tailscale/try-again, which makes a public
-// test of the built-in Tailscale address at once and takes the next repair
-// step if it fails.
+// test of the built-in Tailscale address at once. While the address is
+// publishing or not reachable the press first switches Funnel off and on, within
+// its limits; on a serving node a failed test takes the next repair step.
 func withTailnodeTryAgain(tryAgain func(context.Context) error) statusOption {
 	return func(c *statusConfig) { c.tryAgain = tryAgain }
 }

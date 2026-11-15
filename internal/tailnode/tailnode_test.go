@@ -401,8 +401,7 @@ func TestStateReadyCarriesTimeOfLastTest(t *testing.T) {
 // TestStateReadyExpiresWithoutRecentTest protects the promise that Ready
 // means the address answered lately: with the last successful test older
 // than six minutes the state must not say running, whatever else the node
-// reports. A state that trusts the old success forever (the behaviour today)
-// fails it.
+// reports.
 func TestStateReadyExpiresWithoutRecentTest(t *testing.T) {
 	for _, age := range []time.Duration{0, 2 * time.Minute, 5*time.Minute + 59*time.Second} {
 		o := answeringObs()
@@ -585,8 +584,7 @@ func (r *rig) notAnswering() {
 // TestMonitorReadyIsEarnedAndKeptFresh protects Ready itself: no success yet
 // is not Ready even when the node believes it answered, a success is Ready
 // with its time, a later success moves the time, and a success that is
-// older than six minutes stops being Ready with no other event. A monitor
-// that starts Ready, or never lets a success go stale, fails it.
+// older than six minutes stops being Ready with no other event.
 func TestMonitorReadyIsEarnedAndKeptFresh(t *testing.T) {
 	r := newRig(t)
 	if got := r.state(); got == "running" {
@@ -656,8 +654,7 @@ func TestMonitorNotAnsweringNeedsThreeFailuresOverFourMinutes(t *testing.T) {
 	}
 }
 
-// TestMonitorSuccessEndsTheRun protects "the first successful test returns
-// Ready" and that a success starts the count again: two failures, a success
+// TestMonitorSuccessEndsTheRun protects that the first successful test returns Ready and that a success starts the count again: two failures, a success
 // and two more failures are not a run of three, and the run that does
 // complete is timed from its own first failure.
 func TestMonitorSuccessEndsTheRun(t *testing.T) {
@@ -688,9 +685,7 @@ func TestMonitorSuccessEndsTheRun(t *testing.T) {
 
 // TestMonitorBackoffAfterFailure protects the test cadence: 30 seconds after
 // the first failure, 60 after the second, never more than five minutes, and
-// back to two minutes after a success. A monitor that keeps testing every
-// two minutes through a failure (slow to notice) or hammers the address
-// (never backs off) fails it.
+// back to two minutes after a success.
 func TestMonitorBackoffAfterFailure(t *testing.T) {
 	r := newRig(t)
 	now := time.Duration(0)
@@ -880,7 +875,7 @@ func TestMonitorTailnetAddressCountsAsNeither(t *testing.T) {
 // TestMonitorRepairLadder protects the order of repairs: none for one or two
 // failures, a reopen of the public listener on becoming not answering, a
 // second reopen at the next failed test, and only then a full restart of the
-// node. A ladder that restarts first, or repairs on a blip, fails it.
+// node.
 func TestMonitorRepairLadder(t *testing.T) {
 	r := newRig(t)
 	r.ready()
@@ -1059,9 +1054,7 @@ func (r *rig) wantRereg(offsets ...time.Duration) {
 // reconnect: the monitor makes a public test at once, and the test renews
 // Ready like any other. Funnel's registration is left alone while the test
 // answers. Only a failed test turns it off and on, and the test is made again
-// at once. Nothing seen means nothing done. A monitor that toggles before the
-// first test, toggles for a test that answered, skips the test, leaves a failed
-// test to the ladder's slower schedule, or stops at a failed toggle fails it.
+// at once. Nothing seen means nothing done.
 func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 	for _, line := range reconnectLines {
 		t.Run(line+" answered", func(t *testing.T) {
@@ -1150,8 +1143,7 @@ func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 // one reconnect with one test, and however the lines fall, Funnel is never
 // re-registered twice within thirty seconds, while a failed test after a
 // reconnect past the window is acted on. Every reconnect is still tested at
-// once. A monitor that toggles per line, or per reconnect with no window, or
-// stops testing inside the window, fails it.
+// once.
 func TestMonitorReregistersOncePerReconnectAndPerThirtySeconds(t *testing.T) {
 	r := newRig(t)
 	r.ready()
@@ -1200,8 +1192,7 @@ func TestMonitorReregistersOncePerReconnectAndPerThirtySeconds(t *testing.T) {
 // TestMonitorReregistrationKeepsTheLadder protects the backstop: a public
 // test made after a re-registration is an ordinary test. A run of failures it
 // belongs to is not restarted by it, a not-answering report is not lifted or
-// hidden by it, and the repair ladder takes its steps as it always did. A
-// re-registration that resets the run, or holds the ladder back, fails it.
+// hidden by it, and the repair ladder takes its steps.
 func TestMonitorReregistrationKeepsTheLadder(t *testing.T) {
 	t.Run("a failing run still reaches not answering on time", func(t *testing.T) {
 		r := newRig(t)
@@ -1264,9 +1255,7 @@ func TestMonitorReregistrationKeepsTheLadder(t *testing.T) {
 // TestMonitorFirstFailedTestReregistersOnce protects the quick repair of a
 // dropped registration: the first failed public test of a run, on any route
 // failure class, has Funnel re-registered before the ladder does anything, and
-// the same run does not toggle again. The cadence and the ladder are as they
-// were. A monitor that waits for three failures, toggles on every failure, or
-// toggles for a failure that is the Mac's network or a tailnet name fails it.
+// the same run does not toggle again.
 func TestMonitorFirstFailedTestReregistersOnce(t *testing.T) {
 	for _, class := range routeClasses {
 		t.Run(class.String(), func(t *testing.T) {
@@ -1441,8 +1430,7 @@ var reconnectLines = []string{lineMapEnded, lineDialPlan}
 // TestMonitorCountsControlReconnects protects the first half of noticing a
 // reconnect: either of the two control-client lines is counted, under one
 // name, in the counts the status and the report carry, and nothing else is
-// kept. A monitor that ignores a line that triggers re-registration, counts
-// it under another name, or lets the count grow past the bound fails it.
+// kept.
 func TestMonitorCountsControlReconnects(t *testing.T) {
 	for _, line := range reconnectLines {
 		t.Run(line, func(t *testing.T) {
@@ -1589,7 +1577,7 @@ func probeHost(t *testing.T, h string) tailnode.ProbeClass {
 // refuse, accept and hang up, and speak TLS with a certificate nothing
 // trusts, returns the class each failure belongs to. It cannot show a
 // success (no certificate the probe trusts exists here) or the machine's
-// resolver; the owner's check on a live address covers those.
+// resolver; those need a live address.
 func TestPublicProbeRealFailures(t *testing.T) {
 	t.Run("refused before connecting", func(t *testing.T) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1691,7 +1679,6 @@ func statusText(t *testing.T, s tailnode.Status) string {
 // for a new address: for the first fifteen minutes the state is publishing
 // with the time it began, never an error and never a word about their
 // internet connection, even when counts of failed tests are already piling up.
-// The state today turns to an error after three minutes, which fails it.
 func TestStatePublishingUntilTheFirstAnswer(t *testing.T) {
 	for _, age := range []time.Duration{0, 2 * time.Minute, 3 * time.Minute, 10 * time.Minute, 15*time.Minute - time.Nanosecond} {
 		o := publishingObs(age)
@@ -1715,9 +1702,8 @@ func TestStatePublishingUntilTheFirstAnswer(t *testing.T) {
 
 // TestStateNotReachableAfterThePublishingWindow protects the end of the wait:
 // at fifteen minutes with no answer the state is not-reachable, which is
-// neither the generic error nor the old "check your internet connection"
-// sentence, so the app can show Try Again and the last Tailscale error. A
-// window that is longer or shorter, or that ends in the error state, fails it.
+// neither the generic error nor a "check your internet connection"
+// sentence, so the app can show Try Again and the last Tailscale error.
 func TestStateNotReachableAfterThePublishingWindow(t *testing.T) {
 	for _, age := range []time.Duration{15 * time.Minute, 15*time.Minute + time.Nanosecond, time.Hour} {
 		o := publishingObs(age)
@@ -1737,7 +1723,7 @@ func TestStateNotReachableAfterThePublishingWindow(t *testing.T) {
 		}
 	}
 	// A connection that is down on the Mac's side during the wait does not
-	// bring the old waiting state back before the window ends.
+	// bring the waiting state back before the window ends.
 	o := publishingObs(5 * time.Minute)
 	o.WaitingForInternet = true
 	if got := statusAny(t, tailnode.State(o))["ts_state"]; got != "publishing" {
@@ -1863,46 +1849,9 @@ func TestMonitorNameNotPublishedIsARouteFailure(t *testing.T) {
 	}
 }
 
-// TestMonitorAllowRestartKeepsTheCaps protects the node from a restart loop
-// when people press Try Again: the same ledger as the repair ladder decides,
-// so at most one restart in five minutes and three in an hour, whichever
-// asked. A press that restarts without asking the ledger, or a ledger of its
-// own, fails it.
-func TestMonitorAllowRestartKeepsTheCaps(t *testing.T) {
-	r := newRig(t)
-	for _, c := range []struct {
-		at   time.Duration
-		want bool
-	}{
-		{0, true}, {time.Minute, false}, {5*time.Minute - time.Second, false}, {6 * time.Minute, true},
-		{12 * time.Minute, true}, {18 * time.Minute, false}, {59 * time.Minute, false}, {61 * time.Minute, true},
-	} {
-		r.at(c.at)
-		if got := r.m.AllowRestart(); got != c.want {
-			t.Errorf("at %v: AllowRestart = %v, want %v", c.at, got, c.want)
-		}
-	}
-	// A restart the ladder made counts against a press, and the reverse.
-	l := newRig(t)
-	l.ready()
-	l.step(0, tailnode.ProbeRouteServerError)
-	l.step(100*time.Second, tailnode.ProbeRouteServerError)
-	l.step(240*time.Second, tailnode.ProbeRouteServerError)
-	l.step(300*time.Second, tailnode.ProbeRouteServerError)
-	l.step(360*time.Second, tailnode.ProbeRouteServerError)
-	if len(l.rep.restarts) != 1 {
-		t.Fatalf("the ladder made %d restarts, want 1", len(l.rep.restarts))
-	}
-	l.at(361 * time.Second)
-	if l.m.AllowRestart() {
-		t.Error("a press one second after the ladder's restart was allowed to restart again")
-	}
-}
-
 // TestStateCarriesTheKeyExpiry protects the sign-in warning: the time the
 // node key expires reaches the status in UTC on a node that answers, and a key
 // that has expired is the existing sign-in state, never the error state.
-// A state that drops the time, or turns expiry into a failure, fails it.
 func TestStateCarriesTheKeyExpiry(t *testing.T) {
 	expiry := epoch.Add(10 * 24 * time.Hour)
 	for name, o := range map[string]tailnode.Observation{

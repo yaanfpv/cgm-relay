@@ -29,8 +29,9 @@ const (
 	restartGap           = 5 * time.Minute
 	restartsPerHour      = 3
 
-	// A Try Again re-registers Funnel at most once in pressGap and
-	// pressesPerHour times in an hour.
+	// While the address is publishing or not reachable, a Try Again
+	// re-registers Funnel at most once in pressGap and pressesPerHour times in
+	// an hour.
 	pressGap       = 5 * time.Minute
 	pressesPerHour = 3
 
@@ -279,20 +280,6 @@ func (m *Monitor) restartAllowed(now time.Time) bool {
 	return n < restartsPerHour && (n == 0 || now.Sub(recent[n-1]) >= restartGap)
 }
 
-// AllowRestart reports whether the limits allow restarting the node now, and
-// if so enters the restart in the ledger the repair ladder also reads, so a
-// restart made on either's account counts against the other.
-func (m *Monitor) AllowRestart() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.opts.Now()
-	if !m.restartAllowed(now) {
-		return false
-	}
-	m.restarts = append(m.restarts, now)
-	return true
-}
-
 // RecordRestart enters a restart the limits did not decide, so that later
 // repairs see it, and has the first failed test after it re-register Funnel.
 func (m *Monitor) RecordRestart() {
@@ -304,7 +291,10 @@ func (m *Monitor) RecordRestart() {
 
 // AllowPress reports whether a Try Again may re-register Funnel now, and if so
 // enters it in the ledger of presses: at most one in pressGap and
-// pressesPerHour in an hour. The ledger is separate from the restarts'.
+// pressesPerHour in an hour. The ledger is separate from the restarts'. Only a
+// press made while the address is publishing or not reachable asks it; on a
+// serving node a press tests at once and a failure takes the first-failure
+// re-registration and the ladder.
 func (m *Monitor) AllowPress() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

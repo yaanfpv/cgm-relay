@@ -114,7 +114,7 @@ func TestBuiltInNodeRunsWithPortMappingDisabled(t *testing.T) {
 // can show is the folder: the same one is handed to the new server, its
 // contents are unchanged, its mode is still 0700 and nothing is created
 // beside it. That the node key itself survives a restart needs a signed-in
-// node and is covered by the owner's check on a live address.
+// node and a live address, so it is not covered here.
 func TestRestartKeepsStateDirectory(t *testing.T) {
 	ctrl := &testcontrol.Server{RequireAuth: true}
 	hs := httptest.NewServer(ctrl)
@@ -215,8 +215,8 @@ func readDir(t *testing.T, dir string) map[string]string {
 // public internet and a resolver. The fake is driven by events, never by the
 // clock: the public tests are scripted, and every wait the node makes between
 // them is held at the injected sleep until the test lets it go, so the test
-// looks at a node that is standing still. What a restart does on a real
-// node, and what the real resolver and relays do, are not proven here.
+// looks at a node that is standing still. Not covered here: a real restart,
+// resolver or relay.
 
 const (
 	fakeHost = "relay.example-tailnet.ts.net"
@@ -639,9 +639,7 @@ func statusJSON(t *testing.T, n *Node) (map[string]any, string) {
 // Tailscale's own example does: it asks the same running node to listen for
 // Funnel again. Restarting the node just before registering lets the
 // server's cleanup of the old session remove the new session's registration,
-// which is the drop the address is meant to be cured of. A node that closes
-// it, starts another, tests before it is listening, or goes through the
-// error state, fails it.
+// which is the drop the address is meant to be cured of.
 func TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.allowed = false
@@ -685,8 +683,7 @@ func TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed(t *testing.T) {
 
 // TestNodeDoesNotRestartWhenFunnelWasAllowedAllAlong protects the other side:
 // a node whose tailnet allowed Funnel from the start is already registered
-// for it, and a restart there would only delay the address. A node that
-// restarts on every setup fails it.
+// for it, and a restart there would only delay the address.
 func TestNodeDoesNotRestartWhenFunnelWasAllowedAllAlong(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.run()
@@ -699,13 +696,12 @@ func TestNodeDoesNotRestartWhenFunnelWasAllowedAllAlong(t *testing.T) {
 	}
 }
 
-// TestNodeKeepsPublishingWithBackoff protects "publishing, not failing": every
+// TestNodeKeepsPublishingWithBackoff protects the wait for a new address: every
 // kind of test that fails before the first answer, a name that does not exist
 // yet, a connection the relay drops, a certificate or a server error, and a
 // name that resolves inside the tailnet, leaves the state publishing, with no
 // error and no word about the internet, and the next test comes after 5
-// seconds, doubling to 30. A node that gives up, reports an error, or tests
-// on another schedule fails it.
+// seconds, doubling to 30.
 func TestNodeKeepsPublishingWithBackoff(t *testing.T) {
 	tn := newFakeTailnet(t)
 	failing := []ProbeClass{
@@ -745,9 +741,7 @@ func TestNodeKeepsPublishingWithBackoff(t *testing.T) {
 // comes later still ends the setup by itself. Try Again then re-registers
 // Funnel on the running node (the serve config's off and on) and tests at
 // once, with no wait between the press and the test, and the publishing window
-// starts again. A node that keeps the old wording, closes or starts a node for
-// the press, waits before the test, or lets Try Again do nothing while it is
-// not serving, fails it.
+// starts again.
 func TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegistersWithoutRestart(t *testing.T) {
 	text := tailscaleTextForTest(t)
 	tn := newFakeTailnet(t)
@@ -813,8 +807,7 @@ func TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegistersWithoutRestart
 	tn.waitState("running")
 }
 
-// TestNodeAnswerAfterTheWindowStillFinishesSetup protects "setup finishes by
-// itself": after the window has passed and the state is not-reachable, the
+// TestNodeAnswerAfterTheWindowStillFinishesSetup protects that setup finishes without a press: after the window has passed and the state is not-reachable, the
 // next ordinary test that is answered makes the address ready with no press.
 func TestNodeAnswerAfterTheWindowStillFinishesSetup(t *testing.T) {
 	tn := newFakeTailnet(t)
@@ -834,9 +827,7 @@ func TestNodeAnswerAfterTheWindowStillFinishesSetup(t *testing.T) {
 // TestNodeTryAgainKeepsTheReRegisterCaps protects the node and the control
 // server from a loop when Try Again is pressed over and over: a press always
 // tests at once, but re-registers Funnel at most once in five minutes and
-// three times in an hour, the limits a press had when it restarted the node,
-// and it never closes or starts a node. A press that re-registers every time,
-// or restarts, fails it.
+// three times in an hour, and it never closes or starts a node.
 func TestNodeTryAgainKeepsTheReRegisterCaps(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.setResult(ProbeRouteDropped)
@@ -866,8 +857,7 @@ func TestNodeTryAgainKeepsTheReRegisterCaps(t *testing.T) {
 // node has a registration the servers may not have taken yet, so the first
 // failed public test after any restart switches Funnel off and on, once, on
 // the new node, before the ladder may restart again, however many restarts
-// the ladder makes. A ladder that restarts a second time with no
-// re-registration between the two fails it. The tests are the ones a
+// the ladder makes. The tests are the ones a
 // person's presses make, since a serving node's own tests wait on a real
 // timer. So that a press's own toggle can never stand in for the one under
 // test, three presses spent the press limit first (one toggle per five
@@ -972,8 +962,7 @@ func TestNodeStartSignInStartsTheFlow(t *testing.T) {
 // TestNodeKeepsTailscaleTextOutOfDiagnostics protects what leaves the
 // status as diagnostics: a refused listen whose text names an address and the
 // host is kept for the person in the status, but the counts, and every line
-// the node logs, carry only names the engine defines. A node that counts or
-// logs the text fails it.
+// the node logs, carry only names the engine defines.
 func TestNodeKeepsTailscaleTextOutOfDiagnostics(t *testing.T) {
 	text := "listen tcp 100.64.0.9:443: bind: address already in use (" + fakeHost + ")"
 	tn := newFakeTailnet(t)
@@ -1025,8 +1014,8 @@ func tailscaleTextForTest(t *testing.T) string {
 // reconnect, and the node's own log is the only place it says so. The fake
 // records every change of the serve config, so these tests can show that the
 // registration is switched off and on, in order, and left alone otherwise.
-// Whether the real servers then take the node back needs a real tailnet and is
-// not proven here.
+// Whether the real servers then take the node back needs a real tailnet, so
+// it is not covered here.
 
 const (
 	// reregisterWithin is how long after a reconnect line the node may take to
@@ -1135,9 +1124,7 @@ func (tn *fakeTailnet) offs() []time.Time {
 // control session ended or came back, a serving node tests the public address
 // at once, within ten seconds, and leaves Funnel's registration alone while
 // the test answers. It never closes the listener or restarts. The reconnect is
-// also counted for diagnostics. A node that ignores the line, switches Funnel
-// off and on before testing, waits before the test, restarts or reopens
-// instead, or leaves the reconnect uncounted fails it.
+// also counted for diagnostics.
 func TestNodeTestsAtOnceWhenTheControlSessionReturns(t *testing.T) {
 	for _, line := range reconnectLogLines {
 		t.Run(line, func(t *testing.T) {
@@ -1192,9 +1179,7 @@ func TestNodeTestsAtOnceWhenTheControlSessionReturns(t *testing.T) {
 // person cannot make: when the test made after a reconnect fails, a serving
 // node switches Funnel's registration off and on in its serve config, without
 // closing the listener or restarting, and tests the public address again at
-// once, before any wait of the ladder's schedule and within ten seconds. A
-// node that toggles before the first test, leaves the second test to a wait,
-// restarts or reopens instead, or toggles more than once for it fails it.
+// once, before any wait of the ladder's schedule and within ten seconds.
 func TestNodeReRegistersAfterAReconnectWhoseTestFailed(t *testing.T) {
 	for _, line := range reconnectLogLines {
 		t.Run(line, func(t *testing.T) {
@@ -1229,9 +1214,8 @@ func TestNodeReRegistersAfterAReconnectWhoseTestFailed(t *testing.T) {
 // TestNodeReadsReconnectsFromTheFormatOnly protects what the node logs may
 // carry: a line is a reconnect by its format string, as the other counted
 // lines are, and never by the text it was formatted into, which can hold an
-// address or a peer. A node that searches the formatted text fails it; the
-// last step shows the real format still acts, so the first two are not
-// passing because nothing is wired.
+// address or a peer. The last step shows the real format still acts, so the
+// first two are not passing because nothing is wired.
 func TestNodeReadsReconnectsFromTheFormatOnly(t *testing.T) {
 	tn := newFakeTailnet(t)
 	n := tn.runReady()
@@ -1253,8 +1237,7 @@ func TestNodeReadsReconnectsFromTheFormatOnly(t *testing.T) {
 // TestNodeReRegistersAtMostOncePerThirtySeconds protects the control server
 // and the node from a connection that keeps dropping while the address fails:
 // a burst of reconnect lines never moves Funnel more than once in thirty
-// seconds, and a reconnect after the window is acted on again. A node that
-// toggles per line, or stops acting after the first, fails it.
+// seconds, and a reconnect after the window is acted on again.
 func TestNodeReRegistersAtMostOncePerThirtySeconds(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.runReady()
@@ -1295,9 +1278,7 @@ func TestNodeReRegistersAtMostOncePerThirtySeconds(t *testing.T) {
 // of a registration the servers lost with no log line to say so: the first
 // public test of a run that fails has Funnel switched off and on once, after
 // the failed test and before the ladder's first reopen; the later failures of
-// the run do not toggle again, and the ladder then reopens the listener as it
-// always did. A node that waits for three failures before any repair, toggles
-// on every failure, or lets the toggle replace the reopen fails it.
+// the run do not toggle again, and the ladder then reopens the listener.
 func TestNodeFirstFailedTestReRegistersBeforeTheLadder(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.runReady()
@@ -1335,9 +1316,7 @@ func TestNodeFirstFailedTestReRegistersBeforeTheLadder(t *testing.T) {
 // TestNodeReconnectTestFeedsTheMonitor protects the backstop when a
 // re-registration does not help: the tests made after a reconnect are counted
 // and judged like any other, and a reconnect followed by a first failure in
-// the same instant moves Funnel once. A node that tests outside the monitor,
-// so a failure goes uncounted and the run never starts, or toggles for both
-// the reconnect and the failure, fails it.
+// the same instant moves Funnel once.
 func TestNodeReconnectTestFeedsTheMonitor(t *testing.T) {
 	tn := newFakeTailnet(t)
 	n := tn.runReady()
