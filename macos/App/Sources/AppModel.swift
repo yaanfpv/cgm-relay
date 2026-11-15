@@ -99,6 +99,11 @@ final class AppModel: ObservableObject {
     /// builtInRoute is where the built-in Tailscale route is in its setup,
     /// from the engine's own status; starting while that route is not in use.
     @Published private(set) var builtInRoute: BuiltInRouteState = .starting
+    /// builtInTailscaleError is the last text Tailscale gave, shown where
+    /// setup or the address state is shown.
+    @Published private(set) var builtInTailscaleError: String?
+    /// builtInKeyExpiry is the warning that the Tailscale sign-in expires soon.
+    @Published private(set) var builtInKeyExpiry: BuiltInKeyExpiry?
     private let builtInSession = BuiltInSignInSession()
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
@@ -119,6 +124,7 @@ final class AppModel: ObservableObject {
     private let statusAddr: String
     private let pairingMinter: any PairingCodeMinting
     private let addressRetrier: any BuiltInAddressRetrying
+    private let signInStarter: any BuiltInSignInStarting
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -265,6 +271,7 @@ final class AppModel: ObservableObject {
         let statusSecret = LocalStatusSecret()
         pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
         addressRetrier = URLSessionBuiltInAddressRetrier(url: AppModel.engineURL(for: statusAddr, path: "tailscale/try-again"), secret: statusSecret)
+        signInStarter = URLSessionBuiltInSignInStarter(url: AppModel.engineURL(for: statusAddr, path: "tailscale/sign-in"), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         let loaded = settingsStore.load()
@@ -676,6 +683,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// signInBuiltInAgain has the engine start Tailscale's sign-in while the
+    /// address keeps working, then opens the page it names in the sign-in
+    /// sheet. The page is opened only when it is an https page on Tailscale.
+    func signInBuiltInAgain() {
+        Task {
+            guard (try? await signInStarter.startSignIn()) != nil else { return }
+            for _ in 0..<10 {
+                await statusPoller.pollNow()
+                if let page = BuiltInKeyExpiry.signInAgainURL(from: latestStatus?.builtIn) {
+                    builtInSession.presentPage(page)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
     /// pollBuiltInRouteUntilReady asks the engine for its status every two
     /// seconds while the route is not ready and a screen showing it is open,
     /// so each step shows within moments of the engine reaching it; it ends
@@ -695,7 +719,12 @@ final class AppModel: ObservableObject {
             next = BuiltInRouteState.resolve(engineState: engineState, status: latestStatus?.builtIn).expiredAt(Date())
         }
         if next != builtInRoute { builtInRoute = next }
-        builtInSession.reconcile(with: next)
+        let report = settings.useBuiltInTailscale && engineState == .running ? latestStatus?.builtIn : nil
+        let error = BuiltInRouteState.tailscaleErrorText(from: report)
+        if error != builtInTailscaleError { builtInTailscaleError = error }
+        let notice = BuiltInKeyExpiry.notice(for: report, now: Date())
+        if notice != builtInKeyExpiry { builtInKeyExpiry = notice }
+        builtInSession.reconcile(with: next, signInAgainURL: BuiltInKeyExpiry.signInAgainURL(from: report))
     }
 
     /// builtInStateDirectory is where the built-in node keeps its state,
@@ -1215,7 +1244,8 @@ final class AppModel: ObservableObject {
             noReadingAlertMinutes: settings.noReadingAlertMinutes,
             signInFailingAlertEnabled: settings.signInFailingAlertEnabled,
             followerAges: followerAges,
-            routeCounts: latestStatus?.builtIn?.counts ?? [:]
+            routeCounts: latestStatus?.builtIn?.counts ?? [:],
+            routeErrorClass: latestStatus?.builtIn?.errorClass
         )
     }
 

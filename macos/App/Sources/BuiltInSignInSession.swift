@@ -19,16 +19,20 @@ final class BuiltInSignInSession: NSObject, ASWebAuthenticationPresentationConte
     static func pageURL(of route: BuiltInRouteState) -> URL? {
         switch route {
         case .signIn(let url), .approve(let url), .enableFunnel(let url): return url
-        case .starting, .settingUp, .ready, .notAnswering, .waitingForInternet, .stopped, .failed: return nil
+        case .starting, .settingUp, .publishing, .notReachable, .ready, .notAnswering, .waitingForInternet, .stopped, .failed: return nil
         }
     }
 
     /// present opens route's page, replacing any sheet already open.
     func present(_ route: BuiltInRouteState) {
-        guard
-            let page = Self.pageURL(of: route),
-            let url = BuiltInRouteState.openable(page.absoluteString)
-        else { return }
+        guard let page = Self.pageURL(of: route) else { return }
+        presentPage(page)
+    }
+
+    /// presentPage opens a page the engine named, only when it is an https
+    /// page on Tailscale.
+    func presentPage(_ page: URL) {
+        guard let url = BuiltInRouteState.openable(page.absoluteString) else { return }
         cancel()
         let next = ASWebAuthenticationSession(
             url: url,
@@ -42,10 +46,11 @@ final class BuiltInSignInSession: NSObject, ASWebAuthenticationPresentationConte
     }
 
     /// reconcile closes the sheet once the engine's state no longer asks for
-    /// the page it shows.
-    func reconcile(with route: BuiltInRouteState) {
+    /// the page it shows. A sign-in the person started while the address
+    /// works is kept while the engine still names its page.
+    func reconcile(with route: BuiltInRouteState, signInAgainURL: URL? = nil) {
         guard let presentedURL = slot.presentedURL else { return }
-        if Self.pageURL(of: route) != presentedURL { cancel() }
+        if Self.pageURL(of: route) != presentedURL && signInAgainURL != presentedURL { cancel() }
     }
 
     func cancel() {

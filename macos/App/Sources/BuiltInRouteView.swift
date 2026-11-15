@@ -11,6 +11,21 @@ struct BuiltInRouteView: View {
     var body: some View {
         Section {
             row
+            if let text = model.builtInTailscaleError {
+                Text(text)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let notice = model.builtInKeyExpiry {
+                SetupStatusRow(
+                    name: "built-in-key",
+                    title: notice.text(timeZone: .current),
+                    caption: "Sign in again before then to keep your address.",
+                    wrapsCaption: true,
+                    slot: .action(BuiltInKeyExpiry.signInAgainTitle, accessibleName: "Sign in to Tailscale again") { model.signInBuiltInAgain() }
+                )
+            }
         } footer: {
             Text(BuiltInRouteCopy.disclosure)
         }
@@ -49,8 +64,28 @@ struct BuiltInRouteView: View {
             SetupStatusRow(
                 name: "built-in",
                 title: "Setting up your address…",
-                caption: "This can take two minutes.",
+                caption: "Checking that it answers.",
                 slot: .checking
+            )
+        case .publishing:
+            // The elapsed time moves while the state does not, so the row
+            // is redrawn every half minute.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                SetupStatusRow(
+                    name: "built-in",
+                    title: "Your address",
+                    caption: model.builtInRoute.settingsStatusText(timeZone: .current, now: context.date),
+                    wrapsCaption: true,
+                    slot: .checking
+                )
+            }
+        case .notReachable:
+            SetupStatusRow(
+                name: "built-in",
+                title: "Your address",
+                caption: model.builtInRoute.settingsStatusText(timeZone: .current),
+                wrapsCaption: true,
+                slot: .action("Try Again", accessibleName: "Try your address again") { model.tryBuiltInAddressAgain() }
             )
         case .ready(let host, _):
             SetupStatusRow(name: "built-in", title: "Your address", caption: host, captionIsMonospaced: true, slot: .done(model.builtInRoute.settingsStatusText(timeZone: .current)))
