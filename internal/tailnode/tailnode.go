@@ -21,7 +21,12 @@ const (
 	StateStarting      = "starting"
 	StateNeedsFunnel   = "needs-funnel"
 	StateSettingUp     = "setting-up"
-	StateRunning       = "running"
+	// StatePublishing is a listening node whose public address has not
+	// answered yet, which a new public name can take minutes to do.
+	StatePublishing = "publishing"
+	// StateNotReachable is the same wait once PublishingWindow has passed.
+	StateNotReachable = "not-reachable"
+	StateRunning      = "running"
 	// StateNotAnswering is a running node whose public address stopped
 	// answering while the Mac's own network is fine; the engine is repairing it.
 	StateNotAnswering = "not-answering"
@@ -39,12 +44,33 @@ const (
 // stuck start unreported.
 const StartingLimit = 2 * time.Minute
 
-// SettingUpLimit is how long the node may stay in setting-up before the state
-// becomes an error. The first public answer after Funnel was turned on took
-// up to about 100 seconds, most of it the first certificate being issued, so
-// three minutes covers the slowest first run seen with a margin and still
-// reports a stuck address while a person is looking at the screen.
-const SettingUpLimit = 3 * time.Minute
+// PublishingWindow is how long a new address may go without an answer before
+// the state says it is not reachable. Tailscale documents up to ten minutes
+// for a new public name to appear, and a new tailnet has been seen to take
+// longer, so the state stays publishing past it for another five.
+const PublishingWindow = 15 * time.Minute
+
+// Classes of the last error Tailscale gave, which are all that diagnostics
+// carry of it.
+const (
+	ErrClassHTTPS         = "https_disabled"
+	ErrClassNodeAttribute = "node_attribute_missing"
+	ErrClassListen        = "listen_failed"
+)
+
+// ClassifyTailscaleError names the class of an error text from Tailscale,
+// or "" for no error. The class never holds any of the text.
+func ClassifyTailscaleError(text string) string {
+	switch {
+	case text == "":
+		return ""
+	case strings.Contains(text, "HTTPS must be enabled"):
+		return ErrClassHTTPS
+	case strings.Contains(text, `"funnel" node attribute`):
+		return ErrClassNodeAttribute
+	}
+	return ErrClassListen
+}
 
 // ReadyFreshness is how old the last successful public test may be before
 // the state stops saying running. Tests come every two minutes, so a healthy
@@ -80,6 +106,15 @@ type Observation struct {
 	// PublicAnswered reports that a request the node made to its own public
 	// address was answered.
 	PublicAnswered bool
+	// PublishingSince is when the public address first began to be served,
+	// while it has not answered; the wait for the first answer is timed from it.
+	PublishingSince time.Time
+	// TailscaleErr is the last error text Tailscale gave, kept for the person
+	// and nowhere else, and TailscaleErrClass its class.
+	TailscaleErr      string
+	TailscaleErrClass string
+	// KeyExpiry is when the node's key expires, zero when unknown.
+	KeyExpiry time.Time
 	// Now is the time of the observation. While it is set, running needs a
 	// successful public test no older than ReadyFreshness before it.
 	Now time.Time
@@ -115,6 +150,17 @@ type Status struct {
 	// NotAnsweringSince is when the address stopped answering, UTC.
 	NotAnsweringSince string         `json:"ts_not_answering_since,omitempty"`
 	Counts            map[string]int `json:"ts_counts,omitempty"`
+	// PublishingSince is when the address began to be served, UTC, while it
+	// has not yet answered.
+	PublishingSince string `json:"ts_publishing_since,omitempty"`
+	// TailscaleError is the last text Tailscale gave, and ErrorClass its class.
+	TailscaleError string `json:"ts_tailscale_error,omitempty"`
+	ErrorClass     string `json:"ts_error_class,omitempty"`
+	// KeyExpiry is when the node's key expires, UTC.
+	KeyExpiry string `json:"ts_key_expiry,omitempty"`
+	// SignInAgainURL is the page of a sign-in the node was asked to start while
+	// it runs.
+	SignInAgainURL string `json:"ts_sign_in_url,omitempty"`
 }
 
 // State maps an observation to the status to report. It reads no clock and
@@ -123,6 +169,15 @@ func State(o Observation) Status {
 	s := stateOf(o)
 	if len(o.Counts) > 0 {
 		s.Counts = o.Counts
+	}
+	if !o.KeyExpiry.IsZero() {
+		s.KeyExpiry = stamp(o.KeyExpiry)
+	}
+	if o.TailscaleErr != "" {
+		s.TailscaleError, s.ErrorClass = o.TailscaleErr, o.TailscaleErrClass
+	}
+	if o.Backend == "Running" && o.LoginURL != "" {
+		s.SignInAgainURL = o.LoginURL
 	}
 	return s
 }
@@ -155,6 +210,23 @@ func running(o Observation) Status {
 		return Status{State: StateNeedsFunnel, FunnelURL: o.FunnelURL}
 	}
 	host := o.CertDomains[0]
+	if !o.PublicAnswered {
+		// Until the first answer the wait is not a failure, whatever the
+		// tests report: a new name can take minutes to exist. Only a Mac
+		// that cannot test says anything about the route, and only once the
+		// window is over.
+		s := Status{State: StatePublishing, PublicHost: host}
+		if !o.PublishingSince.IsZero() {
+			s.PublishingSince = stamp(o.PublishingSince)
+			if !o.Now.IsZero() && o.Now.Sub(o.PublishingSince) >= PublishingWindow {
+				if o.WaitingForInternet {
+					return Status{State: StateWaitingForInternet, PublicHost: host}
+				}
+				return Status{State: StateNotReachable, PublicHost: host}
+			}
+		}
+		return s
+	}
 	// A Mac that cannot test says nothing about the route, so it outranks a
 	// not-answering report from before.
 	if o.WaitingForInternet {
@@ -164,10 +236,7 @@ func running(o Observation) Status {
 		return Status{State: StateNotAnswering, PublicHost: host, NotAnsweringSince: stamp(o.NotAnsweringSince)}
 	}
 	stale := !o.Now.IsZero() && (o.CheckedAt.IsZero() || o.Now.Sub(o.CheckedAt) > ReadyFreshness)
-	if !o.Listening || !o.PublicAnswered || stale {
-		if o.InStateFor >= SettingUpLimit {
-			return Status{State: StateError, Error: "Your address did not answer in time. Check your internet connection and try again."}
-		}
+	if !o.Listening || stale {
 		return Status{State: StateSettingUp, PublicHost: host}
 	}
 	s := Status{State: StateRunning, PublicHost: host}

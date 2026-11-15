@@ -28,6 +28,10 @@ const (
 	ProbeRouteDropped
 	ProbeRouteTLS
 	ProbeRouteServerError
+	// ProbeNameNotPublished is a public name that does not exist in DNS. Before
+	// the address has answered it is only a name that is still being
+	// published; after, it is the route's failure.
+	ProbeNameNotPublished
 	// The Mac's failures: no connection was made.
 	ProbeMacDNS
 	ProbeMacNoRoute
@@ -46,6 +50,7 @@ var probeNames = map[ProbeClass]string{
 	ProbeRouteDropped:     "dropped_during_tls",
 	ProbeRouteTLS:         "tls_failure",
 	ProbeRouteServerError: "server_error",
+	ProbeNameNotPublished: "name_not_published",
 	ProbeMacDNS:           "dns_failure",
 	ProbeMacNoRoute:       "no_route",
 	ProbeMacRefused:       "connect_refused",
@@ -60,7 +65,7 @@ func (c ProbeClass) String() string { return probeNames[c] }
 
 // RouteFailure reports a failure of the public route itself.
 func (c ProbeClass) RouteFailure() bool {
-	return c == ProbeRouteDropped || c == ProbeRouteTLS || c == ProbeRouteServerError
+	return c == ProbeRouteDropped || c == ProbeRouteTLS || c == ProbeRouteServerError || c == ProbeNameNotPublished
 }
 
 // MacSide reports a failure before a connection was made.
@@ -90,6 +95,11 @@ func ClassifyProbe(status int, err error) ProbeClass {
 	}
 	var dns *net.DNSError
 	if errors.As(err, &dns) {
+		// A name that does not exist is the address's; a resolver that cannot
+		// be reached is the Mac's.
+		if dns.IsNotFound {
+			return ProbeNameNotPublished
+		}
 		return ProbeMacDNS
 	}
 	var (

@@ -201,6 +201,17 @@ func (m *Monitor) nextRepair(now time.Time) repairKind {
 		m.rung++
 		return repairReopen
 	}
+	if !m.restartAllowed(now) {
+		return repairNone
+	}
+	m.restarts = append(m.restarts, now)
+	m.rung = 0
+	return repairRestart
+}
+
+// restartAllowed reports whether the limits allow a restart at now, with m.mu
+// held, and forgets the restarts that are over an hour old.
+func (m *Monitor) restartAllowed(now time.Time) bool {
 	recent := m.restarts[:0]
 	for _, t := range m.restarts {
 		if now.Sub(t) < time.Hour {
@@ -208,12 +219,43 @@ func (m *Monitor) nextRepair(now time.Time) repairKind {
 		}
 	}
 	m.restarts = recent
-	if n := len(recent); n >= restartsPerHour || (n > 0 && now.Sub(recent[n-1]) < restartGap) {
-		return repairNone
+	n := len(recent)
+	return n < restartsPerHour && (n == 0 || now.Sub(recent[n-1]) >= restartGap)
+}
+
+// AllowRestart reports whether the limits allow restarting the node now, and
+// if so enters the restart in the ledger the repair ladder also reads, so a
+// restart that a person asked for counts against the ladder and the reverse.
+func (m *Monitor) AllowRestart() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.opts.Now()
+	if !m.restartAllowed(now) {
+		return false
 	}
 	m.restarts = append(m.restarts, now)
-	m.rung = 0
-	return repairRestart
+	return true
+}
+
+// RecordRestart enters a restart the limits did not decide, so that later
+// repairs see it.
+func (m *Monitor) RecordRestart() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.restarts = append(m.restarts, m.opts.Now())
+}
+
+// NoteFailure counts a failed test that does not feed the run of failures,
+// as those made before the address has first answered do.
+func (m *Monitor) NoteFailure(class ProbeClass) {
+	if class == ProbeOK {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if k := class.String(); m.counts[k] < MaxCount {
+		m.counts[k]++
+	}
 }
 
 // Apply returns o with the monitor's facts filled in.
