@@ -633,15 +633,16 @@ func statusJSON(t *testing.T, n *Node) (map[string]any, string) {
 	return m, strings.ToLower(string(b))
 }
 
-// TestNodeReRegistersOnceWhenFunnelBecomesAllowed protects the first public
-// test of a new address. A node whose tailnet changed its policy while it was
-// running is not reachable through the Funnel relays until it registers
-// again, so a first test on it fails for as long as nobody notices. The node
-// must restart once, on the same folder and so the same key, before it makes
-// that test. A node that tests first, restarts on another folder, restarts
-// again after the restart, or goes through the error state, fails it. Nothing
-// else holds this, since every earlier node test stops at the sign-in step.
-func TestNodeReRegistersOnceWhenFunnelBecomesAllowed(t *testing.T) {
+// TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed protects the
+// first public test of a new address. A node that ran while its tailnet did
+// not allow Funnel, and finds it allowed, registers Funnel the way
+// Tailscale's own example does: it asks the same running node to listen for
+// Funnel again. Restarting the node just before registering lets the
+// server's cleanup of the old session remove the new session's registration,
+// which is the drop the address is meant to be cured of. A node that closes
+// it, starts another, tests before it is listening, or goes through the
+// error state, fails it.
+func TestNodeListensAgainOnTheSameNodeWhenFunnelBecomesAllowed(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.allowed = false
 	tn.listenErr = errors.New("Funnel not available; \"funnel\" node attribute not set")
@@ -653,25 +654,27 @@ func TestNodeReRegistersOnceWhenFunnelBecomesAllowed(t *testing.T) {
 	tn.run()
 	tn.waitSleep()
 	evs := tn.log()
-	first := slices.Index(evs, "probe")
-	second := slices.Index(evs, "start#2")
-	if first < 0 || second < 0 || first < second {
-		t.Fatalf("the first public test came before the restart: %v", evs)
+	if !slices.Contains(evs, "listen-refused") {
+		t.Fatalf("the node was never refused, so the check cannot tell: %v", evs)
 	}
-	if c := slices.Index(evs, "close#1"); c < 0 || c > second {
-		t.Errorf("the old node was not closed before the new one started: %v", evs)
+	first, listened := slices.Index(evs, "probe"), slices.Index(evs, "listen-ok#1")
+	if listened < 0 || first < listened {
+		t.Errorf("the first public test came before the node listened for Funnel on the running node: %v", evs)
+	}
+	if tn.count("start#") != 1 || tn.count("close#") != 0 {
+		t.Errorf("a node was started or closed because Funnel turned on: %v", evs)
 	}
 	tn.mu.Lock()
 	starts := slices.Clone(tn.starts)
 	tn.mu.Unlock()
-	if len(starts) != 2 || starts[0] != starts[1] || starts[0].dir != tn.dir {
-		t.Errorf("starts %+v, want two on the folder %s with one hostname", starts, tn.dir)
+	if len(starts) != 1 || starts[0].dir != tn.dir {
+		t.Errorf("starts %+v, want one on the folder %s", starts, tn.dir)
 	}
 	tn.setResult(ProbeOK)
 	tn.letGo()
 	tn.waitState("running")
-	if got := tn.startCount(); got != 2 {
-		t.Errorf("%d starts once the address answered, want 2: a restart comes once per policy change", got)
+	if tn.count("start#") != 1 || tn.count("close#") != 0 {
+		t.Errorf("a node was started or closed by the time the address answered: %v", tn.log())
 	}
 	for _, s := range tn.stateHistory() {
 		if s == StateError {
@@ -735,16 +738,17 @@ func TestNodeKeepsPublishingWithBackoff(t *testing.T) {
 	tn.waitState("running")
 }
 
-// TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegisters protects the
+// TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegistersWithoutRestart protects the
 // end of the wait: with no answer after fifteen minutes the state is
 // not-reachable and carries the last text Tailscale gave, which a failed
 // listen earlier produced, and its class. Tests go on, so an answer that
-// comes later still ends the setup by itself. Try Again then restarts the
-// node on the same folder and tests at once, with no wait between the press
-// and the test, and the publishing window starts again. A node that keeps the
-// old wording, loses the text at the restart, waits before the test, or lets
-// Try Again do nothing while it is not serving, fails it.
-func TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegisters(t *testing.T) {
+// comes later still ends the setup by itself. Try Again then re-registers
+// Funnel on the running node (the serve config's off and on) and tests at
+// once, with no wait between the press and the test, and the publishing window
+// starts again. A node that keeps the old wording, closes or starts a node for
+// the press, waits before the test, or lets Try Again do nothing while it is
+// not serving, fails it.
+func TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegistersWithoutRestart(t *testing.T) {
 	text := tailscaleTextForTest(t)
 	tn := newFakeTailnet(t)
 	tn.allowed = false
@@ -777,19 +781,24 @@ func TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegisters(t *testing.T)
 	at := slices.Index(evs, "press")
 	rest := evs[at+1:]
 	probeAt := slices.Index(rest, "probe")
-	if probeAt < 0 || !slices.Contains(rest[:probeAt], "start#3") || !slices.Contains(rest[:probeAt], "close#2") {
-		t.Fatalf("after the press the node must restart and then test: %v", rest)
+	if probeAt < 0 {
+		t.Fatalf("the press made no test: %v", rest)
 	}
-	for _, e := range rest[:probeAt] {
+	before := rest[:probeAt]
+	off, on := slices.Index(before, "funnel-off#1"), slices.Index(before, "funnel-on#1")
+	if off < 0 || on < off {
+		t.Fatalf("after the press Funnel must be switched off and on, then tested: %v", rest)
+	}
+	if got := countPrefix(before, "funnel-off"); got != 1 {
+		t.Errorf("%d re-registrations before the press's test, want 1: %v", got, rest)
+	}
+	for _, e := range before {
 		if strings.HasPrefix(e, "sleep:") {
 			t.Errorf("a wait between the press and the test: %v", rest)
 		}
 	}
-	tn.mu.Lock()
-	starts := slices.Clone(tn.starts)
-	tn.mu.Unlock()
-	if len(starts) != 3 || starts[2] != starts[0] {
-		t.Errorf("starts %+v, want the third on the same folder as the first", starts)
+	if tn.startCount() != 1 || tn.count("close#") != 0 {
+		t.Errorf("the press closed or started a node: %v", tn.log())
 	}
 	m, _ = statusJSON(t, n)
 	if m["ts_state"] != "publishing" || m["ts_publishing_since"] != fakeStamp(pressAt) {
@@ -822,29 +831,88 @@ func TestNodeAnswerAfterTheWindowStillFinishesSetup(t *testing.T) {
 	tn.waitState("running")
 }
 
-// TestNodeTryAgainKeepsTheRestartCaps protects the node from a restart loop
-// when Try Again is pressed over and over: a press always tests at once, but
-// restarts the node at most once in five minutes. A press that restarts every
-// time fails it.
-func TestNodeTryAgainKeepsTheRestartCaps(t *testing.T) {
+// TestNodeTryAgainKeepsTheReRegisterCaps protects the node and the control
+// server from a loop when Try Again is pressed over and over: a press always
+// tests at once, but re-registers Funnel at most once in five minutes and
+// three times in an hour, the limits a press had when it restarted the node,
+// and it never closes or starts a node. A press that re-registers every time,
+// or restarts, fails it.
+func TestNodeTryAgainKeepsTheReRegisterCaps(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.setResult(ProbeRouteDropped)
 	tn.run()
 	tn.waitSleep()
-	counts := []int{}
-	for _, gap := range []time.Duration{0, time.Minute, 5 * time.Minute} {
+	var acted []int
+	for _, gap := range []time.Duration{0, time.Minute, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute} {
 		tn.clock.advance(gap)
-		before := int(tn.probes.Load())
+		beforeProbes, beforeOffs := int(tn.probes.Load()), tn.count("funnel-off")
 		tn.press()
-		if int(tn.probes.Load()) <= before {
+		if int(tn.probes.Load()) <= beforeProbes {
 			t.Errorf("a press after %v made no test", gap)
 		}
-		counts = append(counts, tn.startCount())
+		acted = append(acted, tn.count("funnel-off")-beforeOffs)
 		tn.waitSleep()
 	}
-	if want := []int{2, 2, 3}; !slices.Equal(counts, want) {
-		t.Errorf("starts after each press %v, want %v", counts, want)
+	if want := []int{1, 0, 1, 1, 0}; !slices.Equal(acted, want) {
+		t.Errorf("re-registrations made by each press %v, want %v", acted, want)
 	}
+	if tn.startCount() != 1 || tn.count("close#") != 0 {
+		t.Errorf("a press closed or started a node: %v", tn.log())
+	}
+}
+
+// TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart
+// protects the repair ladder's last rung from undoing itself: a restarted
+// node has a registration the servers may not have taken yet, so the first
+// failed public test after any restart switches Funnel off and on, on the new
+// node, before the ladder may restart again, however many restarts the
+// ladder makes. A ladder that restarts a second time with no re-registration
+// between the two fails it. The tests are the ones a person's presses make a
+// minute apart, since a serving node's own tests wait on a real timer.
+func TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart(t *testing.T) {
+	tn := newFakeTailnet(t)
+	tn.runReady()
+	tn.setResult(ProbeRouteDropped)
+	for i := 0; i < 40 && tn.startCount() < 3; i++ {
+		tn.clock.advance(time.Minute)
+		tn.event("press")
+		tn.settle(time.Hour)
+	}
+	evs := tn.log()
+	if tn.startCount() < 2 {
+		t.Fatalf("the ladder never restarted the node, so the check cannot tell: %v", evs)
+	}
+	for gen := 2; gen <= tn.startCount(); gen++ {
+		started := slices.Index(evs, fmt.Sprintf("start#%d", gen))
+		end := len(evs)
+		if n := slices.Index(evs, fmt.Sprintf("start#%d", gen+1)); n >= 0 {
+			end = n
+		}
+		window := evs[started:end]
+		firstTest := slices.Index(window, "press")
+		if firstTest < 0 {
+			continue
+		}
+		stop := len(window)
+		if n := slices.Index(window[firstTest+1:], "press"); n >= 0 {
+			stop = firstTest + 1 + n
+		}
+		off, on := slices.Index(window, fmt.Sprintf("funnel-off#%d", gen)), slices.Index(window, fmt.Sprintf("funnel-on#%d", gen))
+		if off < 0 || on < off || on > stop {
+			t.Errorf("after restart %d the first failed test did not re-register Funnel on the new node before the next test: %v", gen-1, window)
+		}
+	}
+}
+
+// countPrefix is how many of evs begin with prefix.
+func countPrefix(evs []string, prefix string) int {
+	n := 0
+	for _, e := range evs {
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestNodeReportsKeyExpiry protects the sign-in warning at its source: the
