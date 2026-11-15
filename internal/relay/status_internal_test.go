@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -661,5 +662,44 @@ func TestStatusCarriesRouteHealth(t *testing.T) {
 				t.Errorf("status lost its own fields: %v", m)
 			}
 		})
+	}
+}
+
+// TestTryAgainRoute checks what POST /tailscale/try-again decides: it does not
+// exist without the status secret, needs the secret when there is one, says
+// 409 while the node is not serving, and 204 once a test was made. A route
+// that skipped the secret check, or mapped the node's refusal to success,
+// fails it.
+func TestTryAgainRoute(t *testing.T) {
+	const secret = "test-secret-value"
+	post := func(secret, sent string, tryAgain func(context.Context) error) int {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), secret, withTailnodeTryAgain(tryAgain))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/tailscale/try-again", nil)
+		req.Host = "127.0.0.1:1338"
+		if sent != "" {
+			req.Header.Set(config.StatusSecretHeader, sent)
+		}
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	called := 0
+	serving := func(context.Context) error { called++; return nil }
+	refusing := func(context.Context) error { called++; return tailnode.ErrNotServing }
+
+	if got := post("", "", serving); got != http.StatusNotFound || called != 0 {
+		t.Errorf("without a status secret: %d, %d calls; want 404 and none", got, called)
+	}
+	if got := post(secret, "", serving); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("without the secret header: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, "wrong", serving); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("with a wrong secret: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, secret, refusing); got != http.StatusConflict {
+		t.Errorf("not serving: %d, want 409", got)
+	}
+	if got := post(secret, secret, serving); got != http.StatusNoContent {
+		t.Errorf("serving: %d, want 204", got)
 	}
 }
