@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -608,5 +610,136 @@ func TestStatusCarriesTailnodeOnlyWhenConfigured(t *testing.T) {
 	}
 	if with["running"] != true {
 		t.Errorf("configured status lost its own fields: %v", with)
+	}
+}
+
+// TestStatusCarriesRouteHealth checks the fields the app reads to say Ready
+// with a time, not answering, and waiting for the internet, and the counts
+// for diagnostics, reach the status response beside the existing ones.
+func TestStatusCarriesRouteHealth(t *testing.T) {
+	checked := time.Date(2026, 11, 15, 10, 12, 0, 0, time.UTC)
+	since := checked.Add(-2 * time.Minute)
+	base := tailnode.Observation{
+		Backend: "Running", CertDomains: []string{"relay.example-tailnet.ts.net"},
+		FunnelAllowed: true, Listening: true, PublicAnswered: true,
+		Now: checked, Counts: map[string]int{"ingress_denied": 2},
+	}
+	ready, notAnswering, waiting := base, base, base
+	ready.CheckedAt = checked
+	notAnswering.NotAnsweringSince = since
+	waiting.WaitingForInternet = true
+
+	for _, c := range []struct {
+		name string
+		obs  tailnode.Observation
+		want map[string]any
+	}{
+		{"ready", ready, map[string]any{"ts_state": "running", "ts_checked_at": "2026-11-15T10:12:00Z"}},
+		{"not answering", notAnswering, map[string]any{"ts_state": "not-answering", "ts_not_answering_since": "2026-11-15T10:10:00Z"}},
+		{"waiting", waiting, map[string]any{"ts_state": "waiting-for-internet"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), "", withTailnode(func() tailnode.Status {
+				return tailnode.State(c.obs)
+			}))
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/status", nil)
+			req.Host = "127.0.0.1:1338"
+			h.ServeHTTP(rec, req)
+			var m map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+				t.Fatalf("decode /status: %v (%s)", err, rec.Body.String())
+			}
+			for k, v := range c.want {
+				if m[k] != v {
+					t.Errorf("%s = %v, want %v (all: %v)", k, m[k], v, m)
+				}
+			}
+			counts, _ := m["ts_counts"].(map[string]any)
+			if counts["ingress_denied"] != float64(2) {
+				t.Errorf("ts_counts = %v, want ingress_denied 2", m["ts_counts"])
+			}
+			if m["running"] != true {
+				t.Errorf("status lost its own fields: %v", m)
+			}
+		})
+	}
+}
+
+// TestTryAgainRoute checks what POST /tailscale/try-again decides: it does not
+// exist without the status secret, needs the secret when there is one, says
+// 409 while the node is not serving, and 204 once a test was made. A route
+// that skipped the secret check, or mapped the node's refusal to success,
+// fails it.
+func TestTryAgainRoute(t *testing.T) {
+	const secret = "test-secret-value"
+	post := func(secret, sent string, tryAgain func(context.Context) error) int {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), secret, withTailnodeTryAgain(tryAgain))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/tailscale/try-again", nil)
+		req.Host = "127.0.0.1:1338"
+		if sent != "" {
+			req.Header.Set(config.StatusSecretHeader, sent)
+		}
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	called := 0
+	serving := func(context.Context) error { called++; return nil }
+	refusing := func(context.Context) error { called++; return tailnode.ErrNotServing }
+
+	if got := post("", "", serving); got != http.StatusNotFound || called != 0 {
+		t.Errorf("without a status secret: %d, %d calls; want 404 and none", got, called)
+	}
+	if got := post(secret, "", serving); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("without the secret header: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, "wrong", serving); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("with a wrong secret: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, secret, refusing); got != http.StatusConflict {
+		t.Errorf("not serving: %d, want 409", got)
+	}
+	if got := post(secret, secret, serving); got != http.StatusNoContent {
+		t.Errorf("serving: %d, want 204", got)
+	}
+}
+
+// TestSignInAgainRoute checks what POST /tailscale/sign-in decides, the route
+// behind the Sign In Again button: it does not exist without the status
+// secret, needs the secret when there is one, says 409 when the node cannot
+// start a sign-in, and 204 once it has. A route that skipped the secret
+// check, or answered success for a refusal, fails it.
+func TestSignInAgainRoute(t *testing.T) {
+	const secret = "test-secret-value"
+	post := func(secret, sent string, signIn func(context.Context) error) int {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), secret, withTailnodeSignIn(signIn))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/tailscale/sign-in", nil)
+		req.Host = "127.0.0.1:1338"
+		if sent != "" {
+			req.Header.Set(config.StatusSecretHeader, sent)
+		}
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	called := 0
+	starts := func(context.Context) error { called++; return nil }
+	refuses := func(context.Context) error { called++; return errors.New("not signed in to anything") }
+
+	if got := post("", "", starts); got != http.StatusNotFound || called != 0 {
+		t.Errorf("without a status secret: %d, %d calls; want 404 and none", got, called)
+	}
+	if got := post(secret, "", starts); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("without the secret header: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, "wrong", starts); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("with a wrong secret: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, secret, refuses); got != http.StatusConflict {
+		t.Errorf("a node that cannot start it: %d, want 409", got)
+	}
+	if got := post(secret, secret, starts); got != http.StatusNoContent {
+		t.Errorf("a node that started it: %d, want 204", got)
 	}
 }

@@ -166,6 +166,14 @@ public enum SetupCompletion {
     public static func mayFinish(reachability: PhoneReachability) -> Bool {
         reachability.isReachable
     }
+
+    /// mayContinueFromReach is whether Continue is on at the reach step for
+    /// the built-in route: only with an address that is Ready now (a Ready
+    /// whose last test is too old is not), or once the person chose Set Up
+    /// Later.
+    public static func mayContinueFromReach(route: BuiltInRouteState, choseSetUpLater: Bool, now: Date) -> Bool {
+        choseSetUpLater || route.expiredAt(now).address != nil
+    }
 }
 
 /// PhoneReachability is whether a phone can be given an address for this

@@ -99,6 +99,16 @@ final class AppModel: ObservableObject {
     /// builtInRoute is where the built-in Tailscale route is in its setup,
     /// from the engine's own status; starting while that route is not in use.
     @Published private(set) var builtInRoute: BuiltInRouteState = .starting
+    /// builtInTailscaleError is the last text Tailscale gave, shown where
+    /// setup or the address state is shown.
+    @Published private(set) var builtInTailscaleError: String?
+    /// builtInKeyExpiry is the warning that the Tailscale sign-in expires soon.
+    @Published private(set) var builtInKeyExpiry: BuiltInKeyExpiry?
+    /// builtInSignInMessage is why Sign In Again opened nothing, until it does.
+    @Published private(set) var builtInSignInMessage: String?
+    /// builtInFunnelSheetClosedAt is when the person closed the Enable Funnel
+    /// page, until the engine reports a state past it.
+    @Published private(set) var builtInFunnelSheetClosedAt: Date?
     private let builtInSession = BuiltInSignInSession()
 
     /// TailscaleFailure is the plain sentence for a Tailscale change that
@@ -118,6 +128,8 @@ final class AppModel: ObservableObject {
     private let loginItemManager: any LoginItemManaging
     private let statusAddr: String
     private let pairingMinter: any PairingCodeMinting
+    private let addressRetrier: any BuiltInAddressRetrying
+    private let signInStarter: any BuiltInSignInStarting
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -263,6 +275,8 @@ final class AppModel: ObservableObject {
         self.statusAddr = statusAddr
         let statusSecret = LocalStatusSecret()
         pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
+        addressRetrier = URLSessionBuiltInAddressRetrier(url: AppModel.engineURL(for: statusAddr, path: "tailscale/try-again"), secret: statusSecret)
+        signInStarter = URLSessionBuiltInSignInStarter(url: AppModel.engineURL(for: statusAddr, path: "tailscale/sign-in"), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         let loaded = settingsStore.load()
@@ -645,6 +659,7 @@ final class AppModel: ObservableObject {
     /// openBuiltInStep opens the page the current step asks for, in the
     /// system's web authentication sheet.
     func openBuiltInStep() {
+        builtInSession.onClosedByPerson = { [weak self] in self?.builtInSheetClosedByPerson() }
         builtInSession.present(builtInRoute)
     }
 
@@ -665,6 +680,43 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// tryBuiltInAddressAgain has the engine test the public address at once
+    /// and take its next repair step, then reads the result.
+    func tryBuiltInAddressAgain() {
+        Task {
+            try? await addressRetrier.tryAgain()
+            await statusPoller.pollNow()
+        }
+    }
+
+    /// builtInSheetClosedByPerson notes that the Enable Funnel page was closed,
+    /// so the row says the address is being turned on while the engine
+    /// notices. A sheet the app cancelled never gets here.
+    private func builtInSheetClosedByPerson() {
+        if case .enableFunnel = builtInRoute { builtInFunnelSheetClosedAt = Date() }
+    }
+
+    /// signInBuiltInAgain has the engine start Tailscale's sign-in while the
+    /// address keeps working, then opens the page it names in the sign-in
+    /// sheet. The page is opened only when it is an https page on Tailscale.
+    func signInBuiltInAgain() {
+        Task {
+            let started = (try? await signInStarter.startSignIn()) != nil
+            var page: URL?
+            if started {
+                for _ in 0..<10 {
+                    await statusPoller.pollNow()
+                    page = BuiltInKeyExpiry.signInAgainURL(from: latestStatus?.builtIn)
+                    if page != nil { break }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+            }
+            let outcome = BuiltInKeyExpiry.outcome(engineStarted: started, page: page)
+            if case .open(let url) = outcome { builtInSession.presentPage(url) }
+            builtInSignInMessage = outcome.message
+        }
+    }
+
     /// pollBuiltInRouteUntilReady asks the engine for its status every two
     /// seconds while the route is not ready and a screen showing it is open,
     /// so each step shows within moments of the engine reaching it; it ends
@@ -681,14 +733,18 @@ final class AppModel: ObservableObject {
     private func refreshBuiltInRoute() {
         var next: BuiltInRouteState = .starting
         if settings.useBuiltInTailscale {
-            if case .failed = engineState {
-                next = .failed("CGM Relay couldn't start. Try Again.")
-            } else {
-                next = BuiltInRouteState.from(latestStatus?.builtIn)
-            }
+            next = BuiltInRouteState.resolve(engineState: engineState, status: latestStatus?.builtIn).expiredAt(Date())
         }
         if next != builtInRoute { builtInRoute = next }
-        builtInSession.reconcile(with: next)
+        if builtInFunnelSheetClosedAt != nil {
+            if case .enableFunnel = next {} else { builtInFunnelSheetClosedAt = nil }
+        }
+        let report = settings.useBuiltInTailscale && engineState == .running ? latestStatus?.builtIn : nil
+        let error = BuiltInRouteState.tailscaleErrorText(from: report)
+        if error != builtInTailscaleError { builtInTailscaleError = error }
+        let notice = BuiltInKeyExpiry.notice(for: report, now: Date())
+        if notice != builtInKeyExpiry { builtInKeyExpiry = notice }
+        builtInSession.reconcile(with: next, signInAgainURL: BuiltInKeyExpiry.signInAgainURL(from: report))
     }
 
     /// builtInStateDirectory is where the built-in node keeps its state,
@@ -1207,7 +1263,10 @@ final class AppModel: ObservableObject {
             noReadingAlertEnabled: settings.noReadingAlertEnabled,
             noReadingAlertMinutes: settings.noReadingAlertMinutes,
             signInFailingAlertEnabled: settings.signInFailingAlertEnabled,
-            followerAges: followerAges
+            followerAges: followerAges,
+            routeCounts: latestStatus?.builtIn?.counts ?? [:],
+            routeErrorClass: latestStatus?.builtIn?.errorClass,
+            builtIn: settings.useBuiltInTailscale ? builtInRoute : nil
         )
     }
 
@@ -1426,7 +1485,11 @@ final class AppModel: ObservableObject {
     }
 
     private static func pairingURL(for statusAddr: String) -> URL {
-        URL(string: "http://\(statusAddr)/pairing") ?? URL(string: "http://\(RelayDefaults.statusAddr)/pairing")!
+        engineURL(for: statusAddr, path: "pairing")
+    }
+
+    private static func engineURL(for statusAddr: String, path: String) -> URL {
+        URL(string: "http://\(statusAddr)/\(path)") ?? URL(string: "http://\(RelayDefaults.statusAddr)/\(path)")!
     }
 
     private static func statusURL(for statusAddr: String) -> URL {

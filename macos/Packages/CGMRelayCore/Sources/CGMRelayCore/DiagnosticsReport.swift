@@ -23,14 +23,17 @@ public enum DiagnosticsReport {
         noReadingAlertEnabled: Bool,
         noReadingAlertMinutes: Int,
         signInFailingAlertEnabled: Bool,
-        followerAges: [(client: String, age: String)]
+        followerAges: [(client: String, age: String)],
+        routeCounts: [String: Int] = [:],
+        routeErrorClass: String? = nil,
+        builtIn: BuiltInRouteState? = nil
     ) -> String {
         var lines: [String] = [
             "CGM Relay \(appVersion) (\(buildNumber))",
             "macOS \(macOSVersion)",
             "Engine: \(describe(engineState))",
             "Last error: \(lastError ?? "none")",
-            "Reach: \(describe(reach))",
+            "Reach: \(builtIn.map(describe) ?? describe(reach))",
             "Port: \(port)",
             "Retention: \(retentionDays) day\(retentionDays == 1 ? "" : "s")",
             "Units: \(units == .mgDl ? "mg/dL" : "mmol/L")",
@@ -47,8 +50,32 @@ public enum DiagnosticsReport {
             }
         }
 
+        let counted = countNames.compactMap { name in
+            routeCounts[name].map { "\(name) \(max($0, 0))" }
+        }
+        if !counted.isEmpty {
+            lines.append("Address checks: \(counted.joined(separator: ", "))")
+        }
+        if let routeErrorClass, errorClasses.contains(routeErrorClass) {
+            lines.append("Address error class: \(routeErrorClass)")
+        }
+
         return lines.joined(separator: "\n")
     }
+
+    /// errorClasses are the only Tailscale error classes a report carries.
+    private static let errorClasses = ["listen_failed", "https_disabled", "node_attribute_missing"]
+
+    /// countNames are the only names the engine counts under (its Tailscale
+    /// log lines and its failure classes). A count under any other name is
+    /// dropped, so a report can never carry an address or a host the engine
+    /// did not mean as a count.
+    private static let countNames = [
+        "ingress_denied", "handshake", "control_reconnect",
+        "dropped_during_tls", "tls_failure", "server_error", "name_not_published",
+        "dns_failure", "no_route", "connect_refused", "connect_timeout",
+        "tailnet_address", "node_offline", "node_unhealthy", "status_read_failed",
+    ]
 
     private static func describe(_ state: EngineSupervisor.RunState) -> String {
         switch state {
@@ -70,6 +97,27 @@ public enum DiagnosticsReport {
         case .httpsOnStatusPort: return "Tailscale HTTPS on the status port"
         case .recoveryMoveFailed: return "recovery move failed"
         }
+    }
+
+    /// describe names the built-in public address and where it is, never its
+    /// host or a failure message.
+    private static func describe(_ route: BuiltInRouteState) -> String {
+        let state: String
+        switch route {
+        case .ready: state = "ready"
+        case .starting: state = "starting"
+        case .signIn: state = "waiting for sign-in"
+        case .approve: state = "waiting for approval"
+        case .enableFunnel: state = "waiting for Funnel to be turned on"
+        case .settingUp: state = "setting up"
+        case .publishing: state = "publishing"
+        case .notReachable: state = "not reachable"
+        case .notAnswering: state = "not answering"
+        case .waitingForInternet: state = "waiting for the internet"
+        case .stopped: state = "stopped"
+        case .failed: state = "failed"
+        }
+        return "public address (built-in), \(state)"
     }
 
     private static func describe(_ reach: NetworkReach) -> String {

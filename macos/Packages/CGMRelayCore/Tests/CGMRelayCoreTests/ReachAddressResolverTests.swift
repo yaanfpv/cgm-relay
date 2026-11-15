@@ -348,3 +348,34 @@ struct ConnectPaneAddressStateBuiltInTests {
         #expect(decide(nil, reach: .myTailnet, boundHost: "100.101.102.5", implied: "100.101.102.5", availability: .available("100.101.102.5")) == .ready(address: "http://100.101.102.5:1337"))
     }
 }
+
+
+@Suite("ConnectPaneAddressState address health")
+struct ConnectPaneAddressStateHealthTests {
+    private let host = "relay.example-tailnet.ts.net"
+    private let when = Date(timeIntervalSince1970: 1_794_737_400)
+
+    private func decide(_ builtIn: BuiltInRouteState) -> ConnectPaneAddressState {
+        ConnectPaneAddressState.decide(reach: .thisMacOnly, boundHost: "127.0.0.1", impliedBindHost: "127.0.0.1", port: 1337, displayHostAvailability: .available("127.0.0.1"), builtIn: builtIn)
+    }
+
+    @Test("a ready route with a checked time still yields the https host")
+    func readyWithTime() {
+        #expect(decide(.ready(host: host, checkedAt: when)) == .ready(address: "https://\(host)"))
+    }
+
+    @Test("not answering, waiting for the internet and stopped offer no address and no QR code", arguments: [
+        BuiltInRouteState.notAnswering(host: "relay.example-tailnet.ts.net", since: Date(timeIntervalSince1970: 1_794_737_400)),
+        .waitingForInternet(host: "relay.example-tailnet.ts.net"),
+        .stopped,
+    ])
+    func noAddressUnlessReady(state: BuiltInRouteState) {
+        guard case .unavailable(let reason) = decide(state) else {
+            Issue.record("\(state) must yield .unavailable")
+            return
+        }
+        #expect(!reason.isEmpty)
+        let reach = PhoneReachability.decide(reach: .thisMacOnly, httpsChosen: false, https: .unknown, tailnetAvailable: false, builtIn: state)
+        #expect(!reach.isReachable)
+    }
+}

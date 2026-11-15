@@ -42,6 +42,9 @@ struct SetupView: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var requestedStep: Step
+    /// choseSetUpLater is set once the person picks Set Up Later on the reach
+    /// step, which lets Continue through whatever the address is doing.
+    @State private var choseSetUpLater = false
     @StateObject private var signInForm = SignInForm()
 
     /// openAdvanced opens Settings on the Advanced pane, offered when setup
@@ -186,10 +189,13 @@ struct SetupView: View {
                 signInFooterButton
             case .reach:
                 if !isPhoneReachable {
-                    AccessibleButton("Set Up Later", style: .plain) { requestedStep = .ready }
+                    AccessibleButton("Set Up Later", style: .plain) {
+                        choseSetUpLater = true
+                        requestedStep = .ready
+                    }
                 }
                 AccessibleButton("Continue", style: offersTailscaleHTTPS ? .secondary : .primary) { requestedStep = .stayAwake }
-                    .disabled(!isPhoneReachable)
+                    .disabled(!mayContinueFromReach)
             case .stayAwake:
                 if model.stayAwakeChoice == nil {
                     AccessibleButton("Not Now", style: .secondary) {
@@ -241,6 +247,15 @@ struct SetupView: View {
     }
 
     private var isPhoneReachable: Bool { model.phoneReachability.isReachable }
+
+    /// mayContinueFromReach is whether Continue is on at the reach step. With
+    /// the built-in route it is the route's own answer, expiry included.
+    private var mayContinueFromReach: Bool {
+        if model.settings.useBuiltInTailscale {
+            return SetupCompletion.mayContinueFromReach(route: model.builtInRoute, choseSetUpLater: choseSetUpLater, now: Date())
+        }
+        return isPhoneReachable || choseSetUpLater
+    }
 
     /// goBack from the last step skips the connect step when there was no
     /// way for a phone to reach this Mac to connect through.

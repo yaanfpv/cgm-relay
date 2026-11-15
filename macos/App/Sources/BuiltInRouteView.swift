@@ -11,6 +11,22 @@ struct BuiltInRouteView: View {
     var body: some View {
         Section {
             row
+            if let text = model.builtInTailscaleError {
+                Text(text)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let notice = model.builtInKeyExpiry {
+                SetupStatusRow(
+                    name: "built-in-key",
+                    title: notice.text(timeZone: .current),
+                    caption: model.builtInSignInMessage ?? "Sign in again before then to keep your address.",
+                    captionIsError: model.builtInSignInMessage != nil,
+                    wrapsCaption: true,
+                    slot: .action(BuiltInKeyExpiry.signInAgainTitle, accessibleName: "Sign in to Tailscale again") { model.signInBuiltInAgain() }
+                )
+            }
         } footer: {
             Text(BuiltInRouteCopy.disclosure)
         }
@@ -39,21 +55,62 @@ struct BuiltInRouteView: View {
                 slot: .action("Approve", accessibleName: "Approve this Mac in Tailscale", style: .primary) { model.openBuiltInStep() }
             )
         case .enableFunnel:
-            SetupStatusRow(
-                name: "built-in",
-                title: "Turn on your public address",
-                caption: "One click in Tailscale.",
-                slot: .action("Turn On", accessibleName: "Turn on your public address", style: .primary) { model.openBuiltInStep() }
-            )
+            // After the page closes the engine needs a moment to see the
+            // change, so the row says so until the recheck window has passed.
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                if BuiltInFunnelRecheck.isChecking(route: model.builtInRoute, sheetClosedAt: model.builtInFunnelSheetClosedAt, now: context.date) {
+                    SetupStatusRow(name: "built-in", title: BuiltInFunnelRecheck.checkingTitle, caption: "This can take a moment.", slot: .checking)
+                } else {
+                    SetupStatusRow(
+                        name: "built-in",
+                        title: "Turn on your public address",
+                        caption: "One click in Tailscale.",
+                        slot: .action("Turn On", accessibleName: "Turn on your public address", style: .primary) { model.openBuiltInStep() }
+                    )
+                }
+            }
         case .settingUp:
             SetupStatusRow(
                 name: "built-in",
                 title: "Setting up your address…",
-                caption: "This can take two minutes.",
+                caption: "Checking that it answers.",
                 slot: .checking
             )
-        case .ready(let host):
-            SetupStatusRow(name: "built-in", title: "Your address", caption: host, captionIsMonospaced: true, slot: .done("Ready"))
+        case .publishing:
+            // The elapsed time moves while the state does not, so the row
+            // is redrawn every half minute.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                SetupStatusRow(
+                    name: "built-in",
+                    title: "Your address",
+                    caption: model.builtInRoute.settingsStatusText(timeZone: .current, now: context.date),
+                    wrapsCaption: true,
+                    slot: .checking
+                )
+            }
+        case .notReachable:
+            SetupStatusRow(
+                name: "built-in",
+                title: "Your address",
+                caption: model.builtInRoute.settingsStatusText(timeZone: .current),
+                wrapsCaption: true,
+                slot: .action("Try Again", accessibleName: "Try your address again") { model.tryBuiltInAddressAgain() }
+            )
+        case .ready(let host, _):
+            SetupStatusRow(name: "built-in", title: "Your address", caption: host, captionIsMonospaced: true, slot: .done(model.builtInRoute.settingsStatusText(timeZone: .current)))
+        case .notAnswering:
+            SetupStatusRow(
+                name: "built-in",
+                title: "Your address",
+                caption: model.builtInRoute.settingsStatusText(timeZone: .current),
+                captionIsError: true,
+                wrapsCaption: true,
+                slot: .action("Try Again", accessibleName: "Try your address again") { model.tryBuiltInAddressAgain() }
+            )
+        case .waitingForInternet:
+            SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.settingsStatusText(timeZone: .current), slot: .checking)
+        case .stopped:
+            SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.notReadyReason, wrapsCaption: true, slot: .unavailable(model.builtInRoute.settingsStatusText(timeZone: .current)))
         case .failed(let message):
             SetupStatusRow(
                 name: "built-in",

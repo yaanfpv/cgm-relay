@@ -46,6 +46,14 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         case tsFunnelURL = "ts_funnel_url"
         case tsPublicHost = "ts_public_host"
         case tsError = "ts_error"
+        case tsCheckedAt = "ts_checked_at"
+        case tsNotAnsweringSince = "ts_not_answering_since"
+        case tsCounts = "ts_counts"
+        case tsPublishingSince = "ts_publishing_since"
+        case tsTailscaleError = "ts_tailscale_error"
+        case tsErrorClass = "ts_error_class"
+        case tsKeyExpiry = "ts_key_expiry"
+        case tsSignInURL = "ts_sign_in_url"
     }
 
     public init(from decoder: Decoder) throws {
@@ -58,7 +66,7 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
         signInFailing = try c.decode(Bool.self, forKey: .signInFailing)
         lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
         clients = try c.decodeIfPresent([String: Date].self, forKey: .clients)
-        let tsKeys: [CodingKeys] = [.tsState, .tsLoginURL, .tsApproveURL, .tsFunnelURL, .tsPublicHost, .tsError]
+        let tsKeys: [CodingKeys] = [.tsState, .tsLoginURL, .tsApproveURL, .tsFunnelURL, .tsPublicHost, .tsError, .tsCheckedAt, .tsNotAnsweringSince, .tsCounts, .tsPublishingSince, .tsTailscaleError, .tsErrorClass, .tsKeyExpiry, .tsSignInURL]
         if tsKeys.contains(where: { c.contains($0) }) {
             builtIn = BuiltInStatus(
                 state: try c.decodeIfPresent(String.self, forKey: .tsState),
@@ -66,7 +74,15 @@ public struct EngineStatus: Decodable, Equatable, Sendable {
                 approveURL: try c.decodeIfPresent(String.self, forKey: .tsApproveURL),
                 funnelURL: try c.decodeIfPresent(String.self, forKey: .tsFunnelURL),
                 publicHost: try c.decodeIfPresent(String.self, forKey: .tsPublicHost),
-                error: try c.decodeIfPresent(String.self, forKey: .tsError)
+                error: try c.decodeIfPresent(String.self, forKey: .tsError),
+                checkedAt: try c.decodeIfPresent(Date.self, forKey: .tsCheckedAt),
+                notAnsweringSince: try c.decodeIfPresent(Date.self, forKey: .tsNotAnsweringSince),
+                counts: try c.decodeIfPresent([String: Int].self, forKey: .tsCounts),
+                publishingSince: try c.decodeIfPresent(Date.self, forKey: .tsPublishingSince),
+                tailscaleError: try c.decodeIfPresent(String.self, forKey: .tsTailscaleError),
+                errorClass: try c.decodeIfPresent(String.self, forKey: .tsErrorClass),
+                keyExpiry: try c.decodeIfPresent(Date.self, forKey: .tsKeyExpiry),
+                signInAgainURL: try c.decodeIfPresent(String.self, forKey: .tsSignInURL)
             )
         }
     }
