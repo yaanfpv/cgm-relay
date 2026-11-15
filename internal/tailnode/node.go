@@ -1087,8 +1087,10 @@ func (n *Node) waitOrTry(ctx context.Context, d time.Duration) (chan struct{}, b
 }
 
 // reconnectWait is the longest a node that has just found Funnel allowed waits
-// for the control server to reset its session before it registers anyway.
-const reconnectWait = time.Minute
+// for the control server to reset its session before it registers anyway. It
+// is under a minute so that the wait and the first wait after registering,
+// publishFirst, together stay within one.
+const reconnectWait = time.Minute - publishFirst
 
 // waitForReset waits until a reconnect line is seen or reconnectWait has passed
 // on the node's clock, and reports false when ctx is done. Lines seen before
