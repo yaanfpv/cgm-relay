@@ -1086,20 +1086,46 @@ func (n *Node) waitOrTry(ctx context.Context, d time.Duration) (chan struct{}, b
 	}
 }
 
+// reconnectWait is the longest a node that has just found Funnel allowed waits
+// for the control server to reset its session before it registers anyway.
+const reconnectWait = time.Minute
+
+// waitForReset waits until a reconnect line is seen or reconnectWait has passed
+// on the node's clock, and reports false when ctx is done. Lines seen before
+// the wait began are not the reset it waits for.
+func (n *Node) waitForReset(ctx context.Context) bool {
+	n.mon.ForgetReconnects()
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	slept := make(chan bool, 1)
+	go func() { slept <- n.sleep(wctx, reconnectWait) }()
+	select {
+	case <-slept:
+	case <-n.mon.Reconnects():
+		cancel()
+		<-slept
+	}
+	return ctx.Err() == nil
+}
+
 // listen turns Funnel on, retrying on a short backoff while it is refused,
 // and keeping the text of each refusal for the person. It returns false when
 // ctx is done. A node that ran while Funnel was not allowed listens again on
 // the same running node once it is, and is never restarted for it: a restart
 // just before registering lets the server's cleanup of the old session remove
-// the new one's registration.
+// the new one's registration. A policy change also has the control server reset
+// the node's session, and a registration made just before that reset is lost, so
+// the node waits for the next reconnect line, at most reconnectWait, before it
+// listens. A node whose tailnet allowed Funnel from the start listens at once.
 //
 // The listener is not Funnel-only: a phone that also runs Tailscale resolves
 // the public name to the node's tailnet address, and a Funnel-only listener
 // refuses it.
 func (n *Node) listen(ctx context.Context, api nodeAPI) (net.Listener, bool) {
 	wait := retryFirst
+	wasOff := false
 	for {
-		_, err := n.refresh(ctx, api)
+		st, err := n.refresh(ctx, api)
 		if err != nil {
 			// Without a current read the node cannot be told to listen.
 			if !n.sleep(ctx, wait) {
@@ -1107,6 +1133,29 @@ func (n *Node) listen(ctx context.Context, api nodeAPI) (net.Listener, bool) {
 			}
 			wait = min(wait*2, retryMax)
 			continue
+		}
+		if !policyOK(st) {
+			wasOff = true
+		} else if wasOff {
+			wasOff = false
+			// While it waits the address is publishing, with none of the
+			// refusals from before Funnel was allowed; they are shown again if
+			// the node is refused once the wait is over.
+			var text, class string
+			n.update(func(o *Observation) {
+				text, class = o.TailscaleErr, o.TailscaleErrClass
+				o.TailscaleErr, o.TailscaleErrClass = "", ""
+				o.Listening, o.FunnelAllowed, o.FunnelURL = false, true, ""
+			})
+			ok := n.waitForReset(ctx)
+			n.update(func(o *Observation) {
+				if o.TailscaleErr == "" {
+					o.TailscaleErr, o.TailscaleErrClass = text, class
+				}
+			})
+			if !ok {
+				return nil, false
+			}
 		}
 		fr, qerr := api.QueryFunnel(ctx)
 		funnelURL := ""
