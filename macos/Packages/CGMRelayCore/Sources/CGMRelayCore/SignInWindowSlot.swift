@@ -12,6 +12,12 @@ public final class SignInWindowSlot<Session: AnyObject> {
     public private(set) var presentedURL: URL?
     private var generation = 0
 
+    /// onClosedByPerson is called when the window ends on its own or because
+    /// the person closed it, with the page it showed. It is never called for a
+    /// window the app cancelled or replaced, whose completion handler is
+    /// stale by then.
+    public var onClosedByPerson: ((URL?) -> Void)?
+
     public init() {}
 
     /// makeCompletion returns the handler for the window about to be built. It
@@ -42,7 +48,9 @@ public final class SignInWindowSlot<Session: AnyObject> {
 
     private func ended(_ token: Int) {
         guard token == generation else { return }
+        let page = presentedURL
         session = nil
         presentedURL = nil
+        onClosedByPerson?(page)
     }
 }

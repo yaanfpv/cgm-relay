@@ -220,13 +220,15 @@ public enum BuiltInRouteState: Equatable, Sendable {
         }
     }
 
-    /// tailscaleErrorText is the last text Tailscale gave, on the states that
-    /// show setup or the address, and nil on any other or when it is blank.
+    /// tailscaleErrorText is the last text Tailscale gave, only while the
+    /// address is in trouble (not reachable, not answering). Any other state
+    /// has moved past what the text said, or is still waiting, and the text
+    /// would only be a stale error; it is nil there and when it is blank.
     public static func tailscaleErrorText(from status: BuiltInStatus?) -> String? {
         guard
             let status,
             let state = status.state,
-            ["needs-funnel", "publishing", "setting-up", "not-reachable", "not-answering"].contains(state),
+            ["not-reachable", "not-answering"].contains(state),
             let text = status.tailscaleError?.trimmingCharacters(in: .whitespacesAndNewlines),
             !text.isEmpty
         else { return nil }
@@ -303,5 +305,20 @@ public struct BuiltInKeyExpiry: Equatable, Sendable {
     /// only when it is an https page on Tailscale.
     public static func signInAgainURL(from status: BuiltInStatus?) -> URL? {
         BuiltInRouteState.openable(status?.signInAgainURL)
+    }
+}
+
+/// BuiltInFunnelRecheck is what the Turn On row does after the Enable Funnel
+/// page closes: the engine notices the change within moments, so the row says
+/// the address is being turned on, and Turn On comes back only if the engine
+/// still reports Funnel not allowed once the window has passed.
+public enum BuiltInFunnelRecheck {
+    /// window is how long the row waits for the engine, in seconds.
+    public static let window: TimeInterval = 120
+    public static let checkingTitle = "Turning on your address…"
+
+    public static func isChecking(route: BuiltInRouteState, sheetClosedAt: Date?, now: Date) -> Bool {
+        guard case .enableFunnel = route, let sheetClosedAt else { return false }
+        return now.timeIntervalSince(sheetClosedAt) < window
     }
 }

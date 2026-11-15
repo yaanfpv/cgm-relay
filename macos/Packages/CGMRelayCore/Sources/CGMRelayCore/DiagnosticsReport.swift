@@ -25,14 +25,15 @@ public enum DiagnosticsReport {
         signInFailingAlertEnabled: Bool,
         followerAges: [(client: String, age: String)],
         routeCounts: [String: Int] = [:],
-        routeErrorClass: String? = nil
+        routeErrorClass: String? = nil,
+        builtIn: BuiltInRouteState? = nil
     ) -> String {
         var lines: [String] = [
             "CGM Relay \(appVersion) (\(buildNumber))",
             "macOS \(macOSVersion)",
             "Engine: \(describe(engineState))",
             "Last error: \(lastError ?? "none")",
-            "Reach: \(describe(reach))",
+            "Reach: \(builtIn.map(describe) ?? describe(reach))",
             "Port: \(port)",
             "Retention: \(retentionDays) day\(retentionDays == 1 ? "" : "s")",
             "Units: \(units == .mgDl ? "mg/dL" : "mmol/L")",
@@ -95,6 +96,27 @@ public enum DiagnosticsReport {
         case .httpsOnStatusPort: return "Tailscale HTTPS on the status port"
         case .recoveryMoveFailed: return "recovery move failed"
         }
+    }
+
+    /// describe names the built-in public address and where it is, never its
+    /// host or a failure message.
+    private static func describe(_ route: BuiltInRouteState) -> String {
+        let state: String
+        switch route {
+        case .ready: state = "ready"
+        case .starting: state = "starting"
+        case .signIn: state = "waiting for sign-in"
+        case .approve: state = "waiting for approval"
+        case .enableFunnel: state = "waiting for Funnel to be turned on"
+        case .settingUp: state = "setting up"
+        case .publishing: state = "publishing"
+        case .notReachable: state = "not reachable"
+        case .notAnswering: state = "not answering"
+        case .waitingForInternet: state = "waiting for the internet"
+        case .stopped: state = "stopped"
+        case .failed: state = "failed"
+        }
+        return "public address (built-in), \(state)"
     }
 
     private static func describe(_ reach: NetworkReach) -> String {

@@ -319,7 +319,7 @@ struct BuiltInRouteStatePublishingTests {
             let status = BuiltInStatus(state: state, publicHost: host, tailscaleError: text)
             #expect(BuiltInRouteState.tailscaleErrorText(from: status) == text, Comment(rawValue: state))
         }
-        for state in ["needs-funnel", "publishing", "running", "starting", "needs-login", "needs-approval", "waiting-for-internet", "error"] {
+        for state in ["needs-funnel", "publishing", "setting-up", "running", "starting", "needs-login", "needs-approval", "waiting-for-internet", "error"] {
             let status = BuiltInStatus(state: state, funnelURL: "https://login.tailscale.com/f/funnel", publicHost: host, tailscaleError: text)
             #expect(BuiltInRouteState.tailscaleErrorText(from: status) == nil, Comment(rawValue: state))
         }
