@@ -312,20 +312,31 @@ struct BuiltInRouteStatePublishingTests {
         #expect(!BuiltInRouteState.ready(host: host).showsTryAgain)
     }
 
-    @Test("the last Tailscale error is shown on the states that show setup or the address, and on no other")
+    @Test("the last Tailscale error shows only while the address is in trouble, never on Turn On, Publishing or Ready")
     func tailscaleErrorShown() {
         let text = "Funnel not available; HTTPS must be enabled."
-        for state in ["needs-funnel", "publishing", "setting-up", "not-reachable", "not-answering"] {
-            let status = BuiltInStatus(state: state, funnelURL: "https://login.tailscale.com/f/funnel", publicHost: host, tailscaleError: text)
+        for state in ["not-reachable", "not-answering"] {
+            let status = BuiltInStatus(state: state, publicHost: host, tailscaleError: text)
             #expect(BuiltInRouteState.tailscaleErrorText(from: status) == text, Comment(rawValue: state))
         }
-        for state in ["running", "starting", "needs-login", "waiting-for-internet"] {
-            let status = BuiltInStatus(state: state, publicHost: host, tailscaleError: text)
+        for state in ["needs-funnel", "publishing", "running", "starting", "needs-login", "needs-approval", "waiting-for-internet", "error"] {
+            let status = BuiltInStatus(state: state, funnelURL: "https://login.tailscale.com/f/funnel", publicHost: host, tailscaleError: text)
             #expect(BuiltInRouteState.tailscaleErrorText(from: status) == nil, Comment(rawValue: state))
         }
-        #expect(BuiltInRouteState.tailscaleErrorText(from: BuiltInStatus(state: "publishing", tailscaleError: "  \n ")) == nil)
-        #expect(BuiltInRouteState.tailscaleErrorText(from: BuiltInStatus(state: "publishing")) == nil)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: BuiltInStatus(state: "not-reachable", tailscaleError: "  \n ")) == nil)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: BuiltInStatus(state: "not-reachable")) == nil)
         #expect(BuiltInRouteState.tailscaleErrorText(from: nil) == nil)
+    }
+
+    @Test("an error left over from Turn On clears the moment the status moves to Publishing or Ready")
+    func tailscaleErrorClearsWhenFunnelIsAllowed() {
+        let text = "Funnel not available; HTTPS must be enabled."
+        let before = BuiltInStatus(state: "needs-funnel", funnelURL: "https://login.tailscale.com/f/funnel", tailscaleError: text)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: before) == nil)
+        let after = BuiltInStatus(state: "publishing", publicHost: host, tailscaleError: text)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: after) == nil)
+        let answered = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked, tailscaleError: text)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: answered) == nil)
     }
 
     @Test("the Tailscale error and its class decode from the engine's report")
@@ -428,5 +439,100 @@ extension BuiltInRouteState {
     var isFailed: Bool {
         if case .failed = self { return true }
         return false
+    }
+}
+
+/// After the Enable Funnel page closes, the row says the address is being
+/// turned on and does not offer Turn On again until the engine has had two
+/// minutes to notice.
+@Suite("BuiltInFunnelRecheck")
+struct BuiltInFunnelRecheckTests {
+    private let page = URL(string: "https://login.tailscale.com/f/funnel")!
+    private let closed = Date(timeIntervalSince1970: 1_794_737_400)
+
+    @Test("the wait is two minutes and the row says it is turning the address on")
+    func constants() {
+        #expect(BuiltInFunnelRecheck.window == 120)
+        #expect(BuiltInFunnelRecheck.checkingTitle == "Turning on your address…")
+    }
+
+    @Test("right after the page closes, a row still reporting Funnel not allowed is a check, not Turn On")
+    func checksRightAfterClose() {
+        let route = BuiltInRouteState.enableFunnel(page)
+        #expect(BuiltInFunnelRecheck.isChecking(route: route, sheetClosedAt: closed, now: closed))
+        #expect(BuiltInFunnelRecheck.isChecking(route: route, sheetClosedAt: closed, now: closed.addingTimeInterval(1)))
+        #expect(BuiltInFunnelRecheck.isChecking(route: route, sheetClosedAt: closed, now: closed.addingTimeInterval(119.9)))
+    }
+
+    @Test("two minutes on, an engine that still reports Funnel not allowed shows Turn On again")
+    func turnOnReturnsAfterTwoMinutes() {
+        let route = BuiltInRouteState.enableFunnel(page)
+        #expect(!BuiltInFunnelRecheck.isChecking(route: route, sheetClosedAt: closed, now: closed.addingTimeInterval(120)))
+        #expect(!BuiltInFunnelRecheck.isChecking(route: route, sheetClosedAt: closed, now: closed.addingTimeInterval(600)))
+    }
+
+    @Test("with no page closed, Turn On is shown as it is")
+    func neverClosed() {
+        #expect(!BuiltInFunnelRecheck.isChecking(route: .enableFunnel(page), sheetClosedAt: nil, now: closed))
+    }
+
+    @Test("a state other than Funnel not allowed is never turned into a check", arguments: [
+        BuiltInRouteState.starting,
+        .settingUp(host: "relay.example-tailnet.ts.net"),
+        .publishing(host: "relay.example-tailnet.ts.net", since: nil),
+        .notReachable(host: "relay.example-tailnet.ts.net"),
+        .ready(host: "relay.example-tailnet.ts.net"),
+        .notAnswering(host: "relay.example-tailnet.ts.net", since: nil),
+        .waitingForInternet(host: "relay.example-tailnet.ts.net"),
+        .stopped,
+        .failed("Tailscale stopped with an error."),
+    ])
+    func otherStatesKeepTheirOwnRow(route: BuiltInRouteState) {
+        #expect(!BuiltInFunnelRecheck.isChecking(route: route, sheetClosedAt: closed, now: closed.addingTimeInterval(1)))
+    }
+}
+
+/// Continue on the Reach This Mac step goes forward only when that means
+/// something: the address answers, or the person chose Set Up Later.
+@Suite("Reach step Continue")
+struct ReachContinueTests {
+    private let host = "relay.example-tailnet.ts.net"
+    private let page = URL(string: "https://login.tailscale.com/a/abc123")!
+    private let now = Date(timeIntervalSince1970: 1_794_737_520)
+
+    @Test("Continue is enabled when the address is Ready")
+    func readyEnables() {
+        #expect(SetupCompletion.mayContinueFromReach(route: .ready(host: host), choseSetUpLater: false, now: now))
+        #expect(SetupCompletion.mayContinueFromReach(route: .ready(host: host, checkedAt: now), choseSetUpLater: false, now: now))
+    }
+
+    @Test("Continue stays off in every state that is not Ready, however the wait looks", arguments: [
+        BuiltInRouteState.starting,
+        .signIn(URL(string: "https://login.tailscale.com/a/abc123")!),
+        .approve(URL(string: "https://login.tailscale.com/admin/machines")!),
+        .enableFunnel(URL(string: "https://login.tailscale.com/f/funnel")!),
+        .settingUp(host: "relay.example-tailnet.ts.net"),
+        .publishing(host: "relay.example-tailnet.ts.net", since: nil),
+        .notReachable(host: "relay.example-tailnet.ts.net"),
+        .notAnswering(host: "relay.example-tailnet.ts.net", since: nil),
+        .waitingForInternet(host: "relay.example-tailnet.ts.net"),
+        .stopped,
+        .failed("Tailscale stopped with an error."),
+    ])
+    func notReadyDisables(route: BuiltInRouteState) {
+        #expect(!SetupCompletion.mayContinueFromReach(route: route, choseSetUpLater: false, now: now))
+    }
+
+    @Test("a Ready whose last test is too old is the setting-up row, so Continue is off")
+    func staleReadyDisables() {
+        let route = BuiltInRouteState.ready(host: host, checkedAt: now.addingTimeInterval(-10 * 60))
+        #expect(!SetupCompletion.mayContinueFromReach(route: route, choseSetUpLater: false, now: now))
+    }
+
+    @Test("choosing Set Up Later lets the person go on from any state")
+    func setUpLaterEnables() {
+        for route in [BuiltInRouteState.starting, .settingUp(host: host), .publishing(host: host, since: nil), .notAnswering(host: host, since: nil), .stopped] {
+            #expect(SetupCompletion.mayContinueFromReach(route: route, choseSetUpLater: true, now: now))
+        }
     }
 }

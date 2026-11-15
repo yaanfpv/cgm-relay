@@ -136,4 +136,66 @@ struct DiagnosticsReportTests {
             #expect(!text.contains("bind"), Comment(rawValue: leaked))
         }
     }
+
+    private func reachLine(builtIn: BuiltInRouteState?, reach: NetworkReach = .thisMacOnly) -> String {
+        let text = DiagnosticsReport.build(
+            appVersion: "0.1.0",
+            buildNumber: "1",
+            macOSVersion: "15.0",
+            engineState: .running,
+            lastError: nil,
+            reach: reach,
+            port: 1337,
+            retentionDays: 15,
+            units: .mgDl,
+            noReadingAlertEnabled: false,
+            noReadingAlertMinutes: 20,
+            signInFailingAlertEnabled: false,
+            followerAges: [],
+            builtIn: builtIn
+        )
+        return text.split(separator: "\n").first { $0.hasPrefix("Reach:") }.map(String.init) ?? ""
+    }
+
+    @Test("a Ready public address is named as the way in, never This Mac only")
+    func readyReachLine() {
+        let line = reachLine(builtIn: .ready(host: "relay.example-tailnet.ts.net", checkedAt: Date(timeIntervalSince1970: 1_794_737_520)))
+        #expect(line == "Reach: public address (built-in), ready")
+        #expect(!line.contains("This Mac only"))
+        #expect(!line.contains("ts.net"))
+    }
+
+    @Test("a public address that is not Ready is named with its own state, and no two states read alike")
+    func notReadyReachLines() {
+        let host = "relay.example-tailnet.ts.net"
+        let states: [BuiltInRouteState] = [
+            .starting,
+            .signIn(URL(string: "https://login.tailscale.com/a/abc123")!),
+            .approve(URL(string: "https://login.tailscale.com/admin/machines")!),
+            .enableFunnel(URL(string: "https://login.tailscale.com/f/funnel")!),
+            .settingUp(host: host),
+            .publishing(host: host, since: nil),
+            .notReachable(host: host),
+            .notAnswering(host: host, since: nil),
+            .waitingForInternet(host: host),
+            .stopped,
+            .failed("Tailscale stopped with an error."),
+        ]
+        var seen: Set<String> = []
+        for state in states {
+            let line = reachLine(builtIn: state)
+            #expect(line.hasPrefix("Reach: public address (built-in), "), Comment(rawValue: line))
+            #expect(!line.contains("This Mac only"), Comment(rawValue: line))
+            #expect(!line.hasSuffix(", ready"), Comment(rawValue: line))
+            #expect(!line.contains("ts.net"), Comment(rawValue: line))
+            #expect(!line.contains("Tailscale stopped with an error"), Comment(rawValue: line))
+            #expect(seen.insert(line).inserted, Comment(rawValue: "repeated: \(line)"))
+        }
+    }
+
+    @Test("without the built-in route the line is the chosen reach, as before")
+    func otherRouteUnchanged() {
+        #expect(reachLine(builtIn: nil) == "Reach: This Mac only")
+        #expect(reachLine(builtIn: nil, reach: .myTailnet) == "Reach: My tailnet")
+    }
 }
