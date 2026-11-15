@@ -106,6 +106,114 @@ struct BuiltInRouteStateTests {
     }
 }
 
+/// The public address's health: a time on Ready, not answering, waiting for the
+/// internet and stopped, each its own state and none of them a failure or Ready.
+@Suite("BuiltInRouteState address health")
+struct BuiltInRouteStateHealthTests {
+    private let host = "relay.example-tailnet.ts.net"
+    /// 2026-11-15 10:12:00 UTC, which is 15:42 in Asia/Kolkata.
+    private let checked = Date(timeIntervalSince1970: 1_794_737_520)
+    /// two minutes before checked: 15:40 in Asia/Kolkata.
+    private let since = Date(timeIntervalSince1970: 1_794_737_400)
+    private let kolkata = TimeZone(identifier: "Asia/Kolkata")!
+    private let utc = TimeZone(identifier: "UTC")!
+
+    private func route(_ fields: String) throws -> BuiltInRouteState {
+        let json = #"{"running": true, "sign_in_failing": false, \#(fields)}"#
+        let status = try JSONDecoder.engineStatusDecoder.decode(EngineStatus.self, from: Data(json.utf8))
+        return BuiltInRouteState.from(status.builtIn)
+    }
+
+    @Test("the time of the last successful test reaches Ready")
+    func readyCarriesTheCheckedTime() throws {
+        let got = try route(#""ts_state": "running", "ts_public_host": "\#(host)", "ts_checked_at": "2026-11-15T10:12:00Z""#)
+        #expect(got == .ready(host: host, checkedAt: checked))
+    }
+
+    @Test("not answering carries the time of the first failure and keeps the host")
+    func notAnswering() throws {
+        let got = try route(#""ts_state": "not-answering", "ts_public_host": "\#(host)", "ts_not_answering_since": "2026-11-15T10:10:00Z""#)
+        #expect(got == .notAnswering(host: host, since: since))
+    }
+
+    @Test("waiting for the internet keeps the host")
+    func waitingForInternet() throws {
+        let got = try route(#""ts_state": "waiting-for-internet", "ts_public_host": "\#(host)""#)
+        #expect(got == .waitingForInternet(host: host))
+    }
+
+    @Test("a state this version does not know is still a failure the person can retry")
+    func unknownStateStaysFailed() throws {
+        #expect(try route(#""ts_state": "some-future-state""#).isFailed)
+    }
+
+    @Test("a new state is never a failure, never Ready, and offers no address")
+    func newStatesAreNeitherFailureNorReady() throws {
+        let states: [BuiltInRouteState] = [
+            try route(#""ts_state": "not-answering", "ts_public_host": "\#(host)", "ts_not_answering_since": "2026-11-15T10:10:00Z""#),
+            try route(#""ts_state": "waiting-for-internet", "ts_public_host": "\#(host)""#),
+            .stopped,
+        ]
+        for state in states {
+            #expect(!state.isFailed, Comment(rawValue: "\(state)"))
+            #expect(state.address == nil, Comment(rawValue: "\(state)"))
+            #expect(!state.notReadyReason.isEmpty, Comment(rawValue: "\(state)"))
+            #expect(state.notReadyReason != BuiltInRouteState.from(BuiltInStatus(state: "some-future-state")).notReadyReason, Comment(rawValue: "\(state)"))
+        }
+    }
+
+    @Test("Settings reads Ready with the checked time in the viewer's time zone")
+    func readyText() {
+        let ready = BuiltInRouteState.ready(host: host, checkedAt: checked)
+        #expect(ready.settingsStatusText(timeZone: kolkata) == "Ready · checked 15:42")
+        #expect(ready.settingsStatusText(timeZone: utc) == "Ready · checked 10:12")
+        #expect(BuiltInRouteState.ready(host: host, checkedAt: nil).settingsStatusText(timeZone: kolkata) == "Ready")
+    }
+
+    @Test("Settings reads not answering with the first failure's time and says it is reconnecting")
+    func notAnsweringText() {
+        let state = BuiltInRouteState.notAnswering(host: host, since: since)
+        #expect(state.settingsStatusText(timeZone: kolkata) == "Not answering since 15:40, reconnecting…")
+        #expect(state.settingsStatusText(timeZone: utc) == "Not answering since 10:10, reconnecting…")
+    }
+
+    @Test("Settings reads waiting for the internet, and stopped without the word Ready")
+    func otherText() {
+        #expect(BuiltInRouteState.waitingForInternet(host: host).settingsStatusText(timeZone: utc) == "Waiting for the internet")
+        let stopped = BuiltInRouteState.stopped.settingsStatusText(timeZone: utc)
+        #expect(stopped.lowercased().contains("stopped"))
+        #expect(!stopped.lowercased().contains("ready"))
+    }
+
+    @Test("with the engine stopped or down the route is stopped, whatever the last status said")
+    func engineDownIsStopped() {
+        let stale = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked)
+        #expect(BuiltInRouteState.resolve(engineState: .stopped, status: stale) == .stopped)
+        #expect(BuiltInRouteState.resolve(engineState: .waitingToRestart(attempt: 1, delay: .seconds(2)), status: stale) == .stopped)
+        #expect(BuiltInRouteState.resolve(engineState: .stopped, status: nil) == .stopped)
+    }
+
+    @Test("a starting or failed engine never shows the last status's Ready")
+    func engineNotRunningIsNeverReady() {
+        let stale = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked)
+        for engine in [EngineSupervisor.RunState.starting, .failed(.portInUse)] {
+            let got = BuiltInRouteState.resolve(engineState: engine, status: stale)
+            #expect(got.address == nil, Comment(rawValue: "\(engine)"))
+        }
+        if case .failed = BuiltInRouteState.resolve(engineState: .failed(.portInUse), status: stale) {} else {
+            Issue.record("a failed engine must stay a failure the person can retry")
+        }
+    }
+
+    @Test("with the engine running the route is what the engine reported")
+    func engineRunningUsesTheReport() {
+        let report = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked)
+        #expect(BuiltInRouteState.resolve(engineState: .running, status: report) == .ready(host: host, checkedAt: checked))
+        let slow = BuiltInStatus(state: "not-answering", publicHost: host, notAnsweringSince: since)
+        #expect(BuiltInRouteState.resolve(engineState: .running, status: slow) == .notAnswering(host: host, since: since))
+    }
+}
+
 extension BuiltInRouteState {
     var isFailed: Bool {
         if case .failed = self { return true }

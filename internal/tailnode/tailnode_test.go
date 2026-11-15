@@ -3,11 +3,20 @@ package tailnode_test
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -323,5 +332,872 @@ func TestPublicStatusChecksPresentedCredential(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The route-health tests below drive the pure parts of the public address's
+// health: what State reports once a time and a verdict are known, and the
+// Monitor that turns public tests into those verdicts and repairs. Each
+// test runs on a fake clock and a fake probe, so none sleeps or touches a
+// network. A fake only ever stands in for what the real node cannot give a
+// test (a tailnet, Funnel, the public internet); the loopback tests further
+// down run the real probe against local listeners.
+
+var epoch = time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+
+// stamp is how the engine writes the time epoch+d on the wire.
+func stamp(d time.Duration) string { return epoch.Add(d).Format(time.RFC3339) }
+
+func statusAny(t *testing.T, s tailnode.Status) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	m := map[string]any{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	return m
+}
+
+func answeringObs() tailnode.Observation {
+	return tailnode.Observation{Backend: "Running", CertDomains: []string{host}, FunnelAllowed: true, Listening: true, PublicAnswered: true}
+}
+
+var (
+	routeClasses = []tailnode.ProbeClass{tailnode.ProbeRouteDropped, tailnode.ProbeRouteTLS, tailnode.ProbeRouteServerError}
+	macClasses   = []tailnode.ProbeClass{tailnode.ProbeMacDNS, tailnode.ProbeMacNoRoute, tailnode.ProbeMacRefused, tailnode.ProbeMacTimeout}
+	nodeClasses  = []tailnode.ProbeClass{tailnode.ProbeNodeOffline, tailnode.ProbeNodeHealth, tailnode.ProbeStatusRead}
+)
+
+func allFailureClasses() []tailnode.ProbeClass {
+	var all []tailnode.ProbeClass
+	all = append(all, routeClasses...)
+	all = append(all, macClasses...)
+	all = append(all, nodeClasses...)
+	return append(all, tailnode.ProbeTailnetAddress)
+}
+
+// TestStateReadyCarriesTimeOfLastTest protects the "Ready, checked 15:42"
+// line: a person reads when the address last answered from this one field.
+// A state that drops the time, or writes it in another zone or shape, fails
+// it. The existing mapping test cannot, because it never sets a time.
+func TestStateReadyCarriesTimeOfLastTest(t *testing.T) {
+	o := answeringObs()
+	o.CheckedAt = epoch
+	o.Now = epoch.Add(5 * time.Minute)
+	got := statusAny(t, tailnode.State(o))
+	if got["ts_state"] != "running" || got["ts_public_host"] != host {
+		t.Fatalf("got %v, want running on %s", got, host)
+	}
+	if got["ts_checked_at"] != stamp(0) {
+		t.Errorf("ts_checked_at = %v, want %s", got["ts_checked_at"], stamp(0))
+	}
+}
+
+// TestStateReadyExpiresWithoutRecentTest protects the promise that Ready
+// means the address answered lately: with the last successful test older
+// than six minutes the state must not say running, whatever else the node
+// reports. A state that trusts the old success forever (the behaviour today)
+// fails it.
+func TestStateReadyExpiresWithoutRecentTest(t *testing.T) {
+	for _, age := range []time.Duration{0, 2 * time.Minute, 5*time.Minute + 59*time.Second} {
+		o := answeringObs()
+		o.CheckedAt, o.Now = epoch, epoch.Add(age)
+		if got := statusAny(t, tailnode.State(o))["ts_state"]; got != "running" {
+			t.Errorf("last test %v ago: ts_state = %v, want running", age, got)
+		}
+	}
+	for _, age := range []time.Duration{6*time.Minute + time.Second, 7 * time.Minute, time.Hour} {
+		o := answeringObs()
+		o.CheckedAt, o.Now = epoch, epoch.Add(age)
+		if got := statusAny(t, tailnode.State(o))["ts_state"]; got == "running" {
+			t.Errorf("last test %v ago: ts_state = running, want anything else", age)
+		}
+	}
+}
+
+// TestStateNotAnsweringAndWaitingForInternet protects the two new verdicts
+// on the wire: not answering carries the time of the first failure and the
+// host, waiting for the internet carries the host, neither is the generic
+// error state, and waiting wins when both are set because a Mac that is
+// offline says nothing about the route.
+func TestStateNotAnsweringAndWaitingForInternet(t *testing.T) {
+	na := answeringObs()
+	na.Now = epoch.Add(10 * time.Minute)
+	na.CheckedAt = epoch.Add(-time.Hour)
+	na.NotAnsweringSince = epoch.Add(time.Minute)
+	got := statusAny(t, tailnode.State(na))
+	if got["ts_state"] != "not-answering" || got["ts_not_answering_since"] != stamp(time.Minute) || got["ts_public_host"] != host {
+		t.Errorf("not answering: got %v", got)
+	}
+	if _, ok := got["ts_error"]; ok {
+		t.Errorf("not answering carries ts_error: %v", got)
+	}
+
+	wait := answeringObs()
+	wait.Now = epoch
+	wait.WaitingForInternet = true
+	got = statusAny(t, tailnode.State(wait))
+	if got["ts_state"] != "waiting-for-internet" || got["ts_public_host"] != host {
+		t.Errorf("waiting: got %v", got)
+	}
+	if _, ok := got["ts_error"]; ok {
+		t.Errorf("waiting carries ts_error: %v", got)
+	}
+
+	both := na
+	both.WaitingForInternet = true
+	if got := statusAny(t, tailnode.State(both))["ts_state"]; got != "waiting-for-internet" {
+		t.Errorf("both set: ts_state = %v, want waiting-for-internet", got)
+	}
+}
+
+// TestStateCarriesCounts protects the wire for diagnostics: the counts the
+// engine keeps reach the status as whole numbers under one key, and a state
+// without counts has no such key.
+func TestStateCarriesCounts(t *testing.T) {
+	o := answeringObs()
+	o.Counts = map[string]int{"ingress_denied": 3, "handshake": 1}
+	got := statusAny(t, tailnode.State(o))
+	counts, ok := got["ts_counts"].(map[string]any)
+	if !ok || counts["ingress_denied"] != float64(3) || counts["handshake"] != float64(1) {
+		t.Errorf("ts_counts = %v, want ingress_denied 3 and handshake 1", got["ts_counts"])
+	}
+	if _, ok := statusAny(t, tailnode.State(answeringObs()))["ts_counts"]; ok {
+		t.Error("a state with no counts carries ts_counts")
+	}
+}
+
+type fakeClock struct{ now time.Time }
+
+type repairLog struct {
+	clock    *fakeClock
+	kinds    []string
+	restarts []time.Time
+}
+
+func (r *repairLog) ReopenListener(context.Context) error {
+	r.kinds = append(r.kinds, "reopen")
+	return nil
+}
+
+func (r *repairLog) RestartNode(context.Context) error {
+	r.kinds = append(r.kinds, "restart")
+	r.restarts = append(r.restarts, r.clock.now)
+	return nil
+}
+
+// rig is a Monitor on a fake clock whose public test and node check answer
+// whatever the test sets.
+type rig struct {
+	t      *testing.T
+	clock  *fakeClock
+	rep    *repairLog
+	probe  tailnode.ProbeClass
+	node   tailnode.ProbeClass
+	probes int
+	m      *tailnode.Monitor
+}
+
+func newRig(t *testing.T) *rig {
+	r := &rig{t: t, clock: &fakeClock{now: epoch}, probe: tailnode.ProbeOK, node: tailnode.ProbeOK}
+	r.rep = &repairLog{clock: r.clock}
+	r.m = tailnode.NewMonitor(tailnode.MonitorOptions{
+		Now: func() time.Time { return r.clock.now },
+		Probe: func(_ context.Context, h string) tailnode.ProbeClass {
+			r.probes++
+			if h != host {
+				t.Errorf("probe asked about %q, want %q", h, host)
+			}
+			return r.probe
+		},
+		Node:   func(context.Context) tailnode.ProbeClass { return r.node },
+		Repair: r.rep,
+	})
+	return r
+}
+
+func (r *rig) at(d time.Duration) { r.clock.now = epoch.Add(d) }
+
+// step runs one test at epoch+d whose public result is class.
+func (r *rig) step(d time.Duration, class tailnode.ProbeClass) time.Duration {
+	r.at(d)
+	r.probe = class
+	return r.m.Step(context.Background(), host)
+}
+
+func (r *rig) status() map[string]any {
+	r.t.Helper()
+	return statusAny(r.t, tailnode.State(r.m.Apply(answeringObs())))
+}
+
+func (r *rig) state() string {
+	r.t.Helper()
+	s, _ := r.status()["ts_state"].(string)
+	return s
+}
+
+// ready brings the rig to a healthy address whose last test was ten seconds
+// before epoch.
+func (r *rig) ready() {
+	r.t.Helper()
+	r.step(-10*time.Second, tailnode.ProbeOK)
+	if got := r.state(); got != "running" {
+		r.t.Fatalf("after a successful test: ts_state = %q, want running", got)
+	}
+}
+
+// notAnswering fails the route three times over four minutes, from epoch.
+func (r *rig) notAnswering() {
+	r.t.Helper()
+	for _, d := range []time.Duration{0, 100 * time.Second, 240 * time.Second} {
+		r.step(d, tailnode.ProbeRouteDropped)
+	}
+	if got := r.state(); got != "not-answering" {
+		r.t.Fatalf("after three failures over four minutes: ts_state = %q, want not-answering", got)
+	}
+}
+
+// TestMonitorReadyIsEarnedAndKeptFresh protects Ready itself: no success yet
+// is not Ready even when the node believes it answered, a success is Ready
+// with its time, a later success moves the time, and a success that is
+// older than six minutes stops being Ready with no other event. A monitor
+// that starts Ready, or never lets a success go stale, fails it.
+func TestMonitorReadyIsEarnedAndKeptFresh(t *testing.T) {
+	r := newRig(t)
+	if got := r.state(); got == "running" {
+		t.Fatalf("before any test: ts_state = running")
+	}
+	if d := r.step(0, tailnode.ProbeOK); d != 2*time.Minute {
+		t.Errorf("next test after a success in %v, want 2m0s", d)
+	}
+	if st := r.status(); st["ts_state"] != "running" || st["ts_checked_at"] != stamp(0) {
+		t.Fatalf("after a success: %v", st)
+	}
+	r.step(2*time.Minute, tailnode.ProbeOK)
+	if st := r.status(); st["ts_checked_at"] != stamp(2*time.Minute) {
+		t.Errorf("after a second success: ts_checked_at = %v, want %s", st["ts_checked_at"], stamp(2*time.Minute))
+	}
+	r.at(2*time.Minute + 5*time.Minute + 59*time.Second)
+	if got := r.state(); got != "running" {
+		t.Errorf("just under six minutes after the last success: %q, want running", got)
+	}
+	r.at(2*time.Minute + 6*time.Minute + time.Second)
+	if got := r.state(); got == "running" {
+		t.Error("over six minutes after the last success, with no test since: still running")
+	}
+}
+
+// TestMonitorNotAnsweringNeedsThreeFailuresOverFourMinutes protects against
+// both wrong directions: Ready after three real route failures, and a
+// not-answering report on a blip. It runs every route failure class, since
+// a drop during TLS, a TLS failure and a 5xx are separate members of the
+// class. The time reported is the first failure of the current run.
+func TestMonitorNotAnsweringNeedsThreeFailuresOverFourMinutes(t *testing.T) {
+	cases := []struct {
+		name    string
+		offsets []time.Duration
+		na      bool
+	}{
+		{"one failure", []time.Duration{0}, false},
+		{"two failures", []time.Duration{0, 30 * time.Second}, false},
+		{"three failures inside two minutes", []time.Duration{0, 30 * time.Second, 90 * time.Second}, false},
+		{"three failures just under four minutes", []time.Duration{0, 100 * time.Second, 239 * time.Second}, false},
+		{"three failures spanning four minutes", []time.Duration{0, 100 * time.Second, 240 * time.Second}, true},
+		{"five failures, the last past four minutes", []time.Duration{0, 10 * time.Second, 20 * time.Second, 30 * time.Second, 250 * time.Second}, true},
+	}
+	for _, class := range routeClasses {
+		for _, c := range cases {
+			t.Run(class.String()+"/"+c.name, func(t *testing.T) {
+				r := newRig(t)
+				r.ready()
+				for i, d := range c.offsets {
+					r.step(d, class)
+					last := i == len(c.offsets)-1
+					want := "running"
+					if last && c.na {
+						want = "not-answering"
+					}
+					if got := r.state(); got != want {
+						t.Fatalf("after failure %d at %v: ts_state = %q, want %q", i+1, d, got, want)
+					}
+				}
+				if c.na {
+					if got := r.status()["ts_not_answering_since"]; got != stamp(0) {
+						t.Errorf("ts_not_answering_since = %v, want %s", got, stamp(0))
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestMonitorSuccessEndsTheRun protects "the first successful test returns
+// Ready" and that a success starts the count again: two failures, a success
+// and two more failures are not a run of three, and the run that does
+// complete is timed from its own first failure.
+func TestMonitorSuccessEndsTheRun(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	r.step(0, tailnode.ProbeRouteTLS)
+	r.step(100*time.Second, tailnode.ProbeRouteTLS)
+	r.step(150*time.Second, tailnode.ProbeOK)
+	r.step(200*time.Second, tailnode.ProbeRouteTLS)
+	r.step(300*time.Second, tailnode.ProbeRouteTLS)
+	if got := r.state(); got != "running" {
+		t.Fatalf("two failures after a success: ts_state = %q, want running", got)
+	}
+	r.step(450*time.Second, tailnode.ProbeRouteTLS)
+	st := r.status()
+	if st["ts_state"] != "not-answering" || st["ts_not_answering_since"] != stamp(200*time.Second) {
+		t.Fatalf("third failure of the new run: %v, want not-answering since %s", st, stamp(200*time.Second))
+	}
+	r.step(500*time.Second, tailnode.ProbeOK)
+	st = r.status()
+	if st["ts_state"] != "running" || st["ts_checked_at"] != stamp(500*time.Second) {
+		t.Errorf("after a success: %v, want running checked at %s", st, stamp(500*time.Second))
+	}
+	if _, ok := st["ts_not_answering_since"]; ok {
+		t.Errorf("running still carries ts_not_answering_since: %v", st)
+	}
+}
+
+// TestMonitorBackoffAfterFailure protects the test cadence: 30 seconds after
+// the first failure, 60 after the second, never more than five minutes, and
+// back to two minutes after a success. A monitor that keeps testing every
+// two minutes through a failure (slow to notice) or hammers the address
+// (never backs off) fails it.
+func TestMonitorBackoffAfterFailure(t *testing.T) {
+	r := newRig(t)
+	now := time.Duration(0)
+	var delays []time.Duration
+	for i := 0; i < 20; i++ {
+		d := r.step(now, tailnode.ProbeRouteDropped)
+		delays = append(delays, d)
+		now += d
+	}
+	if delays[0] != 30*time.Second || delays[1] != 60*time.Second {
+		t.Errorf("first delays %v, %v, want 30s then 1m0s", delays[0], delays[1])
+	}
+	for i, d := range delays {
+		if d <= 0 || d > 5*time.Minute {
+			t.Errorf("delay %d = %v, want within (0, 5m]", i+1, d)
+		}
+		if i > 0 && d < delays[i-1] {
+			t.Errorf("delay %d = %v is shorter than the one before, %v", i+1, d, delays[i-1])
+		}
+	}
+	if d := r.step(now, tailnode.ProbeOK); d != 2*time.Minute {
+		t.Errorf("delay after a success = %v, want 2m0s", d)
+	}
+}
+
+// TestMonitorMacSideFailureWaitsAndNeverRepairs protects the line between
+// the Mac's network and the address: a failure before any connection
+// (DNS, no route, refused, timed out), or a node that is offline, unhealthy
+// or cannot be read, is "waiting for the internet", never "not answering",
+// and nothing is reopened or restarted for it however long it lasts. A
+// restart for a dead Wi-Fi link would only churn the node. The node-side
+// members are the status-read-failed case too, so a failed read can never
+// leave the old state standing.
+func TestMonitorMacSideFailureWaitsAndNeverRepairs(t *testing.T) {
+	macSide := func(t *testing.T, r *rig, class tailnode.ProbeClass, d time.Duration) {
+		t.Helper()
+		r.node, r.probe = tailnode.ProbeOK, tailnode.ProbeOK
+		if class.NodeSide() {
+			r.node = class
+		} else {
+			r.probe = class
+		}
+		r.at(d)
+		r.m.Step(context.Background(), host)
+	}
+	for _, class := range append(append([]tailnode.ProbeClass{}, macClasses...), nodeClasses...) {
+		t.Run(class.String(), func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			for i := 0; i < 10; i++ {
+				macSide(t, r, class, time.Duration(i)*5*time.Minute)
+				if got := r.state(); got != "waiting-for-internet" {
+					t.Fatalf("step %d: ts_state = %q, want waiting-for-internet", i+1, got)
+				}
+			}
+			if len(r.rep.kinds) != 0 {
+				t.Errorf("repairs for a failure on the Mac's side: %v", r.rep.kinds)
+			}
+			r.node = tailnode.ProbeOK
+			r.step(time.Hour, tailnode.ProbeOK)
+			if got := r.state(); got != "running" {
+				t.Errorf("after a success: ts_state = %q, want running", got)
+			}
+		})
+	}
+	t.Run("while not answering", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.notAnswering()
+		before := len(r.rep.kinds)
+		for i, class := range append(append([]tailnode.ProbeClass{}, macClasses...), nodeClasses...) {
+			macSide(t, r, class, 5*time.Minute+time.Duration(i)*5*time.Minute)
+			if got := r.state(); got != "waiting-for-internet" {
+				t.Errorf("%v: ts_state = %q, want waiting-for-internet", class, got)
+			}
+		}
+		if len(r.rep.kinds) != before {
+			t.Errorf("repairs ran while the Mac's network was down: %v", r.rep.kinds[before:])
+		}
+	})
+}
+
+// TestMonitorTailnetAddressCountsAsNeither protects against a name that
+// resolves inside the tailnet passing for the public one: it never renews
+// Ready, never lifts a not-answering report, and it neither adds to nor
+// breaks a run of failures.
+func TestMonitorTailnetAddressCountsAsNeither(t *testing.T) {
+	t.Run("does not renew ready", func(t *testing.T) {
+		r := newRig(t)
+		r.step(0, tailnode.ProbeOK)
+		r.step(time.Minute, tailnode.ProbeTailnetAddress)
+		if got := r.status()["ts_checked_at"]; got != stamp(0) {
+			t.Errorf("ts_checked_at = %v after a tailnet answer, want %s", got, stamp(0))
+		}
+	})
+	t.Run("does not lift not answering", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.notAnswering()
+		r.step(5*time.Minute, tailnode.ProbeTailnetAddress)
+		if got := r.state(); got != "not-answering" {
+			t.Errorf("ts_state = %q after a tailnet answer, want not-answering", got)
+		}
+	})
+	t.Run("does not break a run", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.step(0, tailnode.ProbeRouteDropped)
+		r.step(100*time.Second, tailnode.ProbeRouteDropped)
+		r.step(150*time.Second, tailnode.ProbeTailnetAddress)
+		r.step(240*time.Second, tailnode.ProbeRouteDropped)
+		if got := r.state(); got != "not-answering" {
+			t.Errorf("ts_state = %q, want not-answering: the tailnet answer between failures must not reset the run", got)
+		}
+	})
+	t.Run("is not a failure", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.step(0, tailnode.ProbeRouteDropped)
+		for _, d := range []time.Duration{100 * time.Second, 200 * time.Second, 300 * time.Second} {
+			r.step(d, tailnode.ProbeTailnetAddress)
+		}
+		if got := r.state(); got != "running" {
+			t.Errorf("one failure and three tailnet answers: ts_state = %q, want running", got)
+		}
+	})
+}
+
+// TestMonitorRepairLadder protects the order of repairs: none for one or two
+// failures, a reopen of the public listener on becoming not answering, a
+// second reopen at the next failed test, and only then a full restart of the
+// node. A ladder that restarts first, or repairs on a blip, fails it.
+func TestMonitorRepairLadder(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	r.step(0, tailnode.ProbeRouteServerError)
+	r.step(100*time.Second, tailnode.ProbeRouteServerError)
+	if len(r.rep.kinds) != 0 {
+		t.Fatalf("repairs after two failures: %v", r.rep.kinds)
+	}
+	r.step(240*time.Second, tailnode.ProbeRouteServerError)
+	want := []string{"reopen"}
+	if !slices.Equal(r.rep.kinds, want) {
+		t.Fatalf("on becoming not answering: repairs %v, want %v", r.rep.kinds, want)
+	}
+	r.step(300*time.Second, tailnode.ProbeRouteServerError)
+	want = append(want, "reopen")
+	if !slices.Equal(r.rep.kinds, want) {
+		t.Fatalf("next failed test: repairs %v, want %v", r.rep.kinds, want)
+	}
+	r.step(360*time.Second, tailnode.ProbeRouteServerError)
+	want = append(want, "restart")
+	if !slices.Equal(r.rep.kinds, want) {
+		t.Fatalf("after two reopens: repairs %v, want %v", r.rep.kinds, want)
+	}
+}
+
+// TestMonitorRestartCaps protects the node from a restart loop: over three
+// hours of an address that never answers, restarts are at least five
+// minutes apart, never more than three in any hour, the state stays not
+// answering, tests keep coming at least every five minutes, and the cap lifts
+// with the hour. The first success after all of it is Ready again.
+func TestMonitorRestartCaps(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	r.at(0)
+	r.probe = tailnode.ProbeRouteDropped
+	end := epoch.Add(3 * time.Hour)
+	var probesAtTwoHours int
+	for r.clock.now.Before(end) {
+		if probesAtTwoHours == 0 && !r.clock.now.Before(epoch.Add(2*time.Hour)) {
+			probesAtTwoHours = r.probes
+		}
+		d := r.m.Step(context.Background(), host)
+		if d <= 0 || d > 5*time.Minute {
+			t.Fatalf("at %v the next test is in %v, want within (0, 5m]", r.clock.now.Sub(epoch), d)
+		}
+		r.clock.now = r.clock.now.Add(d)
+	}
+	rs := r.rep.restarts
+	if len(rs) == 0 || !rs[0].Before(epoch.Add(time.Hour)) {
+		t.Fatalf("restarts %v: want at least one in the first hour", rs)
+	}
+	for i := 1; i < len(rs); i++ {
+		if rs[i].Sub(rs[i-1]) < 5*time.Minute {
+			t.Errorf("restarts %d and %d are %v apart, want at least 5m", i, i+1, rs[i].Sub(rs[i-1]))
+		}
+		if i >= 3 && rs[i].Sub(rs[i-3]) < time.Hour {
+			t.Errorf("restarts %d to %d span %v, want at least an hour for four", i-2, i+1, rs[i].Sub(rs[i-3]))
+		}
+	}
+	if last := rs[len(rs)-1]; !last.After(epoch.Add(time.Hour)) {
+		t.Errorf("no restart after the first hour (last at %v): the cap must lift", last.Sub(epoch))
+	}
+	if got := r.state(); got != "not-answering" {
+		t.Errorf("after three hours of failures: ts_state = %q, want not-answering", got)
+	}
+	if n := r.probes - probesAtTwoHours; n < 12 {
+		t.Errorf("only %d tests in the last hour, want at least 12", n)
+	}
+	r.step(3*time.Hour+time.Minute, tailnode.ProbeOK)
+	if got := r.state(); got != "running" {
+		t.Errorf("after a success: ts_state = %q, want running", got)
+	}
+}
+
+// TestMonitorTryAgain protects the button: it tests at once, ignoring the
+// wait, and on a failed test takes the next repair step, but never past the
+// restart caps; a success returns Ready with no repair.
+func TestMonitorTryAgain(t *testing.T) {
+	ctx := context.Background()
+	t.Run("repairs one step per press and keeps the caps", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.notAnswering()
+		if !slices.Equal(r.rep.kinds, []string{"reopen"}) {
+			t.Fatalf("repairs on becoming not answering: %v", r.rep.kinds)
+		}
+		before := r.probes
+		r.at(250 * time.Second)
+		r.probe = tailnode.ProbeRouteDropped
+		if d := r.m.TryAgain(ctx, host); d <= 0 || d > 5*time.Minute {
+			t.Errorf("next test in %v, want within (0, 5m]", d)
+		}
+		if r.probes != before+1 {
+			t.Errorf("Try Again ran %d tests, want 1", r.probes-before)
+		}
+		if !slices.Equal(r.rep.kinds, []string{"reopen", "reopen"}) {
+			t.Fatalf("after one press: repairs %v, want a second reopen", r.rep.kinds)
+		}
+		r.at(251 * time.Second)
+		r.m.TryAgain(ctx, host)
+		if !slices.Equal(r.rep.kinds, []string{"reopen", "reopen", "restart"}) {
+			t.Fatalf("after two presses: repairs %v, want a restart", r.rep.kinds)
+		}
+		r.at(252 * time.Second)
+		r.m.TryAgain(ctx, host)
+		if len(r.rep.restarts) != 1 {
+			t.Errorf("%d restarts a second apart, want the five-minute cap to hold at 1", len(r.rep.restarts))
+		}
+		if got := r.state(); got != "not-answering" {
+			t.Errorf("ts_state = %q, want not-answering", got)
+		}
+		n := len(r.rep.kinds)
+		r.at(253 * time.Second)
+		r.probe = tailnode.ProbeOK
+		r.m.TryAgain(ctx, host)
+		if got := r.status(); got["ts_state"] != "running" || got["ts_checked_at"] != stamp(253*time.Second) {
+			t.Errorf("after a successful press: %v", got)
+		}
+		if len(r.rep.kinds) != n {
+			t.Errorf("a successful press repaired: %v", r.rep.kinds[n:])
+		}
+	})
+	t.Run("on a healthy address does nothing but test", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.at(time.Second)
+		r.probe = tailnode.ProbeOK
+		r.m.TryAgain(ctx, host)
+		if len(r.rep.kinds) != 0 || r.state() != "running" {
+			t.Errorf("repairs %v, state %q", r.rep.kinds, r.state())
+		}
+	})
+	t.Run("does not repair the Mac's network", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.at(time.Second)
+		r.probe = tailnode.ProbeMacDNS
+		r.m.TryAgain(ctx, host)
+		if len(r.rep.kinds) != 0 || r.state() != "waiting-for-internet" {
+			t.Errorf("repairs %v, state %q", r.rep.kinds, r.state())
+		}
+	})
+}
+
+// TestMonitorCountsEachFailureClass protects diagnostics: every failure
+// class has its own count, named distinctly, so a pattern (all TLS, all
+// refused) can be read off a report.
+func TestMonitorCountsEachFailureClass(t *testing.T) {
+	seen := map[string]tailnode.ProbeClass{}
+	for _, class := range allFailureClasses() {
+		key := class.String()
+		if key == "" {
+			t.Fatalf("class %d has no name", class)
+		}
+		if other, dup := seen[key]; dup {
+			t.Fatalf("classes %d and %d share the name %q", class, other, key)
+		}
+		seen[key] = class
+
+		r := newRig(t)
+		r.ready()
+		for i := 1; i <= 2; i++ {
+			r.node, r.probe = tailnode.ProbeOK, tailnode.ProbeOK
+			if class.NodeSide() {
+				r.node = class
+			} else {
+				r.probe = class
+			}
+			r.at(time.Duration(i) * time.Second)
+			r.m.Step(context.Background(), host)
+			if got := r.m.Counts()[key]; got != i {
+				t.Errorf("%s: count after %d = %d", key, i, got)
+			}
+		}
+	}
+}
+
+// TestMonitorCountsLogLines protects the two Tailscale log counts, and the
+// rule that only a count survives: the line, its address and its peer name
+// are dropped, and a line of neither kind adds nothing, not even a new key.
+func TestMonitorCountsLogLines(t *testing.T) {
+	r := newRig(t)
+	allowed := map[string]bool{"ingress_denied": true, "handshake": true}
+	for _, c := range allFailureClasses() {
+		allowed[c.String()] = true
+	}
+	r.m.ObserveLog("ingress: denied; no ingress cap from 203.0.113.9:4444")
+	r.m.ObserveLog("peer(abcd…wxyz) - Handshake did not complete after 5 seconds, retrying (try 2)")
+	r.m.ObserveLog("ingress: denied; no ingress cap from 203.0.113.10:5555")
+	for i := 0; i < 5000; i++ {
+		r.m.ObserveLog(fmt.Sprintf("magicsock: derp-%d connected; connGen=%d to 198.51.100.%d:443", i, i, i%250))
+	}
+	got := r.m.Counts()
+	if got["ingress_denied"] != 2 || got["handshake"] != 1 {
+		t.Errorf("counts %v, want ingress_denied 2 and handshake 1", got)
+	}
+	for k := range got {
+		if !allowed[k] {
+			t.Errorf("unexpected count key %q", k)
+		}
+	}
+	b, _ := json.Marshal(got)
+	for _, leak := range []string{"203.0.113", "198.51.100", "abcd", "magicsock", host} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("counts %s contain %q", b, leak)
+		}
+	}
+}
+
+// TestMonitorCountsAreBounded protects the engine's memory and the report's
+// size: a count stops at MaxCount instead of growing without end.
+func TestMonitorCountsAreBounded(t *testing.T) {
+	if tailnode.MaxCount < 1 || tailnode.MaxCount > 1_000_000 {
+		t.Fatalf("MaxCount = %d, want between 1 and 1000000", tailnode.MaxCount)
+	}
+	r := newRig(t)
+	for i := 0; i < tailnode.MaxCount+10; i++ {
+		r.m.ObserveLog("ingress: denied; no ingress cap from 203.0.113.9:4444")
+	}
+	if got := r.m.Counts()["ingress_denied"]; got != tailnode.MaxCount {
+		t.Errorf("ingress_denied = %d after %d lines, want it held at %d", got, tailnode.MaxCount+10, tailnode.MaxCount)
+	}
+}
+
+// TestMonitorStatusCarriesCounts protects the link from the monitor to the
+// wire: what the monitor counted is what the state reports.
+func TestMonitorStatusCarriesCounts(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	r.m.ObserveLog("ingress: denied; no ingress cap from 203.0.113.9:4444")
+	counts, _ := r.status()["ts_counts"].(map[string]any)
+	if counts["ingress_denied"] != float64(1) {
+		t.Errorf("ts_counts = %v, want ingress_denied 1", r.status()["ts_counts"])
+	}
+}
+
+type deadlineErr struct{}
+
+func (deadlineErr) Error() string   { return "i/o timeout" }
+func (deadlineErr) Timeout() bool   { return true }
+func (deadlineErr) Temporary() bool { return true }
+
+// TestClassifyProbe protects the line the repair rules depend on, using the
+// error values net/http produces: only a failure after a connection was
+// made is the route's. A DNS failure, no route, a refused connection or a
+// connection that timed out before it was made would otherwise be read as an
+// address that stopped answering, and the node restarted for a dead Wi-Fi
+// link.
+func TestClassifyProbe(t *testing.T) {
+	urlErr := func(err error) error { return &url.Error{Op: "Get", URL: "https://" + host, Err: err} }
+	dial := func(err error) error { return urlErr(&net.OpError{Op: "dial", Net: "tcp", Err: err}) }
+	cases := []struct {
+		name   string
+		status int
+		err    error
+		want   tailnode.ProbeClass
+	}{
+		{"answered", 200, nil, tailnode.ProbeOK},
+		{"server error 500", 500, nil, tailnode.ProbeRouteServerError},
+		{"bad gateway", 502, nil, tailnode.ProbeRouteServerError},
+		{"unavailable", 503, nil, tailnode.ProbeRouteServerError},
+		{"dropped after connecting", 0, urlErr(io.EOF), tailnode.ProbeRouteDropped},
+		{"reset after connecting", 0, urlErr(&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), tailnode.ProbeRouteDropped},
+		{"tls handshake timeout", 0, urlErr(errors.New("net/http: TLS handshake timeout")), tailnode.ProbeRouteDropped},
+		{"certificate not trusted", 0, urlErr(x509.UnknownAuthorityError{}), tailnode.ProbeRouteTLS},
+		{"certificate not trusted, as the client reports it", 0, urlErr(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), tailnode.ProbeRouteTLS},
+		{"not a tls server", 0, urlErr(tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}), tailnode.ProbeRouteTLS},
+		{"name not found", 0, dial(&net.DNSError{Err: "no such host", Name: host, IsNotFound: true}), tailnode.ProbeMacDNS},
+		{"resolver unreachable", 0, urlErr(&net.OpError{Op: "dial", Net: "udp", Err: &net.DNSError{Err: "server misbehaving", Name: host, IsTemporary: true}}), tailnode.ProbeMacDNS},
+		{"connection refused", 0, dial(syscall.ECONNREFUSED), tailnode.ProbeMacRefused},
+		{"host unreachable", 0, dial(syscall.EHOSTUNREACH), tailnode.ProbeMacNoRoute},
+		{"network unreachable", 0, dial(syscall.ENETUNREACH), tailnode.ProbeMacNoRoute},
+		{"connect timed out", 0, dial(deadlineErr{}), tailnode.ProbeMacTimeout},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := tailnode.ClassifyProbe(c.status, c.err); got != c.want {
+				t.Errorf("ClassifyProbe(%d, %v) = %v, want %v", c.status, c.err, got, c.want)
+			}
+		})
+	}
+	for _, c := range []tailnode.ProbeClass{tailnode.ProbeRouteDropped, tailnode.ProbeRouteTLS, tailnode.ProbeRouteServerError} {
+		if !c.RouteFailure() || c.MacSide() || c.NodeSide() {
+			t.Errorf("%v: RouteFailure %v, MacSide %v, NodeSide %v", c, c.RouteFailure(), c.MacSide(), c.NodeSide())
+		}
+	}
+	for _, c := range []tailnode.ProbeClass{tailnode.ProbeMacDNS, tailnode.ProbeMacNoRoute, tailnode.ProbeMacRefused, tailnode.ProbeMacTimeout} {
+		if c.RouteFailure() || !c.MacSide() {
+			t.Errorf("%v: RouteFailure %v, MacSide %v", c, c.RouteFailure(), c.MacSide())
+		}
+	}
+	for _, c := range []tailnode.ProbeClass{tailnode.ProbeOK, tailnode.ProbeTailnetAddress} {
+		if c.RouteFailure() || c.MacSide() || c.NodeSide() {
+			t.Errorf("%v counts as a failure", c)
+		}
+	}
+}
+
+// TestIsTailnetAddress protects the edge of 100.64.0.0/10: the first and
+// last address of the block are tailnet addresses, the ones either side and
+// private ranges are not.
+func TestIsTailnetAddress(t *testing.T) {
+	for _, a := range []string{"100.64.0.0", "100.64.0.9", "100.100.100.100", "100.127.255.255"} {
+		if !tailnode.IsTailnetAddress(netip.MustParseAddr(a)) {
+			t.Errorf("%s is inside 100.64.0.0/10", a)
+		}
+	}
+	for _, a := range []string{"100.63.255.255", "100.128.0.0", "10.0.0.1", "127.0.0.1", "203.0.113.9"} {
+		if tailnode.IsTailnetAddress(netip.MustParseAddr(a)) {
+			t.Errorf("%s is outside 100.64.0.0/10", a)
+		}
+	}
+}
+
+// probeHost runs the real public probe against host (a loopback listener's
+// address) and returns its verdict.
+func probeHost(t *testing.T, h string) tailnode.ProbeClass {
+	t.Helper()
+	// hang ceiling only, not an expectation of how long a probe takes
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	return tailnode.NewPublicProbe()(ctx, h)
+}
+
+// TestPublicProbeRealFailures protects the classification at the real
+// boundary: the probe that production runs, pointed at local listeners that
+// refuse, accept and hang up, and speak TLS with a certificate nothing
+// trusts, returns the class each failure belongs to. It cannot show a
+// success (no certificate the probe trusts exists here) or the machine's
+// resolver; the owner's check on a live address covers those.
+func TestPublicProbeRealFailures(t *testing.T) {
+	t.Run("refused before connecting", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		if got := probeHost(t, addr); got != tailnode.ProbeMacRefused {
+			t.Errorf("class = %v, want %v", got, tailnode.ProbeMacRefused)
+		}
+	})
+	t.Run("dropped after connecting", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+		if got := probeHost(t, ln.Addr().String()); !got.RouteFailure() {
+			t.Errorf("class = %v, want a route failure", got)
+		}
+	})
+	t.Run("tls certificate not trusted", func(t *testing.T) {
+		srv := httptest.NewTLSServer(http.NotFoundHandler())
+		defer srv.Close()
+		if got := probeHost(t, strings.TrimPrefix(srv.URL, "https://")); got != tailnode.ProbeRouteTLS {
+			t.Errorf("class = %v, want %v", got, tailnode.ProbeRouteTLS)
+		}
+	})
+	t.Run("name inside the tailnet range", func(t *testing.T) {
+		for _, h := range []string{"100.64.0.9", "100.127.255.254"} {
+			if got := probeHost(t, h); got != tailnode.ProbeTailnetAddress {
+				t.Errorf("%s: class = %v, want %v", h, got, tailnode.ProbeTailnetAddress)
+			}
+		}
+	})
+}
+
+// TestProbeClassNames protects the contract with the app: the names a count
+// is reported under are the names the app's diagnostics accept, so a renamed
+// class would silently drop out of a report.
+func TestProbeClassNames(t *testing.T) {
+	want := map[tailnode.ProbeClass]string{
+		tailnode.ProbeRouteDropped:     "dropped_during_tls",
+		tailnode.ProbeRouteTLS:         "tls_failure",
+		tailnode.ProbeRouteServerError: "server_error",
+		tailnode.ProbeMacDNS:           "dns_failure",
+		tailnode.ProbeMacNoRoute:       "no_route",
+		tailnode.ProbeMacRefused:       "connect_refused",
+		tailnode.ProbeMacTimeout:       "connect_timeout",
+		tailnode.ProbeTailnetAddress:   "tailnet_address",
+		tailnode.ProbeNodeOffline:      "node_offline",
+		tailnode.ProbeNodeHealth:       "node_unhealthy",
+		tailnode.ProbeStatusRead:       "status_read_failed",
+	}
+	for class, name := range want {
+		if got := class.String(); got != name {
+			t.Errorf("class %d is named %q, want %q", class, got, name)
+		}
 	}
 }
