@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,6 +102,10 @@ type nodeAPI interface {
 	Status(ctx context.Context) (*ipnstate.Status, error)
 	QueryFunnel(ctx context.Context) (*tailcfg.QueryFeatureResponse, error)
 	ListenFunnel(ctx context.Context) (net.Listener, error)
+	// SetFunnelAllowed turns Funnel's registration off or on in the serve
+	// config, leaving the listener as it is. Setting the state the config
+	// already has is an error, since control ignores an unchanged config.
+	SetFunnelAllowed(ctx context.Context, allowed bool) error
 	// WarmCertificate has the node fetch or issue the certificate for host.
 	WarmCertificate(ctx context.Context, host string)
 	StartLogin(ctx context.Context) error
@@ -269,10 +274,40 @@ func (n *Node) nodeCheck(context.Context) ProbeClass {
 	return nodeHealth(n.read, n.readErr)
 }
 
+// reregisterPause is how long Funnel stays off in a re-registration. The two
+// changes of the serve config must reach control one after the other, since
+// control is told only of the state the node is in when it sends.
+const reregisterPause = 2 * time.Second
+
+// reregister turns Funnel's registration off and on in the serve config, so
+// the node tells control afresh that it has Funnel on. The listener is not
+// touched, and Funnel is always put back, even when the wait is cut short.
+func (n *Node) reregister(ctx context.Context) error {
+	n.mu.Lock()
+	api := n.api
+	n.mu.Unlock()
+	if api == nil {
+		return ErrNotServing
+	}
+	if err := api.SetFunnelAllowed(ctx, false); err != nil {
+		return err
+	}
+	paused := n.sleep(ctx, reregisterPause)
+	rctx := ctx
+	if !paused {
+		var cancel context.CancelFunc
+		rctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), serverShutdownTimeout*10)
+		defer cancel()
+	}
+	return api.SetFunnelAllowed(rctx, true)
+}
+
 // nodeRepair is the Monitor's way of repairing the node.
 type nodeRepair struct{ n *Node }
 
 func (r nodeRepair) ReopenListener(ctx context.Context) error { return r.n.reopen(ctx) }
+
+func (r nodeRepair) ReregisterFunnel(ctx context.Context) error { return r.n.reregister(ctx) }
 
 func (r nodeRepair) RestartNode(context.Context) error {
 	r.n.requestRestart()
@@ -410,6 +445,9 @@ func (n *Node) run(ctx context.Context) {
 type realNode struct {
 	s  *tsnet.Server
 	lc *local.Client
+
+	mu     sync.Mutex
+	parked map[ipn.HostPort]bool // the Funnel entries taken out of the serve config
 }
 
 // realStart starts a Tailscale server on dir, against controlURL when it is
@@ -441,6 +479,48 @@ func (r *realNode) QueryFunnel(ctx context.Context) (*tailcfg.QueryFeatureRespon
 func (r *realNode) StartLogin(ctx context.Context) error { return r.lc.StartLoginInteractive(ctx) }
 
 func (r *realNode) Close() error { return r.s.Close() }
+
+// SetFunnelAllowed reads the serve config, takes the Funnel entries out of it
+// or puts back the ones it took out, and writes it. The listener and every
+// other entry are left alone.
+func (r *realNode) SetFunnelAllowed(ctx context.Context, allowed bool) error {
+	sc, err := r.lc.GetServeConfig(ctx)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if allowed {
+		if len(r.parked) == 0 {
+			return errors.New("tailnode: no Funnel entry to put back")
+		}
+		for hp := range r.parked {
+			if sc.AllowFunnel == nil {
+				sc.AllowFunnel = map[ipn.HostPort]bool{}
+			}
+			sc.AllowFunnel[hp] = true
+		}
+	} else {
+		parked := map[ipn.HostPort]bool{}
+		for hp, on := range sc.AllowFunnel {
+			if on {
+				parked[hp] = true
+				delete(sc.AllowFunnel, hp)
+			}
+		}
+		if len(parked) == 0 {
+			return errors.New("tailnode: Funnel is already off in the serve config")
+		}
+		r.parked = parked
+	}
+	if err := r.lc.SetServeConfig(ctx, sc); err != nil {
+		return err
+	}
+	if allowed {
+		r.parked = nil
+	}
+	return nil
+}
 
 func (r *realNode) Watch(ctx context.Context) (ipnWatcher, error) {
 	return r.lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
@@ -494,9 +574,19 @@ func (n *Node) sleep(ctx context.Context, d time.Duration) bool {
 	return sleep(ctx, d)
 }
 
-// logLine receives the node's own log lines. Only the monitor's two counts
-// read them; nothing is formatted or kept, since a line can name an address.
-func (n *Node) logLine(format string, _ ...any) { n.mon.ObserveLog(format) }
+// logLine receives the node's own log lines. Only the monitor reads them, and
+// it keeps counts, never a line: nothing is formatted, since a line can name an
+// address. The end of a control map session is logged as one format with its
+// label as the first argument, so that argument, and nothing else of the
+// arguments, is read.
+func (n *Node) logLine(format string, args ...any) {
+	n.mon.ObserveLog(format)
+	if strings.Contains(format, "[v1] %s: %v") && len(args) > 0 {
+		if label, ok := args[0].(string); ok && label == "PollNetMap" {
+			n.mon.ObserveLog(lineMapEnded)
+		}
+	}
+}
 
 // prepareStateDir creates dir, or tightens it, to mode 0700 regardless of
 // the process umask: it holds the node's key.
@@ -832,49 +922,80 @@ func (n *Node) session(ctx context.Context, api nodeAPI) {
 		wait = n.mon.Due()
 	}
 
+	// Lines the node logged while it started are not a reconnect of a
+	// registration it has only now made.
+	n.mon.ForgetReconnects()
 	t := time.NewTimer(wait)
 	defer t.Stop()
-	// test reads the status, ends the session if the tailnet no longer
-	// allows Funnel, and otherwise makes one test. It returns the wait before
-	// the next one and whether the session goes on.
-	test := func(try bool) (time.Duration, bool) {
+	// read reads the status, which ends the session if the tailnet no longer
+	// allows Funnel, and returns the public name. The monitor judges the node
+	// by this read, so a failed one is a failed test and never leaves the old
+	// state standing.
+	read := func() (string, bool) {
 		st, err := n.refresh(ctx, api)
 		if err == nil && !policyOK(st) {
 			n.funnelTurnedOn(false)
-			return 0, false
+			return "", false
 		}
-		// The monitor judges the node by this read, so a failed one is a
-		// failed test and never leaves the old state standing.
 		n.mu.Lock()
 		n.read, n.readErr = st, err
 		n.mu.Unlock()
-		host := n.host()
-		if host == "" {
-			return n.mon.Due(), true
-		}
-		if try {
-			return n.mon.TryAgain(ctx, host), true
-		}
-		return n.mon.Step(ctx, host), true
+		return n.host(), true
 	}
 	for {
 		var try chan struct{}
+		timer := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-n.currentServed():
 			return
 		case <-t.C:
+			timer = true
 		case try = <-n.tryCh:
+		case <-n.mon.Reconnects():
 		}
-		d, ok := test(try != nil)
-		if try != nil {
-			close(try)
+		next := time.Duration(-1)
+		// A reconnect seen before this wake is acted on first, whatever woke
+		// the session, so a press made after the line finds it done.
+		if n.mon.ReconnectPending() {
+			host, ok := read()
+			if !ok {
+				if try != nil {
+					close(try)
+				}
+				return
+			}
+			if host != "" {
+				if d, ran := n.mon.AfterReconnect(ctx, host); ran {
+					next = d
+				}
+			}
 		}
-		if !ok || ctx.Err() != nil {
+		if timer || try != nil {
+			host, ok := read()
+			if ok && host != "" {
+				if try != nil {
+					next = n.mon.TryAgain(ctx, host)
+				} else {
+					next = n.mon.Step(ctx, host)
+				}
+			} else if ok {
+				next = n.mon.Due()
+			}
+			if try != nil {
+				close(try)
+			}
+			if !ok {
+				return
+			}
+		}
+		if ctx.Err() != nil {
 			return
 		}
-		t.Reset(d)
+		if next >= 0 {
+			t.Reset(next)
+		}
 	}
 }
 

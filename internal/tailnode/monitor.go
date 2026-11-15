@@ -28,6 +28,9 @@ const (
 	reopensBeforeRestart = 2
 	restartGap           = 5 * time.Minute
 	restartsPerHour      = 3
+
+	// minReregisterGap is the least time between two re-registrations of Funnel.
+	minReregisterGap = 30 * time.Second
 )
 
 // MaxCount bounds each count the monitor keeps.
@@ -37,6 +40,14 @@ const MaxCount = 9999
 const (
 	countIngressDenied = "ingress_denied"
 	countHandshake     = "handshake"
+	countReconnect     = "control_reconnect"
+)
+
+// The node's own log lines for a control map session that ended or came back.
+// The first is what a session's end is logged as once its label is filled in.
+const (
+	lineMapEnded = "PollNetMap: EOF"
+	lineDialPlan = "netmap: got new dial plan from control"
 )
 
 // Repairer reopens the public listener and restarts the node. A restart keeps
@@ -44,6 +55,10 @@ const (
 type Repairer interface {
 	ReopenListener(ctx context.Context) error
 	RestartNode(ctx context.Context) error
+	// ReregisterFunnel turns Funnel's registration off and on again in the
+	// node's serve config, keeping the listener, so the node sends control
+	// its Funnel state afresh.
+	ReregisterFunnel(ctx context.Context) error
 }
 
 // ProbeFunc makes one test of the public address host and classifies it.
@@ -79,6 +94,13 @@ type Monitor struct {
 	rung     int // reopens done since the last restart or success
 	restarts []time.Time
 	nextAt   time.Time
+
+	// pendingReconnect is set by a reconnect line and taken by AfterReconnect.
+	// reconnected wakes the serving session, and holds one wake so a line is
+	// never lost between the log and the session.
+	pendingReconnect bool
+	reconnected      chan struct{}
+	lastRereg        time.Time
 }
 
 // NewMonitor returns a Monitor with no test made yet.
@@ -86,7 +108,7 @@ func NewMonitor(opts MonitorOptions) *Monitor {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Monitor{opts: opts, counts: map[string]int{}}
+	return &Monitor{opts: opts, counts: map[string]int{}, reconnected: make(chan struct{}, 1)}
 }
 
 // Step makes one test of host and repairs what the result calls for. It
@@ -127,9 +149,17 @@ func (m *Monitor) test(ctx context.Context, host string) time.Duration {
 	if health && m.counts[ProbeNodeHealth.String()] < MaxCount {
 		m.counts[ProbeNodeHealth.String()]++
 	}
-	next, repair := m.record(class, m.opts.Now())
+	now := m.opts.Now()
+	next, repair := m.record(class, now)
+	// The first route failure of a run has Funnel's registration renewed
+	// before the ladder does anything, since control may have lost it with
+	// no line in the log to say so. A reconnect just handled counts as one.
+	rereg := class.RouteFailure() && m.runLen == 1 && m.reregisterDue(now)
 	m.mu.Unlock()
 	if m.opts.Repair != nil {
+		if rereg {
+			_ = m.opts.Repair.ReregisterFunnel(ctx)
+		}
 		switch repair {
 		case repairReopen:
 			_ = m.opts.Repair.ReopenListener(ctx)
@@ -258,6 +288,61 @@ func (m *Monitor) NoteFailure(class ProbeClass) {
 	}
 }
 
+// reregisterDue reports, with m.mu held, whether Funnel may be re-registered
+// at now, and if so enters it as done.
+func (m *Monitor) reregisterDue(now time.Time) bool {
+	if !m.lastRereg.IsZero() && now.Sub(m.lastRereg) < minReregisterGap {
+		return false
+	}
+	m.lastRereg = now
+	return true
+}
+
+// AfterReconnect acts on the reconnect lines seen since it last ran: Funnel's
+// registration is turned off and on, and the address is tested at once like
+// any other test. It reports whether it did, and how long to wait before the
+// next test. The lines are one reconnect however many there are, and a
+// reconnect within minReregisterGap of the last re-registration is dropped: the
+// first failed test and the repair ladder back it up.
+func (m *Monitor) AfterReconnect(ctx context.Context, host string) (time.Duration, bool) {
+	m.mu.Lock()
+	pending := m.pendingReconnect
+	m.pendingReconnect = false
+	due := pending && m.reregisterDue(m.opts.Now())
+	m.mu.Unlock()
+	if !due {
+		return m.Due(), false
+	}
+	if m.opts.Repair != nil {
+		_ = m.opts.Repair.ReregisterFunnel(ctx)
+	}
+	return m.test(ctx, host), true
+}
+
+// ReconnectPending reports that a reconnect line has been seen and not acted
+// on.
+func (m *Monitor) ReconnectPending() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pendingReconnect
+}
+
+// Reconnects wakes whoever serves when a reconnect line is seen.
+func (m *Monitor) Reconnects() <-chan struct{} { return m.reconnected }
+
+// ForgetReconnects drops the reconnect lines seen so far, for a session that
+// is only now beginning to serve: the lines a node logs while it starts are
+// not a reconnect of a registration it has yet to make.
+func (m *Monitor) ForgetReconnects() {
+	m.mu.Lock()
+	m.pendingReconnect = false
+	m.mu.Unlock()
+	select {
+	case <-m.reconnected:
+	default:
+	}
+}
+
 // Apply returns o with the monitor's facts filled in.
 func (m *Monitor) Apply(o Observation) Observation {
 	m.mu.Lock()
@@ -327,6 +412,8 @@ func (m *Monitor) ObserveLog(line string) {
 		key = countIngressDenied
 	case strings.Contains(line, "Handshake did not complete"):
 		key = countHandshake
+	case strings.Contains(line, lineMapEnded), strings.Contains(line, lineDialPlan):
+		key = countReconnect
 	default:
 		return
 	}
@@ -334,5 +421,12 @@ func (m *Monitor) ObserveLog(line string) {
 	defer m.mu.Unlock()
 	if m.counts[key] < MaxCount {
 		m.counts[key]++
+	}
+	if key == countReconnect {
+		m.pendingReconnect = true
+		select {
+		case m.reconnected <- struct{}{}:
+		default:
+		}
 	}
 }
