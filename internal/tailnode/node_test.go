@@ -274,12 +274,16 @@ type fakeTailnet struct {
 	result      ProbeClass
 	cur         *fakeNode
 	loginStarts int
+	nodeLogf    func(string, ...any) // the log hook the node handed the running server
+	funnelOn    bool                 // whether the server's serve config allows Funnel
+	offTimes    []time.Time          // when Funnel was switched off
 
 	probes   atomic.Int64
 	stateCh  chan string
 	sleeping chan time.Duration
 	release  chan struct{}
 	nextAsk  chan struct{}
+	evNotify chan struct{} // a nudge for every event the fake logs
 }
 
 func newFakeTailnet(t *testing.T) *fakeTailnet {
@@ -288,6 +292,7 @@ func newFakeTailnet(t *testing.T) *fakeTailnet {
 		allowed: true, result: ProbeNameNotPublished,
 		stateCh: make(chan string, 1024), sleeping: make(chan time.Duration, 1024),
 		release: make(chan struct{}), nextAsk: make(chan struct{}, 1024),
+		evNotify: make(chan struct{}, 1024),
 	}
 }
 
@@ -295,6 +300,10 @@ func (tn *fakeTailnet) event(s string) {
 	tn.mu.Lock()
 	tn.events = append(tn.events, s)
 	tn.mu.Unlock()
+	select {
+	case tn.evNotify <- struct{}{}:
+	default:
+	}
 }
 
 func (tn *fakeTailnet) log() []string {
@@ -376,8 +385,9 @@ func (tn *fakeTailnet) probe(_ context.Context, h string) ProbeClass {
 	return tn.result
 }
 
-func (tn *fakeTailnet) start(dir, hostname string, _ func(string, ...any)) (nodeAPI, error) {
+func (tn *fakeTailnet) start(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
 	tn.mu.Lock()
+	tn.nodeLogf = logf
 	tn.starts = append(tn.starts, startArgs{dir, hostname})
 	n := len(tn.starts)
 	f := &fakeNode{tn: tn, gen: n, notes: make(chan ipn.Notify, 16), closed: make(chan struct{})}
@@ -522,12 +532,35 @@ func (f *fakeNode) ListenFunnel(context.Context) (net.Listener, error) {
 	if f.tn.firstListen.IsZero() {
 		f.tn.firstListen = f.tn.clock.Now()
 	}
+	f.tn.funnelOn = true
 	f.tn.events = append(f.tn.events, fmt.Sprintf("listen-ok#%d", f.gen))
 	f.tn.mu.Unlock()
 	return &fakeListener{done: make(chan struct{})}, nil
 }
 
 func (f *fakeNode) WarmCertificate(context.Context, string) {}
+
+// SetFunnelAllowed switches the AllowFunnel entry of the serve config. The
+// listener stays open through it. Setting the state the config is already in is
+// the unchanged re-apply that Tailscale ignores, so it is reported.
+func (f *fakeNode) SetFunnelAllowed(_ context.Context, allowed bool) error {
+	f.tn.mu.Lock()
+	same := f.tn.funnelOn == allowed
+	f.tn.funnelOn = allowed
+	if !allowed {
+		f.tn.offTimes = append(f.tn.offTimes, f.tn.clock.Now())
+	}
+	f.tn.mu.Unlock()
+	if same {
+		f.tn.t.Errorf("Funnel set to %v while the serve config already had it so: an unchanged config", allowed)
+	}
+	if allowed {
+		f.tn.event(fmt.Sprintf("funnel-on#%d", f.gen))
+	} else {
+		f.tn.event(fmt.Sprintf("funnel-off#%d", f.gen))
+	}
+	return nil
+}
 
 func (f *fakeNode) StartLogin(context.Context) error {
 	f.tn.mu.Lock()
@@ -910,4 +943,276 @@ func tailscaleTextForTest(t *testing.T) string {
 		t.Fatal("the node can funnel; the check cannot produce an error text")
 	}
 	return err.Error()
+}
+
+// The tests below follow a node whose control connection drops and returns.
+// Tailscale's servers can lose a node's Funnel registration across such a
+// reconnect, and the node's own log is the only place it says so. The fake
+// records every change of the serve config, so these tests can show that the
+// registration is switched off and on, in order, and left alone otherwise.
+// Whether the real servers then take the node back needs a real tailnet and is
+// not proven here.
+
+const (
+	// reregisterWithin is how long after a reconnect line the node may take to
+	// re-register Funnel.
+	reregisterWithin = 10 * time.Second
+	// reregisterGap is the least time between two re-registrations.
+	reregisterGap = 30 * time.Second
+)
+
+var reconnectLogLines = []string{"PollNetMap: EOF", "netmap: got new dial plan from control"}
+
+// nodeLog is a line the running Tailscale server logs through the hook the
+// node gave it.
+func (tn *fakeTailnet) nodeLog(format string, args ...any) {
+	tn.t.Helper()
+	tn.mu.Lock()
+	logf := tn.nodeLogf
+	tn.mu.Unlock()
+	if logf == nil {
+		tn.t.Fatal("the node gave the server no log hook")
+	}
+	tn.event("log:" + format)
+	logf(format, args...)
+}
+
+// runReady starts the node and returns once its address answers and its
+// session is waiting for the next thing to do.
+func (tn *fakeTailnet) runReady() *Node {
+	tn.t.Helper()
+	tn.setResult(ProbeOK)
+	n := tn.run()
+	tn.waitState("running")
+	tn.settle(reregisterWithin)
+	return n
+}
+
+// settle presses Try Again and returns when that test is done. The node's
+// session takes what reached it in order, so a log line sent before the press
+// has been acted on by the time settle returns. A wait the node makes on the
+// way is released, and a wait longer than limit fails the test.
+func (tn *fakeTailnet) settle(limit time.Duration) {
+	tn.t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- tn.node.TryAgain(context.Background()) }()
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				tn.t.Fatalf("TryAgain: %v", err)
+			}
+			return
+		case d := <-tn.sleeping:
+			if d > limit {
+				tn.t.Fatalf("the node waited %v, want at most %v; events %v", d, limit, tn.log())
+			}
+			tn.letGo()
+		case <-time.After(hangCeiling):
+			tn.t.Fatalf("TryAgain never returned; events %v", tn.log())
+		}
+	}
+}
+
+// count is how many events begin with prefix.
+func (tn *fakeTailnet) count(prefix string) int {
+	n := 0
+	for _, e := range tn.log() {
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func (tn *fakeTailnet) offs() []time.Time {
+	tn.mu.Lock()
+	defer tn.mu.Unlock()
+	return slices.Clone(tn.offTimes)
+}
+
+// TestNodeReRegistersFunnelWhenTheControlSessionReturns protects the repair a
+// person cannot make: when the node's own log says its control session ended
+// or came back, a serving node switches Funnel's registration off and on in
+// its serve config, without closing the listener or restarting, within ten
+// seconds, and tests the public address at once afterwards. The reconnect is
+// also counted for diagnostics. A node that ignores the line, re-applies the
+// config unchanged, restarts or reopens instead, tests before the toggle or
+// not at all, or waits longer than ten seconds fails it.
+func TestNodeReRegistersFunnelWhenTheControlSessionReturns(t *testing.T) {
+	for _, line := range reconnectLogLines {
+		t.Run(line, func(t *testing.T) {
+			tn := newFakeTailnet(t)
+			n := tn.runReady()
+			at := len(tn.log())
+			t0 := tn.clock.Now()
+			tn.nodeLog(line)
+			tn.settle(reregisterWithin)
+			evs := tn.log()[at:]
+			off, on := slices.Index(evs, "funnel-off#1"), slices.Index(evs, "funnel-on#1")
+			if off < 0 || on < off {
+				t.Fatalf("Funnel was not switched off and then on: %v", evs)
+			}
+			probes := 0
+			firstProbe := -1
+			for i, e := range evs[on:] {
+				if e == "probe" {
+					probes++
+					if firstProbe < 0 {
+						firstProbe = i
+					}
+				}
+			}
+			if probes != 2 {
+				t.Errorf("%d public tests after the toggle, want 2: one at once and the one the press made; %v", probes, evs)
+			}
+			for _, e := range evs[on : on+firstProbe] {
+				if strings.HasPrefix(e, "sleep:") {
+					t.Errorf("a wait between the toggle and its test: %v", evs)
+				}
+			}
+			if waited := tn.clock.Now().Sub(t0); waited > reregisterWithin {
+				t.Errorf("re-registered %v after the line, want within %v", waited, reregisterWithin)
+			}
+			if tn.count("start#") != 1 || tn.count("close#") != 0 || tn.count("listen-ok#") != 1 {
+				t.Errorf("the toggle restarted the node or reopened the listener: %v", tn.log())
+			}
+			if got := n.mon.Counts()["control_reconnect"]; got != 1 {
+				t.Errorf("control_reconnect = %d, want 1", got)
+			}
+			m, _ := statusJSON(t, n)
+			if counts, _ := m["ts_counts"].(map[string]any); counts["control_reconnect"] != float64(1) {
+				t.Errorf("ts_counts = %v, want control_reconnect 1", m["ts_counts"])
+			}
+			if m["ts_state"] != "running" {
+				t.Errorf("ts_state = %v after the toggle, want running", m["ts_state"])
+			}
+		})
+	}
+}
+
+// TestNodeReadsReconnectsFromTheFormatOnly protects what the node logs may
+// carry: a line is a reconnect by its format string, as the other counted
+// lines are, and never by the text it was formatted into, which can hold an
+// address or a peer. A node that searches the formatted text fails it; the
+// last step shows the real format still acts, so the first two are not
+// passing because nothing is wired.
+func TestNodeReadsReconnectsFromTheFormatOnly(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	tn.nodeLog("relay said: %s", "PollNetMap: EOF")
+	tn.nodeLog("%s", "netmap: got new dial plan from control")
+	tn.settle(reregisterWithin)
+	if got := n.mon.Counts()["control_reconnect"]; got != 0 || tn.count("funnel-") != 0 {
+		t.Fatalf("text inside an argument counted as a reconnect: count %d, events %v", got, tn.log())
+	}
+	tn.nodeLog("PollNetMap: EOF")
+	tn.settle(reregisterWithin)
+	if got := n.mon.Counts()["control_reconnect"]; got != 1 || tn.count("funnel-off") != 1 {
+		t.Errorf("the real line: count %d, events %v, want 1 and one toggle", got, tn.log())
+	}
+}
+
+// TestNodeReRegistersAtMostOncePerThirtySeconds protects the control server
+// and the node from a connection that keeps dropping: a minute of reconnect
+// lines never moves Funnel more than once in thirty seconds, and a reconnect
+// after the window is acted on again, once. A node that toggles per line, or
+// stops acting after the first, fails it.
+func TestNodeReRegistersAtMostOncePerThirtySeconds(t *testing.T) {
+	tn := newFakeTailnet(t)
+	tn.runReady()
+	tn.nodeLog(reconnectLogLines[0])
+	tn.settle(reregisterWithin)
+	if got := len(tn.offs()); got != 1 {
+		t.Fatalf("%d toggles for one reconnect, want 1", got)
+	}
+	for i := 0; i < 60; i++ {
+		tn.clock.advance(time.Second)
+		tn.nodeLog(reconnectLogLines[i%2])
+	}
+	// A node may hold the lines of the window for its end; that wait is
+	// released here, whatever its length within the window.
+	tn.settle(reregisterGap)
+	spaced := func() {
+		t.Helper()
+		offs := tn.offs()
+		for i := 1; i < len(offs); i++ {
+			if gap := offs[i].Sub(offs[i-1]); gap < reregisterGap {
+				t.Errorf("toggles %d and %d are %v apart, want at least %v", i, i+1, gap, reregisterGap)
+			}
+		}
+	}
+	spaced()
+	during := len(tn.offs())
+	if during > 3 {
+		t.Fatalf("%d toggles over a minute of flapping, want at most one per thirty seconds", during)
+	}
+	tn.clock.advance(reregisterGap + time.Second)
+	tn.nodeLog(reconnectLogLines[0])
+	tn.settle(reregisterWithin)
+	if got := len(tn.offs()); got != during+1 {
+		t.Errorf("%d toggles after a reconnect past the window, want %d", got, during+1)
+	}
+	spaced()
+}
+
+// TestNodeFirstFailedTestReRegistersBeforeTheLadder protects the quick repair
+// of a registration the servers lost with no log line to say so: the first
+// public test of a run that fails has Funnel switched off and on once, after
+// the failed test and before the ladder's first reopen; the later failures of
+// the run do not toggle again, and the ladder then reopens the listener as it
+// always did. A node that waits for three failures before any repair, toggles
+// on every failure, or lets the toggle replace the reopen fails it.
+func TestNodeFirstFailedTestReRegistersBeforeTheLadder(t *testing.T) {
+	tn := newFakeTailnet(t)
+	tn.runReady()
+	tn.setResult(ProbeRouteDropped)
+	at := len(tn.log())
+	tn.settle(reregisterWithin)
+	evs := tn.log()[at:]
+	probe, off, on := slices.Index(evs, "probe"), slices.Index(evs, "funnel-off#1"), slices.Index(evs, "funnel-on#1")
+	if probe < 0 || off < probe || on < off {
+		t.Fatalf("after the first failed test the order was %v, want the test, then Funnel off, then on", evs)
+	}
+	if tn.count("listen-ok#") != 1 || tn.count("start#") != 1 {
+		t.Errorf("the first failure reopened or restarted: %v", tn.log())
+	}
+	for i := 0; i < 2; i++ {
+		tn.clock.advance(reregisterGap + time.Second)
+		tn.settle(reregisterWithin)
+	}
+	if got := len(tn.offs()); got != 1 {
+		t.Errorf("%d toggles over three failed tests of one run, want 1", got)
+	}
+	if tn.count("listen-ok#") != 1 {
+		t.Errorf("the ladder reopened before the run was four minutes old: %v", tn.log())
+	}
+	tn.clock.advance(4 * time.Minute)
+	tn.settle(reregisterWithin)
+	if tn.count("listen-ok#") != 2 {
+		t.Errorf("the ladder did not reopen the listener once the address stopped answering: %v", tn.log())
+	}
+	if got := len(tn.offs()); got != 1 {
+		t.Errorf("%d toggles by the time the ladder acted, want 1", got)
+	}
+}
+
+// TestNodeReconnectTestFeedsTheMonitor protects the backstop when a
+// re-registration does not help: the test made after a reconnect is counted
+// and judged like any other, and a reconnect followed by a first failure in
+// the same instant moves Funnel once. A node that tests outside the monitor,
+// so a failure goes uncounted and the run never starts, or toggles for both
+// the reconnect and the failure, fails it.
+func TestNodeReconnectTestFeedsTheMonitor(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	tn.setResult(ProbeRouteDropped)
+	tn.nodeLog(reconnectLogLines[1])
+	tn.settle(reregisterWithin)
+	if got := len(tn.offs()); got != 1 {
+		t.Errorf("%d toggles for a reconnect whose test failed, want 1", got)
+	}
+	if got := n.mon.Counts()[ProbeRouteDropped.String()]; got != 2 {
+		t.Errorf("%d failed tests counted, want 2: the one after the reconnect and the press", got)
+	}
 }

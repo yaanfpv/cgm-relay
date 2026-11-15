@@ -474,10 +474,23 @@ func TestStateCarriesCounts(t *testing.T) {
 
 type fakeClock struct{ now time.Time }
 
+// repairLog records the repairs a monitor asks for. kinds holds the ladder's
+// steps only (reopen, restart); a Funnel re-registration is kept apart in
+// rereg, so what the ladder did stays readable on its own. order is every
+// re-registration and public test in the sequence they happened.
 type repairLog struct {
 	clock    *fakeClock
 	kinds    []string
 	restarts []time.Time
+	rereg    []time.Time
+	reregErr error
+	order    []string
+}
+
+func (r *repairLog) ReregisterFunnel(context.Context) error {
+	r.rereg = append(r.rereg, r.clock.now)
+	r.order = append(r.order, "reregister")
+	return r.reregErr
 }
 
 func (r *repairLog) ReopenListener(context.Context) error {
@@ -510,6 +523,7 @@ func newRig(t *testing.T) *rig {
 		Now: func() time.Time { return r.clock.now },
 		Probe: func(_ context.Context, h string) tailnode.ProbeClass {
 			r.probes++
+			r.rep.order = append(r.rep.order, "probe")
 			if h != host {
 				t.Errorf("probe asked about %q, want %q", h, host)
 			}
@@ -1005,6 +1019,281 @@ func TestMonitorTryAgain(t *testing.T) {
 	})
 }
 
+// reconnect has the monitor see one of the node's reconnect lines at d.
+func (r *rig) reconnect(d time.Duration, line string) {
+	r.at(d)
+	r.m.ObserveLog(line)
+}
+
+// afterReconnect asks the monitor at d to act on the reconnect lines it has
+// seen, as the node does when it is serving.
+func (r *rig) afterReconnect(d time.Duration) (time.Duration, bool) {
+	r.at(d)
+	return r.m.AfterReconnect(context.Background(), host)
+}
+
+// wantRereg fails the test unless Funnel was re-registered exactly at the
+// given offsets from epoch, in order.
+func (r *rig) wantRereg(offsets ...time.Duration) {
+	r.t.Helper()
+	var want []time.Time
+	for _, d := range offsets {
+		want = append(want, epoch.Add(d))
+	}
+	if !slices.Equal(r.rep.rereg, want) {
+		got := make([]time.Duration, 0, len(r.rep.rereg))
+		for _, at := range r.rep.rereg {
+			got = append(got, at.Sub(epoch))
+		}
+		r.t.Errorf("Funnel re-registered at %v, want %v", got, offsets)
+	}
+}
+
+// TestMonitorReregistersAfterAReconnect protects the repair itself: once the
+// node has logged that its control session ended or came back, the monitor
+// turns Funnel's registration off and on and then makes a public test at
+// once, and the test renews Ready like any other. Nothing seen means nothing
+// done. A monitor that leaves the registration alone, tests before it
+// re-registers, skips the test, or stops at a failed toggle fails it.
+func TestMonitorReregistersAfterAReconnect(t *testing.T) {
+	for _, line := range reconnectLines {
+		t.Run(line, func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			r.rep.order = nil
+			if _, ran := r.afterReconnect(0); ran || len(r.rep.order) != 0 {
+				t.Fatalf("with no reconnect seen: ran %v, did %v", ran, r.rep.order)
+			}
+			r.reconnect(0, line)
+			next, ran := r.afterReconnect(0)
+			if !ran {
+				t.Fatal("a reconnect was seen and nothing was re-registered")
+			}
+			r.wantRereg(0)
+			if want := []string{"reregister", "probe"}; !slices.Equal(r.rep.order, want) {
+				t.Errorf("sequence %v, want %v: off and on, then a test at once", r.rep.order, want)
+			}
+			if next != 2*time.Minute {
+				t.Errorf("next test in %v after an answered test, want 2m0s", next)
+			}
+			if st := r.status(); st["ts_state"] != "running" || st["ts_checked_at"] != stamp(0) {
+				t.Errorf("after the test: %v, want running checked at %s", st, stamp(0))
+			}
+			if len(r.rep.kinds) != 0 {
+				t.Errorf("ladder steps %v for a reconnect that the address survived", r.rep.kinds)
+			}
+			if _, ran := r.afterReconnect(time.Second); ran || len(r.rep.rereg) != 1 {
+				t.Errorf("the same reconnect acted twice: ran %v, %d re-registrations", ran, len(r.rep.rereg))
+			}
+		})
+	}
+	t.Run("a toggle that fails still gets its test", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.rep.order = nil
+		r.rep.reregErr = errors.New("serve config not written")
+		r.reconnect(0, lineMapEnded)
+		if _, ran := r.afterReconnect(0); !ran {
+			t.Fatal("a failed toggle ended the reconnect handling")
+		}
+		if want := []string{"reregister", "probe"}; !slices.Equal(r.rep.order, want) {
+			t.Errorf("sequence %v, want %v", r.rep.order, want)
+		}
+	})
+}
+
+// TestMonitorReregistersOncePerReconnectAndPerThirtySeconds protects the
+// control server and the node from a flapping connection: a burst of lines is
+// one reconnect, and however the lines fall, Funnel is never re-registered
+// twice within thirty seconds, while a reconnect after the window is acted on.
+// A monitor that toggles per line, or per reconnect with no window, fails it.
+func TestMonitorReregistersOncePerReconnectAndPerThirtySeconds(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	for i := 0; i < 1000; i++ {
+		r.reconnect(0, reconnectLines[i%2])
+	}
+	if _, ran := r.afterReconnect(0); !ran {
+		t.Fatal("a burst of reconnect lines was not acted on")
+	}
+	if _, ran := r.afterReconnect(0); ran {
+		t.Error("the burst was acted on twice")
+	}
+	r.wantRereg(0)
+
+	r.reconnect(10*time.Second, lineMapEnded)
+	if _, ran := r.afterReconnect(10 * time.Second); ran {
+		t.Error("a reconnect 10s after the last re-registration was acted on")
+	}
+	r.reconnect(29*time.Second, lineDialPlan)
+	if _, ran := r.afterReconnect(29 * time.Second); ran {
+		t.Error("a reconnect 29s after the last re-registration was acted on")
+	}
+	r.wantRereg(0)
+
+	r.reconnect(31*time.Second, lineMapEnded)
+	if _, ran := r.afterReconnect(31 * time.Second); !ran {
+		t.Fatal("a reconnect 31s after the last re-registration was not acted on")
+	}
+	r.wantRereg(0, 31*time.Second)
+	for i := 1; i < len(r.rep.rereg); i++ {
+		if gap := r.rep.rereg[i].Sub(r.rep.rereg[i-1]); gap < 30*time.Second {
+			t.Errorf("re-registrations %d and %d are %v apart, want at least 30s", i, i+1, gap)
+		}
+	}
+}
+
+// TestMonitorReregistrationKeepsTheLadder protects the backstop: a public
+// test made after a re-registration is an ordinary test. A run of failures it
+// belongs to is not restarted by it, a not-answering report is not lifted or
+// hidden by it, and the repair ladder takes its steps as it always did. A
+// re-registration that resets the run, or holds the ladder back, fails it.
+func TestMonitorReregistrationKeepsTheLadder(t *testing.T) {
+	t.Run("a failing run still reaches not answering on time", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.step(0, tailnode.ProbeRouteDropped)
+		r.step(100*time.Second, tailnode.ProbeRouteDropped)
+		r.wantRereg(0)
+		r.reconnect(150*time.Second, lineMapEnded)
+		r.probe = tailnode.ProbeRouteDropped
+		if _, ran := r.afterReconnect(150 * time.Second); !ran {
+			t.Fatal("the reconnect was not acted on")
+		}
+		r.wantRereg(0, 150*time.Second)
+		if got := r.state(); got != "running" || len(r.rep.kinds) != 0 {
+			t.Fatalf("after the third failure inside four minutes: state %q, ladder %v", got, r.rep.kinds)
+		}
+		r.step(240*time.Second, tailnode.ProbeRouteDropped)
+		if st := r.status(); st["ts_state"] != "not-answering" || st["ts_not_answering_since"] != stamp(0) {
+			t.Errorf("at four minutes: %v, want not-answering since %s, the run's first failure", st, stamp(0))
+		}
+		if want := []string{"reopen"}; !slices.Equal(r.rep.kinds, want) {
+			t.Fatalf("ladder %v, want %v", r.rep.kinds, want)
+		}
+		r.step(300*time.Second, tailnode.ProbeRouteDropped)
+		r.step(360*time.Second, tailnode.ProbeRouteDropped)
+		if want := []string{"reopen", "reopen", "restart"}; !slices.Equal(r.rep.kinds, want) {
+			t.Errorf("ladder %v, want %v", r.rep.kinds, want)
+		}
+		r.wantRereg(0, 150*time.Second)
+	})
+	t.Run("a reconnect while not answering neither lifts nor hides it", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.notAnswering()
+		r.wantRereg(0)
+		r.reconnect(250*time.Second, lineDialPlan)
+		r.probe = tailnode.ProbeRouteDropped
+		if _, ran := r.afterReconnect(250 * time.Second); !ran {
+			t.Fatal("the reconnect was not acted on")
+		}
+		r.wantRereg(0, 250*time.Second)
+		if st := r.status(); st["ts_state"] != "not-answering" || st["ts_not_answering_since"] != stamp(0) {
+			t.Errorf("after a failed test: %v, want not-answering since %s", st, stamp(0))
+		}
+		if want := []string{"reopen", "reopen"}; !slices.Equal(r.rep.kinds, want) {
+			t.Errorf("ladder %v, want %v: the failed test takes the next step", r.rep.kinds, want)
+		}
+		r.reconnect(300*time.Second, lineMapEnded)
+		r.probe = tailnode.ProbeOK
+		r.afterReconnect(300 * time.Second)
+		if st := r.status(); st["ts_state"] != "running" || st["ts_checked_at"] != stamp(300*time.Second) {
+			t.Errorf("after an answered test: %v, want running", st)
+		}
+		if len(r.rep.kinds) != 2 {
+			t.Errorf("ladder %v, want no step after an answer", r.rep.kinds)
+		}
+	})
+}
+
+// TestMonitorFirstFailedTestReregistersOnce protects the quick repair of a
+// dropped registration: the first failed public test of a run, on any route
+// failure class, has Funnel re-registered before the ladder does anything, and
+// the same run does not toggle again. The cadence and the ladder are as they
+// were. A monitor that waits for three failures, toggles on every failure, or
+// toggles for a failure that is the Mac's network or a tailnet name fails it.
+func TestMonitorFirstFailedTestReregistersOnce(t *testing.T) {
+	for _, class := range routeClasses {
+		t.Run(class.String(), func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			r.rep.order = nil
+			next := r.step(0, class)
+			r.wantRereg(0)
+			if want := []string{"probe", "reregister"}; !slices.Equal(r.rep.order, want) {
+				t.Errorf("sequence %v, want %v", r.rep.order, want)
+			}
+			if len(r.rep.kinds) != 0 || next != 30*time.Second {
+				t.Errorf("ladder %v, next test in %v, want no step and 30s", r.rep.kinds, next)
+			}
+			r.step(100*time.Second, class)
+			r.step(240*time.Second, class)
+			if want := []string{"reopen"}; !slices.Equal(r.rep.kinds, want) {
+				t.Errorf("ladder %v, want the first reopen once the run is four minutes old", r.rep.kinds)
+			}
+			r.wantRereg(0)
+		})
+	}
+	t.Run("a new run is a new first failure once thirty seconds have passed", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.step(0, tailnode.ProbeRouteDropped)
+		r.step(10*time.Second, tailnode.ProbeOK)
+		r.step(20*time.Second, tailnode.ProbeRouteDropped)
+		r.wantRereg(0)
+		r.step(40*time.Second, tailnode.ProbeOK)
+		r.step(100*time.Second, tailnode.ProbeRouteDropped)
+		r.wantRereg(0, 100*time.Second)
+	})
+	t.Run("a reconnect and a first failure share the window", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		r.reconnect(0, lineMapEnded)
+		r.probe = tailnode.ProbeRouteDropped
+		r.afterReconnect(0)
+		r.wantRereg(0)
+		r.step(5*time.Second, tailnode.ProbeOK)
+		r.step(10*time.Second, tailnode.ProbeRouteDropped)
+		r.wantRereg(0)
+	})
+	t.Run("not for the Mac's network, the node or a tailnet name", func(t *testing.T) {
+		type fail struct {
+			name        string
+			probe, node tailnode.ProbeClass
+		}
+		var fails []fail
+		for _, c := range macClasses {
+			fails = append(fails, fail{c.String(), c, tailnode.ProbeOK})
+		}
+		for _, c := range nodeClasses {
+			// A health warning explains nothing about a route failure, which
+			// stays one, so it is not part of this group.
+			if c != tailnode.ProbeNodeHealth {
+				fails = append(fails, fail{c.String(), tailnode.ProbeRouteDropped, c})
+			}
+		}
+		fails = append(fails, fail{"tailnet_address", tailnode.ProbeTailnetAddress, tailnode.ProbeOK})
+		for _, f := range fails {
+			r := newRig(t)
+			r.ready()
+			r.node = f.node
+			r.step(0, f.probe)
+			if len(r.rep.rereg) != 0 {
+				t.Errorf("%s: Funnel re-registered for a failure that is not the route's", f.name)
+			}
+		}
+	})
+	t.Run("not while the address answers", func(t *testing.T) {
+		r := newRig(t)
+		r.ready()
+		for i := 1; i <= 3; i++ {
+			r.step(time.Duration(i)*time.Minute, tailnode.ProbeOK)
+		}
+		r.wantRereg()
+	})
+}
+
 // TestMonitorCountsEachFailureClass protects diagnostics: every failure
 // class has its own count, named distinctly, so a pattern (all TLS, all
 // refused) can be read off a report.
@@ -1084,6 +1373,60 @@ func TestMonitorCountsAreBounded(t *testing.T) {
 	if got := r.m.Counts()["ingress_denied"]; got != tailnode.MaxCount {
 		t.Errorf("ingress_denied = %d after %d lines, want it held at %d", got, tailnode.MaxCount+10, tailnode.MaxCount)
 	}
+}
+
+// The two lines the node's control client logs when its map session ended or
+// came back. Each is a complete format string with no arguments.
+const (
+	lineMapEnded = "PollNetMap: EOF"
+	lineDialPlan = "netmap: got new dial plan from control"
+)
+
+var reconnectLines = []string{lineMapEnded, lineDialPlan}
+
+// TestMonitorCountsControlReconnects protects the first half of noticing a
+// reconnect: either of the two control-client lines is counted, under one
+// name, in the counts the status and the report carry, and nothing else is
+// kept. A monitor that ignores a line that triggers re-registration, counts
+// it under another name, or lets the count grow past the bound fails it.
+func TestMonitorCountsControlReconnects(t *testing.T) {
+	for _, line := range reconnectLines {
+		t.Run(line, func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			r.m.ObserveLog(line)
+			if got := r.m.Counts(); got["control_reconnect"] != 1 || len(got) != 1 {
+				t.Errorf("counts %v, want control_reconnect 1 and nothing else", got)
+			}
+			counts, _ := r.status()["ts_counts"].(map[string]any)
+			if counts["control_reconnect"] != float64(1) {
+				t.Errorf("ts_counts = %v, want control_reconnect 1", r.status()["ts_counts"])
+			}
+		})
+	}
+	t.Run("lines of other kinds add nothing", func(t *testing.T) {
+		r := newRig(t)
+		for _, line := range []string{
+			"PollNetMap: %v",
+			"controlclient: map response long-poll timed out!",
+			"magicsock: derp-1 connected; connGen=1 to 198.51.100.1:443",
+			"",
+		} {
+			r.m.ObserveLog(line)
+		}
+		if got := r.m.Counts(); len(got) != 0 {
+			t.Errorf("counts %v after lines that are not reconnects, want none", got)
+		}
+	})
+	t.Run("the count is bounded", func(t *testing.T) {
+		r := newRig(t)
+		for i := 0; i < tailnode.MaxCount+10; i++ {
+			r.m.ObserveLog(lineMapEnded)
+		}
+		if got := r.m.Counts()["control_reconnect"]; got != tailnode.MaxCount {
+			t.Errorf("control_reconnect = %d after %d lines, want it held at %d", got, tailnode.MaxCount+10, tailnode.MaxCount)
+		}
+	})
 }
 
 // TestMonitorStatusCarriesCounts protects the link from the monitor to the

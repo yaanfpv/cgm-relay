@@ -107,6 +107,13 @@ struct DiagnosticsReportTests {
         #expect(text.contains("name_not_published 7"))
     }
 
+    @Test("a reconnect of the node's control connection is counted under its own name")
+    func countsControlReconnects() {
+        let text = report(routeCounts: ["control_reconnect": 5, "relay.example-tailnet.ts.net": 11])
+        #expect(text.contains("control_reconnect 5"))
+        #expect(!text.contains("relay.example-tailnet"))
+    }
+
     @Test("a Tailscale error shows only as one of its three classes")
     func carriesOnlyTheErrorClass() {
         for cls in ["listen_failed", "https_disabled", "node_attribute_missing"] {
