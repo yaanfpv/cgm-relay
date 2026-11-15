@@ -29,6 +29,11 @@ const (
 	restartGap           = 5 * time.Minute
 	restartsPerHour      = 3
 
+	// A Try Again re-registers Funnel at most once in pressGap and
+	// pressesPerHour times in an hour.
+	pressGap       = 5 * time.Minute
+	pressesPerHour = 3
+
 	// minReregisterGap is the least time between two re-registrations of Funnel.
 	minReregisterGap = 30 * time.Second
 )
@@ -83,17 +88,23 @@ type MonitorOptions struct {
 type Monitor struct {
 	opts MonitorOptions
 
-	mu       sync.Mutex
-	counts   map[string]int
-	lastOK   time.Time
-	streak   int // tests in a row that were neither a success nor neutral
-	runLen   int // route failures in the current run
-	runStart time.Time
-	na       time.Time // zero while the address answers
-	waiting  bool
-	rung     int // reopens done since the last restart or success
-	restarts []time.Time
-	nextAt   time.Time
+	mu        sync.Mutex
+	counts    map[string]int
+	lastOK    time.Time
+	streak    int // tests in a row that were neither a success nor neutral
+	runLen    int // route failures in the current run
+	runStart  time.Time
+	na        time.Time // zero while the address answers
+	waiting   bool
+	rung      int // reopens done since the last restart or success
+	restarts  []time.Time
+	nextAt    time.Time
+	presses   []time.Time // the re-registrations Try Again made, apart from the restart ledger
+	lastPress time.Time
+	// afterRestart is set by a restart and cleared by the first re-registration
+	// that follows it, which a failed test makes before the ladder may restart
+	// again.
+	afterRestart bool
 
 	// pendingReconnect is set by a reconnect line and taken by AfterReconnect.
 	// reconnected wakes the serving session, and holds one wake so a line is
@@ -150,11 +161,14 @@ func (m *Monitor) test(ctx context.Context, host string) time.Duration {
 		m.counts[ProbeNodeHealth.String()]++
 	}
 	now := m.opts.Now()
+	restarted := m.afterRestart
 	next, repair := m.record(class, now)
 	// The first route failure of a run has Funnel's registration renewed
 	// before the ladder does anything, since control may have lost it with
-	// no line in the log to say so. A reconnect just handled counts as one.
-	rereg := class.RouteFailure() && m.runLen == 1 && m.reregisterDue(now)
+	// no line in the log to say so, and so does the first failed test on a node
+	// that was just restarted. A reconnect just handled, or a press's
+	// re-registration just made, counts as one.
+	rereg := class.RouteFailure() && (m.runLen == 1 || restarted) && m.firstFailureDue(now)
 	m.mu.Unlock()
 	if m.opts.Repair != nil {
 		if rereg {
@@ -231,10 +245,11 @@ func (m *Monitor) nextRepair(now time.Time) repairKind {
 		m.rung++
 		return repairReopen
 	}
-	if !m.restartAllowed(now) {
+	if m.afterRestart || !m.restartAllowed(now) {
 		return repairNone
 	}
 	m.restarts = append(m.restarts, now)
+	m.afterRestart = true
 	m.rung = 0
 	return repairRestart
 }
@@ -255,7 +270,7 @@ func (m *Monitor) restartAllowed(now time.Time) bool {
 
 // AllowRestart reports whether the limits allow restarting the node now, and
 // if so enters the restart in the ledger the repair ladder also reads, so a
-// restart that a person asked for counts against the ladder and the reverse.
+// restart made on either's account counts against the other.
 func (m *Monitor) AllowRestart() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -268,11 +283,35 @@ func (m *Monitor) AllowRestart() bool {
 }
 
 // RecordRestart enters a restart the limits did not decide, so that later
-// repairs see it.
+// repairs see it, and has the first failed test after it re-register Funnel.
 func (m *Monitor) RecordRestart() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.restarts = append(m.restarts, m.opts.Now())
+	m.afterRestart = true
+}
+
+// AllowPress reports whether a Try Again may re-register Funnel now, and if so
+// enters it in the ledger of presses: at most one in pressGap and
+// pressesPerHour in an hour. The ledger is separate from the restarts'.
+func (m *Monitor) AllowPress() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.opts.Now()
+	recent := m.presses[:0]
+	for _, t := range m.presses {
+		if now.Sub(t) < time.Hour {
+			recent = append(recent, t)
+		}
+	}
+	m.presses = recent
+	n := len(recent)
+	if n >= pressesPerHour || (n > 0 && now.Sub(recent[n-1]) < pressGap) {
+		return false
+	}
+	m.presses = append(m.presses, now)
+	m.lastPress = now
+	return true
 }
 
 // NoteFailure counts a failed test that does not feed the run of failures,
@@ -295,6 +334,22 @@ func (m *Monitor) reregisterDue(now time.Time) bool {
 		return false
 	}
 	m.lastRereg = now
+	return true
+}
+
+// firstFailureDue reports, with m.mu held, whether a failed test may
+// re-register Funnel at now, and if so enters it as done. A re-registration
+// within minReregisterGap of the last, or of a press's, is the one that
+// failed test would make, so it is not made twice.
+func (m *Monitor) firstFailureDue(now time.Time) bool {
+	if !m.lastPress.IsZero() && now.Sub(m.lastPress) < minReregisterGap {
+		m.afterRestart = false
+		return false
+	}
+	if !m.reregisterDue(now) {
+		return false
+	}
+	m.afterRestart = false
 	return true
 }
 

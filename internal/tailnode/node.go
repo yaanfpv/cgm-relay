@@ -144,13 +144,6 @@ type Node struct {
 	cur      *openListener
 	read     *ipnstate.Status // the status the last test read, and its error
 	readErr  error
-	// funnelWasOff is set when a read found Funnel not allowed and cleared
-	// when a later read finds it allowed, which is the one change that has the
-	// node register again.
-	funnelWasOff bool
-	// pendingTry is a Try Again that restarted the node and is answered once
-	// the new server has made its test.
-	pendingTry chan struct{}
 }
 
 // Start begins bringing the node up in the background and returns at once;
@@ -239,11 +232,13 @@ func (n *Node) TryAgain(ctx context.Context) error {
 
 // Restart brings the node down and up again on the same state folder, and
 // returns once the new server has started or ctx is done. The sign-in and key
-// are kept because the folder is.
+// are kept because the folder is. The first failed test after it registers
+// Funnel again.
 func (n *Node) Restart(ctx context.Context) error {
 	n.mu.Lock()
 	up := n.nextUp
 	n.mu.Unlock()
+	n.mon.RecordRestart()
 	n.requestRestart()
 	select {
 	case <-up:
@@ -283,6 +278,23 @@ const reregisterPause = 2 * time.Second
 // the node tells control afresh that it has Funnel on. The listener is not
 // touched, and Funnel is always put back, even when the wait is cut short.
 func (n *Node) reregister(ctx context.Context) error {
+	return n.reregisterWith(ctx, n.sleep)
+}
+
+// pressReregister is the re-registration a Try Again makes before its test,
+// when the press limits allow one, and reports whether it was made. Its pause
+// is a plain wait, so the test that follows is not held behind the node's
+// scheduled waits.
+func (n *Node) pressReregister(ctx context.Context) bool {
+	if !n.mon.AllowPress() {
+		return false
+	}
+	_ = n.reregisterWith(ctx, sleep)
+	return true
+}
+
+// reregisterWith is reregister with the wait between the two changes given.
+func (n *Node) reregisterWith(ctx context.Context, pause func(context.Context, time.Duration) bool) error {
 	n.mu.Lock()
 	api := n.api
 	n.mu.Unlock()
@@ -292,7 +304,7 @@ func (n *Node) reregister(ctx context.Context) error {
 	if err := api.SetFunnelAllowed(ctx, false); err != nil {
 		return err
 	}
-	paused := n.sleep(ctx, reregisterPause)
+	paused := pause(ctx, reregisterPause)
 	rctx := ctx
 	if !paused {
 		var cancel context.CancelFunc
@@ -778,7 +790,7 @@ type openListener struct {
 }
 
 // open turns Funnel on and serves the relay on it. It returns false when ctx
-// is done, or when the node is being restarted to register again.
+// is done.
 func (n *Node) open(ctx context.Context, api nodeAPI) (*openListener, bool) {
 	ln, ok := n.listen(ctx, api)
 	if !ok {
@@ -850,22 +862,6 @@ func policyOK(st *ipnstate.Status) bool {
 	return len(st.CertDomains) > 0 && st.Self != nil && ipn.CheckFunnelAccess(443, st.Self) == nil
 }
 
-// funnelTurnedOn records what a policy read says and reports whether Funnel
-// is allowed now after a read that found it not allowed. A node whose policy
-// changed while it ran is not known to the Funnel relays until it registers
-// again, so that is the one change that has the node restart.
-func (n *Node) funnelTurnedOn(allowed bool) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if !allowed {
-		n.funnelWasOff = true
-		return false
-	}
-	was := n.funnelWasOff
-	n.funnelWasOff = false
-	return was
-}
-
 // nodeHealth is what the status says about the node itself.
 func nodeHealth(st *ipnstate.Status, err error) ProbeClass {
 	switch {
@@ -934,7 +930,6 @@ func (n *Node) session(ctx context.Context, api nodeAPI) {
 	read := func() (string, bool) {
 		st, err := n.refresh(ctx, api)
 		if err == nil && !policyOK(st) {
-			n.funnelTurnedOn(false)
 			return "", false
 		}
 		n.mu.Lock()
@@ -1003,14 +998,11 @@ func (n *Node) session(ctx context.Context, api nodeAPI) {
 // reports whether one was. A new public name can take minutes to exist and a
 // relay can drop a connection meanwhile, so no failure here ends the wait; the
 // state turns to not reachable by its own age. A person who presses Try Again
-// has the node registered again, within the restart limits, and tested at
-// once.
+// has Funnel registered again on the running node, within the press limits,
+// and tested at once.
 func (n *Node) publish(ctx context.Context, api nodeAPI) bool {
 	wait := publishFirst
-	n.mu.Lock()
-	try := n.pendingTry
-	n.pendingTry = nil
-	n.mu.Unlock()
+	var try chan struct{}
 	first := true
 	for {
 		if !first && try == nil {
@@ -1020,14 +1012,10 @@ func (n *Node) publish(ctx context.Context, api nodeAPI) bool {
 			if try, ok = n.waitOrTry(ctx, d); !ok {
 				return false
 			}
-			if try != nil && n.mon.AllowRestart() {
-				n.mu.Lock()
-				n.pendingTry = try
-				n.mu.Unlock()
+			if try != nil && n.pressReregister(ctx) {
 				// Registering again starts the wait over.
-				n.update(func(o *Observation) { o.PublishingSince = time.Time{} })
-				n.requestRestart()
-				return false
+				now := n.now()
+				n.update(func(o *Observation) { o.PublishingSince = now })
 			}
 		}
 		first = false
@@ -1099,8 +1087,10 @@ func (n *Node) waitOrTry(ctx context.Context, d time.Duration) (chan struct{}, b
 
 // listen turns Funnel on, retrying on a short backoff while it is refused,
 // and keeping the text of each refusal for the person. It returns false when
-// ctx is done, or when Funnel has just become allowed on a node that was
-// running without it, which is restarted to register again.
+// ctx is done. A node that ran while Funnel was not allowed listens again on
+// the same running node once it is, and is never restarted for it: a restart
+// just before registering lets the server's cleanup of the old session remove
+// the new one's registration.
 //
 // The listener is not Funnel-only: a phone that also runs Tailscale resolves
 // the public name to the node's tailnet address, and a Funnel-only listener
@@ -1108,7 +1098,7 @@ func (n *Node) waitOrTry(ctx context.Context, d time.Duration) (chan struct{}, b
 func (n *Node) listen(ctx context.Context, api nodeAPI) (net.Listener, bool) {
 	wait := retryFirst
 	for {
-		st, err := n.refresh(ctx, api)
+		_, err := n.refresh(ctx, api)
 		if err != nil {
 			// Without a current read the node cannot be told to listen.
 			if !n.sleep(ctx, wait) {
@@ -1116,11 +1106,6 @@ func (n *Node) listen(ctx context.Context, api nodeAPI) (net.Listener, bool) {
 			}
 			wait = min(wait*2, retryMax)
 			continue
-		}
-		if n.funnelTurnedOn(policyOK(st)) {
-			n.mon.RecordRestart()
-			n.requestRestart()
-			return nil, false
 		}
 		fr, qerr := api.QueryFunnel(ctx)
 		funnelURL := ""
