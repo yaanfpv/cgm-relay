@@ -69,7 +69,7 @@ public enum DiagnosticsReport {
     private static let errorClasses = ["listen_failed", "https_disabled", "node_attribute_missing"]
 
     private static let countNames = [
-        "ingress_denied", "handshake",
+        "ingress_denied", "handshake", "control_reconnect",
         "dropped_during_tls", "tls_failure", "server_error", "name_not_published",
         "dns_failure", "no_route", "connect_refused", "connect_timeout",
         "tailnet_address", "node_offline", "node_unhealthy", "status_read_failed",

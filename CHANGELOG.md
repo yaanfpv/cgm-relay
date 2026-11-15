@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- The built-in Tailscale address no longer says Ready while it has stopped answering: Settings shows when it was last checked, says when it stops answering and reconnects by itself, waits quietly while your Mac is offline, has a Try Again button, and shows stopped after you stop CGM Relay. Setup now waits while Tailscale publishes a new address, up to 15 minutes, instead of failing after a couple of minutes, shows Tailscale's own error if it gives one, and warns you in Settings before your Tailscale sign-in expires, with a button to sign in again. Copy Diagnostics now includes counts of what went wrong.
+- The built-in Tailscale address no longer says Ready while it has stopped answering: Settings shows when it was last checked, says when it stops answering and reconnects by itself, waits quietly while your Mac is offline, has a Try Again button, and shows stopped after you stop CGM Relay. Setup now waits while Tailscale publishes a new address, up to 15 minutes, instead of failing after a couple of minutes, shows Tailscale's own error if it gives one, and warns you in Settings before your Tailscale sign-in expires, with a button to sign in again. The address also re-registers itself within seconds when Tailscale's connection drops and comes back, instead of staying unreachable. Copy Diagnostics now includes counts of what went wrong.
 - Keeping the Mac awake no longer fails when CGM Relay is busy.
 - Opening CGM Relay while it is already running brings the running copy forward instead of starting a second one.
 - A second copy started at the same moment can no longer undo the sign-in or keys the first one saved.
