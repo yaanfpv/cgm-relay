@@ -335,7 +335,7 @@ struct BuiltInRouteStatePublishingTests {
         #expect(BuiltInRouteState.tailscaleErrorText(from: before) == nil)
         let after = BuiltInStatus(state: "publishing", publicHost: host, tailscaleError: text)
         #expect(BuiltInRouteState.tailscaleErrorText(from: after) == nil)
-        let answered = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked, tailscaleError: text)
+        let answered = BuiltInStatus(state: "running", publicHost: host, checkedAt: since, tailscaleError: text)
         #expect(BuiltInRouteState.tailscaleErrorText(from: answered) == nil)
     }
 
