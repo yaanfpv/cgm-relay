@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -155,12 +156,24 @@ type statusOption func(*statusConfig)
 
 type statusConfig struct {
 	tailnode func() tailnode.Status
+	tryAgain func(context.Context) error
 }
 
 // withTailnode adds the built-in Tailscale route's status to GET /status.
 func withTailnode(status func() tailnode.Status) statusOption {
 	return func(c *statusConfig) { c.tailnode = status }
 }
+
+// withTailnodeTryAgain adds POST /tailscale/try-again, which makes a public
+// test of the built-in Tailscale address at once and takes the next repair
+// step if it fails.
+func withTailnodeTryAgain(tryAgain func(context.Context) error) statusOption {
+	return func(c *statusConfig) { c.tryAgain = tryAgain }
+}
+
+// tryAgainTimeout bounds one press of Try Again: a test can take as long as
+// its own attempt limit plus a repair.
+const tryAgainTimeout = 2 * time.Minute
 
 // pollerStatus is the subset of *poller.Poller the status handler needs:
 // just enough to read a health snapshot, so a test can hand it a fixed
@@ -216,12 +229,26 @@ func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}
+	tryAgain := http.NotFoundHandler()
+	if sc.tryAgain != nil {
+		tryAgain = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), tryAgainTimeout)
+			defer cancel()
+			if err := sc.tryAgain(ctx); err != nil {
+				http.Error(w, "relay: the public address is not being served", http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
 	if statusSecret == "" {
 		mux.HandleFunc("GET /status", statusRoute)
 		mux.Handle("POST /pairing", http.NotFoundHandler())
+		mux.Handle("POST /tailscale/try-again", http.NotFoundHandler())
 	} else {
 		mux.Handle("GET /status", requireStatusSecret(statusSecret, http.HandlerFunc(statusRoute)))
 		mux.Handle("POST /pairing", requireStatusSecret(statusSecret, pairing.MintHandler(pairings)))
+		mux.Handle("POST /tailscale/try-again", requireStatusSecret(statusSecret, tryAgain))
 	}
 	return requireLoopbackHost(mux)
 }

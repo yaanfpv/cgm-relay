@@ -3,6 +3,7 @@ package tailnode
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,11 +12,13 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tailscale.com/client/local"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail"
 	"tailscale.com/tsnet"
 )
@@ -37,9 +40,10 @@ const publicPort = ":443"
 const (
 	retryFirst = 3 * time.Second
 	retryMax   = 15 * time.Second
-	// recheckInterval is how often a running node checks that its tailnet
-	// still allows Funnel for it, so a policy change moves the state back.
-	recheckInterval = 2 * time.Minute
+	// settleWait is the least a session waits before its first test after
+	// the node came up again, so the test does not run against a node that is
+	// still bringing its listener and certificate up.
+	settleWait = retryMax
 	// publicAttemptTimeout bounds one request to the node's own address.
 	publicAttemptTimeout = 20 * time.Second
 	// loginURLGrace is how long a node that needs a sign-in may lack a
@@ -50,6 +54,10 @@ const (
 // publicCheckPath is answered without a token by the relay, and says only
 // that it is up.
 const publicCheckPath = "/api/v1/status.json"
+
+// ErrNotServing is what TryAgain reports while the public listener is not
+// serving, so there is nothing to test.
+var ErrNotServing = errors.New("tailnode: the public address is not serving")
 
 // Options configure a Node.
 type Options struct {
@@ -86,12 +94,21 @@ type Node struct {
 	started chan struct{} // closed once Start has returned
 	done    chan struct{} // closed when the run goroutine has ended
 
+	mon     *Monitor
+	serving atomic.Bool
+	tryCh   chan chan struct{} // a pending Try Again, answered when its test is done
+
 	mu       sync.Mutex
 	srv      *tsnet.Server
 	obs      Observation
 	key      string
 	since    time.Time
 	prevDone chan struct{} // the previous serving cycle's end
+	restart  context.CancelFunc
+	nextUp   chan struct{} // closed when the next server has started
+	cur      *openListener
+	read     *ipnstate.Status // the status the last test read, and its error
+	readErr  error
 }
 
 // Start begins bringing the node up in the background and returns at once;
@@ -103,10 +120,13 @@ func Start(opts Options) *Node {
 		now:     opts.now,
 		started: make(chan struct{}),
 		done:    make(chan struct{}),
+		tryCh:   make(chan chan struct{}, 1),
+		nextUp:  make(chan struct{}),
 	}
 	if n.now == nil {
 		n.now = time.Now
 	}
+	n.mon = NewMonitor(MonitorOptions{Now: n.now, Probe: NewPublicProbe(), Node: n.nodeCheck, Repair: nodeRepair{n}})
 	n.since = n.now()
 	ctx, cancel := context.WithCancel(context.Background())
 	n.cancel = cancel
@@ -117,10 +137,102 @@ func Start(opts Options) *Node {
 // Status is the node's current status.
 func (n *Node) Status() Status {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	o := n.obs
+	changed := n.settleLocked()
+	o := n.mon.Apply(n.obs)
 	o.InStateFor = n.now().Sub(n.since)
-	return State(o)
+	key := n.key
+	s := State(o)
+	n.mu.Unlock()
+	n.logState(changed, key)
+	return s
+}
+
+// settleLocked restarts the state's clock when the state has changed, whether
+// the observation or the monitor changed it, and reports whether it did.
+func (n *Node) settleLocked() bool {
+	key := State(n.mon.Apply(n.obs)).State
+	if key == n.key {
+		return false
+	}
+	n.key = key
+	n.since = n.now()
+	return true
+}
+
+func (n *Node) logState(changed bool, key string) {
+	if changed && n.opts.Logf != nil {
+		n.opts.Logf("built-in Tailscale: %s", key)
+	}
+}
+
+// TryAgain makes a public test at once and takes the next repair step if it
+// fails, then returns. It returns ErrNotServing while there is no listener to
+// test, and does nothing more when a press is already waiting.
+func (n *Node) TryAgain(ctx context.Context) error {
+	if !n.serving.Load() {
+		return ErrNotServing
+	}
+	done := make(chan struct{})
+	select {
+	case n.tryCh <- done:
+	default:
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.done:
+		return ErrNotServing
+	}
+}
+
+// Restart brings the node down and up again on the same state folder, and
+// returns once the new server has started or ctx is done. The sign-in and key
+// are kept because the folder is.
+func (n *Node) Restart(ctx context.Context) error {
+	n.mu.Lock()
+	up := n.nextUp
+	n.mu.Unlock()
+	n.requestRestart()
+	select {
+	case <-up:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.done:
+		return errors.New("tailnode: the node has stopped")
+	}
+}
+
+// requestRestart ends the running server's cycle so run starts a new one. It
+// does not wait, since the public test that asks for it runs inside that cycle.
+func (n *Node) requestRestart() {
+	n.mu.Lock()
+	cancel := n.restart
+	n.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// nodeCheck is the monitor's read of the node, from the status the session
+// read just before the test.
+func (n *Node) nodeCheck(context.Context) ProbeClass {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return nodeHealth(n.read, n.readErr)
+}
+
+// nodeRepair is the Monitor's way of repairing the node.
+type nodeRepair struct{ n *Node }
+
+func (r nodeRepair) ReopenListener(ctx context.Context) error { return r.n.reopen(ctx) }
+
+func (r nodeRepair) RestartNode(context.Context) error {
+	r.n.requestRestart()
+	return nil
 }
 
 // Close stops the node: the public server first, then the tailnet node. It
@@ -168,16 +280,10 @@ func (n *Node) Close() {
 func (n *Node) update(f func(*Observation)) {
 	n.mu.Lock()
 	f(&n.obs)
-	key := State(n.obs).State
-	changed := key != n.key
-	if changed {
-		n.key = key
-		n.since = n.now()
-	}
+	changed := n.settleLocked()
+	key := n.key
 	n.mu.Unlock()
-	if changed && n.opts.Logf != nil {
-		n.opts.Logf("built-in Tailscale: %s", key)
-	}
+	n.logState(changed, key)
 }
 
 func (n *Node) fail(format string, args ...any) {
@@ -206,34 +312,67 @@ func (n *Node) run(ctx context.Context) {
 	}
 	// The node's own logs stay on this Mac: logtail would otherwise upload them to Tailscale's log service.
 	logtail.Disable()
-	quiet := func(string, ...any) {}
 	// Port mapping probes the local network for a router (SSDP and the
 	// gateway), which makes macOS ask the person to allow local network
 	// access. Funnel and the public listener do not use it.
 	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
-	s := &tsnet.Server{
-		Dir:        n.opts.StateDir,
-		Hostname:   n.opts.Hostname,
-		ControlURL: n.opts.controlURL,
-		Logf:       quiet,
-		UserLogf:   quiet,
+	for first := true; ctx.Err() == nil; first = false {
+		// A server that is restarted keeps the folder, and with it the key.
+		s := &tsnet.Server{
+			Dir:        n.opts.StateDir,
+			Hostname:   n.opts.Hostname,
+			ControlURL: n.opts.controlURL,
+			Logf:       n.logLine,
+			UserLogf:   n.logLine,
+		}
+		gctx, gcancel := context.WithCancel(ctx)
+		n.mu.Lock()
+		n.srv = s
+		n.restart = gcancel
+		n.mu.Unlock()
+		err := s.Start()
+		closeStarted()
+		if err == nil {
+			var lc *local.Client
+			if lc, err = s.LocalClient(); err == nil {
+				n.mu.Lock()
+				close(n.nextUp)
+				n.nextUp = make(chan struct{})
+				n.mu.Unlock()
+				n.watch(gctx, lc, s)
+			}
+		}
+		gcancel()
+		n.mu.Lock()
+		n.restart = nil
+		n.mu.Unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			if first {
+				n.fail("Tailscale could not start: %v", err)
+				return
+			}
+			_ = s.Close()
+			if !sleep(ctx, retryMax) {
+				return
+			}
+			continue
+		}
+		// Only a restart ends the watch while ctx lives. The old server is
+		// closed before the new one takes the folder.
+		_ = s.Close()
+		n.update(func(o *Observation) {
+			o.Backend, o.LoginURL, o.NodeIPv4, o.CertDomains, o.FunnelURL = "", "", "", nil, ""
+			o.Listening, o.FunnelAllowed, o.PublicAnswered = false, false, false
+		})
 	}
-	n.mu.Lock()
-	n.srv = s
-	n.mu.Unlock()
-	err := s.Start()
-	closeStarted()
-	if err != nil {
-		n.fail("Tailscale could not start: %v", err)
-		return
-	}
-	lc, err := s.LocalClient()
-	if err != nil {
-		n.fail("Tailscale could not start: %v", err)
-		return
-	}
-	n.watch(ctx, lc, s)
 }
+
+// logLine receives the node's own log lines. Only the monitor's two counts
+// read them; nothing is formatted or kept, since a line can name an address.
+func (n *Node) logLine(format string, _ ...any) { n.mon.ObserveLog(format) }
 
 // prepareStateDir creates dir, or tightens it, to mode 0700 regardless of
 // the process umask: it holds the node's key.
@@ -376,12 +515,18 @@ func (n *Node) serve(ctx context.Context, lc *local.Client, s *tsnet.Server, pre
 }
 
 // refresh reads the node's addresses and the names it may get a certificate
-// for.
-func (n *Node) refresh(ctx context.Context, lc *local.Client) {
+// for. When the read fails nothing is changed and the error is returned, so a
+// caller never goes on as if the old values were current.
+func (n *Node) refresh(ctx context.Context, lc *local.Client) error {
 	st, err := lc.StatusWithoutPeers(ctx)
 	if err != nil {
-		return
+		return err
 	}
+	n.applyStatus(st)
+	return nil
+}
+
+func (n *Node) applyStatus(st *ipnstate.Status) {
 	ip := ""
 	for _, a := range st.TailscaleIPs {
 		if a.Is4() {
@@ -393,12 +538,21 @@ func (n *Node) refresh(ctx context.Context, lc *local.Client) {
 	n.update(func(o *Observation) { o.NodeIPv4, o.CertDomains = ip, domains })
 }
 
-// session listens for Funnel traffic, serves the relay on it and checks it,
-// until Funnel stops being allowed or ctx is done.
-func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
+// openListener is the public listener and the server on it, with the
+// handles a repair needs to open them again.
+type openListener struct {
+	lc     *local.Client
+	s      *tsnet.Server
+	srv    *http.Server
+	served chan struct{} // closed when srv has stopped serving
+}
+
+// open turns Funnel on and serves the relay on it. It returns false when ctx
+// is done.
+func (n *Node) open(ctx context.Context, lc *local.Client, s *tsnet.Server) (*openListener, bool) {
 	ln, ok := n.listen(ctx, lc, s)
 	if !ok {
-		return
+		return nil, false
 	}
 	srv := n.opts.NewServer(PublicHandler(n.opts.Handler))
 	// A request that fails on the public listener comes from the internet;
@@ -409,38 +563,149 @@ func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 		defer close(served)
 		_ = srv.Serve(LimitListener(ln, MaxPublicConns))
 	}()
-	defer func() {
-		sctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
-		defer cancel()
-		if srv.Shutdown(sctx) != nil {
-			_ = srv.Close()
-		}
-		<-served
-	}()
 	n.update(func(o *Observation) { o.Listening, o.FunnelAllowed, o.FunnelURL = true, true, "" })
+	return &openListener{lc: lc, s: s, srv: srv, served: served}, true
+}
 
-	if !n.waitPublic(ctx, lc) {
+func (l *openListener) stop() {
+	sctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancel()
+	if l.srv.Shutdown(sctx) != nil {
+		_ = l.srv.Close()
+	}
+	<-l.served
+}
+
+// reopen closes the public listener and opens it again. It runs inside the
+// session that is serving, which is where the monitor's repairs are made.
+func (n *Node) reopen(ctx context.Context) error {
+	n.mu.Lock()
+	old := n.cur
+	n.mu.Unlock()
+	if old == nil {
+		return ErrNotServing
+	}
+	old.stop()
+	n.update(func(o *Observation) { o.Listening = false })
+	fresh, ok := n.open(ctx, old.lc, old.s)
+	if !ok {
+		return ctx.Err()
+	}
+	n.mu.Lock()
+	n.cur = fresh
+	n.mu.Unlock()
+	return nil
+}
+
+func (n *Node) currentServed() <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.cur == nil {
+		return nil
+	}
+	return n.cur.served
+}
+
+// policyOK reports whether the node's tailnet still allows Funnel for it.
+func policyOK(st *ipnstate.Status) bool {
+	return len(st.CertDomains) > 0 && ipn.CheckFunnelAccess(443, st.Self) == nil
+}
+
+// nodeHealth is what the status says about the node itself.
+func nodeHealth(st *ipnstate.Status, err error) ProbeClass {
+	switch {
+	case err != nil || st == nil:
+		return ProbeStatusRead
+	case st.Self == nil || !st.Self.Online:
+		return ProbeNodeOffline
+	case len(st.Health) > 0:
+		return ProbeNodeHealth
+	}
+	return ProbeOK
+}
+
+// session listens for Funnel traffic, serves the relay on it and tests it,
+// until Funnel stops being allowed, the listener dies or ctx is done.
+func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
+	l, ok := n.open(ctx, lc, s)
+	if !ok {
 		return
 	}
-	// The public address answers; from here only a policy change or a dead
-	// listener ends the session.
-	t := time.NewTicker(recheckInterval)
+	n.mu.Lock()
+	n.cur = l
+	n.mu.Unlock()
+	defer func() {
+		n.mu.Lock()
+		cur := n.cur
+		n.cur = nil
+		n.mu.Unlock()
+		cur.stop()
+	}()
+
+	wait := settleWait
+	if n.mon.Answered() {
+		// The address has answered before, so the node's own first request
+		// is not repeated; the monitor's tests decide from here.
+		n.update(func(o *Observation) { o.PublicAnswered = true })
+		wait = max(n.mon.Due(), settleWait)
+	} else {
+		if !n.waitPublic(ctx, lc) {
+			return
+		}
+		n.mon.MarkAnswered()
+		wait = n.mon.Due()
+	}
+
+	n.serving.Store(true)
+	defer n.serving.Store(false)
+	t := time.NewTimer(wait)
 	defer t.Stop()
+	// test reads the status, ends the session if the tailnet no longer
+	// allows Funnel, and otherwise makes one test. It returns the wait before
+	// the next one and whether the session goes on.
+	test := func(try bool) (time.Duration, bool) {
+		st, err := lc.StatusWithoutPeers(ctx)
+		if err == nil {
+			if !policyOK(st) {
+				return 0, false
+			}
+			n.applyStatus(st)
+		}
+		// The monitor judges the node by this read, so a failed one is a
+		// failed test and never leaves the old state standing.
+		n.mu.Lock()
+		n.read, n.readErr = st, err
+		var host string
+		if len(n.obs.CertDomains) > 0 {
+			host = n.obs.CertDomains[0]
+		}
+		n.mu.Unlock()
+		if host == "" {
+			return n.mon.Due(), true
+		}
+		if try {
+			return n.mon.TryAgain(ctx, host), true
+		}
+		return n.mon.Step(ctx, host), true
+	}
 	for {
+		var try chan struct{}
 		select {
 		case <-ctx.Done():
 			return
-		case <-served:
+		case <-n.currentServed():
 			return
 		case <-t.C:
-			st, err := lc.StatusWithoutPeers(ctx)
-			if err != nil {
-				continue
-			}
-			if len(st.CertDomains) == 0 || ipn.CheckFunnelAccess(443, st.Self) != nil {
-				return
-			}
+		case try = <-n.tryCh:
 		}
+		d, ok := test(try != nil)
+		if try != nil {
+			close(try)
+		}
+		if !ok || ctx.Err() != nil {
+			return
+		}
+		t.Reset(d)
 	}
 }
 
@@ -453,7 +718,14 @@ func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 func (n *Node) listen(ctx context.Context, lc *local.Client, s *tsnet.Server) (net.Listener, bool) {
 	wait := retryFirst
 	for {
-		n.refresh(ctx, lc)
+		if n.refresh(ctx, lc) != nil {
+			// Without a current read the node cannot be told to listen.
+			if !sleep(ctx, wait) {
+				return nil, false
+			}
+			wait = min(wait*2, retryMax)
+			continue
+		}
 		fr, err := lc.QueryFeature(ctx, "funnel")
 		funnelURL := ""
 		if err == nil && !fr.Complete {
@@ -509,13 +781,14 @@ func (n *Node) waitPublic(ctx context.Context, lc *local.Client) bool {
 	}
 	defer client.CloseIdleConnections()
 	for {
-		n.refresh(ctx, lc)
-		n.mu.Lock()
 		var host string
-		if len(n.obs.CertDomains) > 0 {
-			host = n.obs.CertDomains[0]
+		if n.refresh(ctx, lc) == nil {
+			n.mu.Lock()
+			if len(n.obs.CertDomains) > 0 {
+				host = n.obs.CertDomains[0]
+			}
+			n.mu.Unlock()
 		}
-		n.mu.Unlock()
 		if host != "" {
 			// Issuing the first certificate takes tens of seconds; asking for
 			// it here, with its own time, keeps that wait out of the

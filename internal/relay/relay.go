@@ -169,7 +169,7 @@ func Run(ctx context.Context, cfg config.Config, opts ...Option) error {
 			Logf:      logger.Printf,
 		})
 		defer node.Close()
-		statusOpts = append(statusOpts, withTailnode(node.Status))
+		statusOpts = append(statusOpts, withTailnode(node.Status), withTailnodeTryAgain(node.TryAgain))
 	}
 
 	statusServer, err := startServer(cfg.StatusAddr, newStatusHandler(p, tracker, pairings, cfg.StatusSecret, statusOpts...))
