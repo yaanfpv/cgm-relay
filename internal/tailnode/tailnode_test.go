@@ -485,11 +485,17 @@ type repairLog struct {
 	rereg    []time.Time
 	reregErr error
 	order    []string
+	// afterReregister runs once a re-registration is done, so a test can
+	// change what the next public test finds.
+	afterReregister func()
 }
 
 func (r *repairLog) ReregisterFunnel(context.Context) error {
 	r.rereg = append(r.rereg, r.clock.now)
 	r.order = append(r.order, "reregister")
+	if r.afterReregister != nil {
+		r.afterReregister()
+	}
 	return r.reregErr
 }
 
@@ -1049,15 +1055,16 @@ func (r *rig) wantRereg(offsets ...time.Duration) {
 	}
 }
 
-// TestMonitorReregistersAfterAReconnect protects the repair itself: once the
-// node has logged that its control session ended or came back, the monitor
-// turns Funnel's registration off and on and then makes a public test at
-// once, and the test renews Ready like any other. Nothing seen means nothing
-// done. A monitor that leaves the registration alone, tests before it
-// re-registers, skips the test, or stops at a failed toggle fails it.
+// TestMonitorReregistersAfterAReconnect protects the repair order after a
+// reconnect: the monitor makes a public test at once, and the test renews
+// Ready like any other. Funnel's registration is left alone while the test
+// answers. Only a failed test turns it off and on, and the test is made again
+// at once. Nothing seen means nothing done. A monitor that toggles before the
+// first test, toggles for a test that answered, skips the test, leaves a failed
+// test to the ladder's slower schedule, or stops at a failed toggle fails it.
 func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 	for _, line := range reconnectLines {
-		t.Run(line, func(t *testing.T) {
+		t.Run(line+" answered", func(t *testing.T) {
 			r := newRig(t)
 			r.ready()
 			r.rep.order = nil
@@ -1067,12 +1074,12 @@ func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 			r.reconnect(0, line)
 			next, ran := r.afterReconnect(0)
 			if !ran {
-				t.Fatal("a reconnect was seen and nothing was re-registered")
+				t.Fatal("a reconnect was seen and nothing was tested")
 			}
-			r.wantRereg(0)
-			if want := []string{"reregister", "probe"}; !slices.Equal(r.rep.order, want) {
-				t.Errorf("sequence %v, want %v: off and on, then a test at once", r.rep.order, want)
+			if want := []string{"probe"}; !slices.Equal(r.rep.order, want) {
+				t.Errorf("sequence %v, want %v: a test at once and no toggle for an answer", r.rep.order, want)
 			}
+			r.wantRereg()
 			if next != 2*time.Minute {
 				t.Errorf("next test in %v after an answered test, want 2m0s", next)
 			}
@@ -1082,8 +1089,43 @@ func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 			if len(r.rep.kinds) != 0 {
 				t.Errorf("ladder steps %v for a reconnect that the address survived", r.rep.kinds)
 			}
+			if _, ran := r.afterReconnect(time.Second); ran || len(r.rep.order) != 1 {
+				t.Errorf("the same reconnect acted twice: ran %v, sequence %v", ran, r.rep.order)
+			}
+		})
+		t.Run(line+" failed", func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			r.rep.order = nil
+			r.reconnect(0, line)
+			r.probe = tailnode.ProbeRouteDropped
+			if _, ran := r.afterReconnect(0); !ran {
+				t.Fatal("a reconnect was seen and nothing was tested")
+			}
+			r.wantRereg(0)
+			if want := []string{"probe", "reregister", "probe"}; !slices.Equal(r.rep.order, want) {
+				t.Errorf("sequence %v, want %v: a test, then off and on, then a test at once", r.rep.order, want)
+			}
+			if len(r.rep.kinds) != 0 {
+				t.Errorf("ladder steps %v for a first failure", r.rep.kinds)
+			}
 			if _, ran := r.afterReconnect(time.Second); ran || len(r.rep.rereg) != 1 {
 				t.Errorf("the same reconnect acted twice: ran %v, %d re-registrations", ran, len(r.rep.rereg))
+			}
+		})
+		t.Run(line+" failed then answered after the toggle", func(t *testing.T) {
+			r := newRig(t)
+			r.ready()
+			r.rep.order = nil
+			r.reconnect(0, line)
+			r.probe = tailnode.ProbeRouteDropped
+			r.rep.afterReregister = func() { r.probe = tailnode.ProbeOK }
+			next, _ := r.afterReconnect(0)
+			if want := []string{"probe", "reregister", "probe"}; !slices.Equal(r.rep.order, want) {
+				t.Errorf("sequence %v, want %v", r.rep.order, want)
+			}
+			if st := r.status(); st["ts_state"] != "running" || st["ts_checked_at"] != stamp(0) || next != 2*time.Minute {
+				t.Errorf("after the repaired test: %v, next %v, want running checked at %s and 2m0s", st, next, stamp(0))
 			}
 		})
 	}
@@ -1093,10 +1135,11 @@ func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 		r.rep.order = nil
 		r.rep.reregErr = errors.New("serve config not written")
 		r.reconnect(0, lineMapEnded)
+		r.probe = tailnode.ProbeRouteDropped
 		if _, ran := r.afterReconnect(0); !ran {
 			t.Fatal("a failed toggle ended the reconnect handling")
 		}
-		if want := []string{"reregister", "probe"}; !slices.Equal(r.rep.order, want) {
+		if want := []string{"probe", "reregister", "probe"}; !slices.Equal(r.rep.order, want) {
 			t.Errorf("sequence %v, want %v", r.rep.order, want)
 		}
 	})
@@ -1104,12 +1147,16 @@ func TestMonitorReregistersAfterAReconnect(t *testing.T) {
 
 // TestMonitorReregistersOncePerReconnectAndPerThirtySeconds protects the
 // control server and the node from a flapping connection: a burst of lines is
-// one reconnect, and however the lines fall, Funnel is never re-registered
-// twice within thirty seconds, while a reconnect after the window is acted on.
-// A monitor that toggles per line, or per reconnect with no window, fails it.
+// one reconnect with one test, and however the lines fall, Funnel is never
+// re-registered twice within thirty seconds, while a failed test after a
+// reconnect past the window is acted on. Every reconnect is still tested at
+// once. A monitor that toggles per line, or per reconnect with no window, or
+// stops testing inside the window, fails it.
 func TestMonitorReregistersOncePerReconnectAndPerThirtySeconds(t *testing.T) {
 	r := newRig(t)
 	r.ready()
+	r.probe = tailnode.ProbeRouteDropped
+	r.rep.order = nil
 	for i := 0; i < 1000; i++ {
 		r.reconnect(0, reconnectLines[i%2])
 	}
@@ -1120,14 +1167,21 @@ func TestMonitorReregistersOncePerReconnectAndPerThirtySeconds(t *testing.T) {
 		t.Error("the burst was acted on twice")
 	}
 	r.wantRereg(0)
-
-	r.reconnect(10*time.Second, lineMapEnded)
-	if _, ran := r.afterReconnect(10 * time.Second); ran {
-		t.Error("a reconnect 10s after the last re-registration was acted on")
+	if want := []string{"probe", "reregister", "probe"}; !slices.Equal(r.rep.order, want) {
+		t.Errorf("a burst of lines made %v, want %v: one reconnect", r.rep.order, want)
 	}
-	r.reconnect(29*time.Second, lineDialPlan)
-	if _, ran := r.afterReconnect(29 * time.Second); ran {
-		t.Error("a reconnect 29s after the last re-registration was acted on")
+
+	for _, d := range []time.Duration{10 * time.Second, 29 * time.Second} {
+		line := lineMapEnded
+		if d > 10*time.Second {
+			line = lineDialPlan
+		}
+		before := len(r.rep.order)
+		r.reconnect(d, line)
+		r.afterReconnect(d)
+		if !slices.Contains(r.rep.order[before:], "probe") {
+			t.Errorf("a reconnect %v after the last re-registration was not tested: %v", d, r.rep.order[before:])
+		}
 	}
 	r.wantRereg(0)
 

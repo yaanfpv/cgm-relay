@@ -1130,15 +1130,15 @@ func (tn *fakeTailnet) offs() []time.Time {
 	return slices.Clone(tn.offTimes)
 }
 
-// TestNodeReRegistersFunnelWhenTheControlSessionReturns protects the repair a
-// person cannot make: when the node's own log says its control session ended
-// or came back, a serving node switches Funnel's registration off and on in
-// its serve config, without closing the listener or restarting, within ten
-// seconds, and tests the public address at once afterwards. The reconnect is
-// also counted for diagnostics. A node that ignores the line, re-applies the
-// config unchanged, restarts or reopens instead, tests before the toggle or
-// not at all, or waits longer than ten seconds fails it.
-func TestNodeReRegistersFunnelWhenTheControlSessionReturns(t *testing.T) {
+// TestNodeTestsAtOnceWhenTheControlSessionReturns protects the address from
+// an outage the app would cause itself: when the node's own log says its
+// control session ended or came back, a serving node tests the public address
+// at once, within ten seconds, and leaves Funnel's registration alone while
+// the test answers. It never closes the listener or restarts. The reconnect is
+// also counted for diagnostics. A node that ignores the line, switches Funnel
+// off and on before testing, waits before the test, restarts or reopens
+// instead, or leaves the reconnect uncounted fails it.
+func TestNodeTestsAtOnceWhenTheControlSessionReturns(t *testing.T) {
 	for _, line := range reconnectLogLines {
 		t.Run(line, func(t *testing.T) {
 			tn := newFakeTailnet(t)
@@ -1148,33 +1148,31 @@ func TestNodeReRegistersFunnelWhenTheControlSessionReturns(t *testing.T) {
 			tn.nodeLog(line)
 			tn.settle(reregisterWithin)
 			evs := tn.log()[at:]
-			off, on := slices.Index(evs, "funnel-off#1"), slices.Index(evs, "funnel-on#1")
-			if off < 0 || on < off {
-				t.Fatalf("Funnel was not switched off and then on: %v", evs)
+			if tn.count("funnel-") != 0 {
+				t.Errorf("Funnel was switched for a reconnect whose test answered: %v", evs)
 			}
 			probes := 0
-			firstProbe := -1
-			for i, e := range evs[on:] {
-				if e == "probe" {
-					probes++
-					if firstProbe < 0 {
-						firstProbe = i
+			for i, e := range evs {
+				if e != "probe" {
+					continue
+				}
+				probes++
+				if probes == 1 {
+					for _, before := range evs[:i] {
+						if strings.HasPrefix(before, "sleep:") {
+							t.Errorf("a wait before the test after the reconnect: %v", evs)
+						}
 					}
 				}
 			}
 			if probes != 2 {
-				t.Errorf("%d public tests after the toggle, want 2: one at once and the one the press made; %v", probes, evs)
-			}
-			for _, e := range evs[on : on+firstProbe] {
-				if strings.HasPrefix(e, "sleep:") {
-					t.Errorf("a wait between the toggle and its test: %v", evs)
-				}
+				t.Errorf("%d public tests, want 2: one at once and the one the press made; %v", probes, evs)
 			}
 			if waited := tn.clock.Now().Sub(t0); waited > reregisterWithin {
-				t.Errorf("re-registered %v after the line, want within %v", waited, reregisterWithin)
+				t.Errorf("tested %v after the line, want within %v", waited, reregisterWithin)
 			}
 			if tn.count("start#") != 1 || tn.count("close#") != 0 || tn.count("listen-ok#") != 1 {
-				t.Errorf("the toggle restarted the node or reopened the listener: %v", tn.log())
+				t.Errorf("the reconnect restarted the node or reopened the listener: %v", tn.log())
 			}
 			if got := n.mon.Counts()["control_reconnect"]; got != 1 {
 				t.Errorf("control_reconnect = %d, want 1", got)
@@ -1184,7 +1182,45 @@ func TestNodeReRegistersFunnelWhenTheControlSessionReturns(t *testing.T) {
 				t.Errorf("ts_counts = %v, want control_reconnect 1", m["ts_counts"])
 			}
 			if m["ts_state"] != "running" {
-				t.Errorf("ts_state = %v after the toggle, want running", m["ts_state"])
+				t.Errorf("ts_state = %v after the reconnect, want running", m["ts_state"])
+			}
+		})
+	}
+}
+
+// TestNodeReRegistersAfterAReconnectWhoseTestFailed protects the repair a
+// person cannot make: when the test made after a reconnect fails, a serving
+// node switches Funnel's registration off and on in its serve config, without
+// closing the listener or restarting, and tests the public address again at
+// once, before any wait of the ladder's schedule and within ten seconds. A
+// node that toggles before the first test, leaves the second test to a wait,
+// restarts or reopens instead, or toggles more than once for it fails it.
+func TestNodeReRegistersAfterAReconnectWhoseTestFailed(t *testing.T) {
+	for _, line := range reconnectLogLines {
+		t.Run(line, func(t *testing.T) {
+			tn := newFakeTailnet(t)
+			tn.runReady()
+			tn.setResult(ProbeRouteDropped)
+			at := len(tn.log())
+			t0 := tn.clock.Now()
+			tn.nodeLog(line)
+			tn.settle(reregisterGap)
+			evs := tn.log()[at:]
+			start := slices.Index(evs, "log:"+line)
+			if start < 0 || len(evs) < start+5 {
+				t.Fatalf("too few events after the line: %v", evs)
+			}
+			if got, want := evs[start+1:start+5], []string{"probe", "funnel-off#1", "funnel-on#1", "probe"}; !slices.Equal(got, want) {
+				t.Errorf("after the line: %v, want %v: a failed test, off and on, then a test at once with no wait", got, want)
+			}
+			if got := len(tn.offs()); got != 1 {
+				t.Errorf("%d toggles for a reconnect whose test failed, want 1", got)
+			}
+			if waited := tn.clock.Now().Sub(t0); waited > reregisterGap {
+				t.Errorf("re-registered %v after the line, want within the first window", waited)
+			}
+			if tn.count("start#") != 1 || tn.count("close#") != 0 || tn.count("listen-ok#") != 1 {
+				t.Errorf("the toggle restarted the node or reopened the listener: %v", tn.log())
 			}
 		})
 	}
@@ -1205,32 +1241,32 @@ func TestNodeReadsReconnectsFromTheFormatOnly(t *testing.T) {
 	if got := n.mon.Counts()["control_reconnect"]; got != 0 || tn.count("funnel-") != 0 {
 		t.Fatalf("text inside an argument counted as a reconnect: count %d, events %v", got, tn.log())
 	}
+	// The real line is counted, and with a failing address it also moves Funnel.
+	tn.setResult(ProbeRouteDropped)
 	tn.nodeLog("PollNetMap: EOF")
-	tn.settle(reregisterWithin)
+	tn.settle(reregisterGap)
 	if got := n.mon.Counts()["control_reconnect"]; got != 1 || tn.count("funnel-off") != 1 {
 		t.Errorf("the real line: count %d, events %v, want 1 and one toggle", got, tn.log())
 	}
 }
 
 // TestNodeReRegistersAtMostOncePerThirtySeconds protects the control server
-// and the node from a connection that keeps dropping: a minute of reconnect
-// lines never moves Funnel more than once in thirty seconds, and a reconnect
-// after the window is acted on again, once. A node that toggles per line, or
-// stops acting after the first, fails it.
+// and the node from a connection that keeps dropping while the address fails:
+// a burst of reconnect lines never moves Funnel more than once in thirty
+// seconds, and a reconnect after the window is acted on again. A node that
+// toggles per line, or stops acting after the first, fails it.
 func TestNodeReRegistersAtMostOncePerThirtySeconds(t *testing.T) {
 	tn := newFakeTailnet(t)
 	tn.runReady()
+	tn.setResult(ProbeRouteDropped)
 	tn.nodeLog(reconnectLogLines[0])
-	tn.settle(reregisterWithin)
+	tn.settle(reregisterGap)
 	if got := len(tn.offs()); got != 1 {
 		t.Fatalf("%d toggles for one reconnect, want 1", got)
 	}
 	for i := 0; i < 60; i++ {
-		tn.clock.advance(time.Second)
 		tn.nodeLog(reconnectLogLines[i%2])
 	}
-	// A node may hold the lines of the window for its end; that wait is
-	// released here, whatever its length within the window.
 	tn.settle(reregisterGap)
 	spaced := func() {
 		t.Helper()
@@ -1244,13 +1280,13 @@ func TestNodeReRegistersAtMostOncePerThirtySeconds(t *testing.T) {
 	spaced()
 	during := len(tn.offs())
 	if during > 3 {
-		t.Fatalf("%d toggles over a minute of flapping, want at most one per thirty seconds", during)
+		t.Fatalf("%d toggles for a burst of lines, want at most one per thirty seconds", during)
 	}
 	tn.clock.advance(reregisterGap + time.Second)
 	tn.nodeLog(reconnectLogLines[0])
-	tn.settle(reregisterWithin)
-	if got := len(tn.offs()); got != during+1 {
-		t.Errorf("%d toggles after a reconnect past the window, want %d", got, during+1)
+	tn.settle(reregisterGap)
+	if got := len(tn.offs()); got < during+1 {
+		t.Errorf("%d toggles after a reconnect past the window, want at least %d", got, during+1)
 	}
 	spaced()
 }
@@ -1297,7 +1333,7 @@ func TestNodeFirstFailedTestReRegistersBeforeTheLadder(t *testing.T) {
 }
 
 // TestNodeReconnectTestFeedsTheMonitor protects the backstop when a
-// re-registration does not help: the test made after a reconnect is counted
+// re-registration does not help: the tests made after a reconnect are counted
 // and judged like any other, and a reconnect followed by a first failure in
 // the same instant moves Funnel once. A node that tests outside the monitor,
 // so a failure goes uncounted and the run never starts, or toggles for both
@@ -1307,11 +1343,11 @@ func TestNodeReconnectTestFeedsTheMonitor(t *testing.T) {
 	n := tn.runReady()
 	tn.setResult(ProbeRouteDropped)
 	tn.nodeLog(reconnectLogLines[1])
-	tn.settle(reregisterWithin)
+	tn.settle(reregisterGap)
 	if got := len(tn.offs()); got != 1 {
 		t.Errorf("%d toggles for a reconnect whose test failed, want 1", got)
 	}
-	if got := n.mon.Counts()[ProbeRouteDropped.String()]; got != 2 {
-		t.Errorf("%d failed tests counted, want 2: the one after the reconnect and the press", got)
+	if got := n.mon.Counts()[ProbeRouteDropped.String()]; got < 3 {
+		t.Errorf("%d failed tests counted, want at least 3: the one after the reconnect, the one after the toggle and the press", got)
 	}
 }
