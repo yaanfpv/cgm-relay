@@ -24,6 +24,9 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/store"
 	"github.com/yaanfpv/cgm-relay/internal/tailnode"
+	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 )
 
 const host = "relay.example-tailnet.ts.net"
@@ -60,7 +63,7 @@ func TestStateMapping(t *testing.T) {
 		{"running, cert domain, funnel not allowed", tailnode.Observation{Backend: "Running", CertDomains: []string{host}},
 			map[string]string{"ts_state": "needs-funnel"}},
 		{"running, allowed, listening, public not answered", tailnode.Observation{Backend: "Running", CertDomains: []string{host}, FunnelAllowed: true, Listening: true},
-			map[string]string{"ts_state": "setting-up", "ts_public_host": host}},
+			map[string]string{"ts_state": "publishing", "ts_public_host": host}},
 		{"running, public answered", tailnode.Observation{Backend: "Running", CertDomains: []string{host}, FunnelAllowed: true, Listening: true, PublicAnswered: true},
 			map[string]string{"ts_state": "running", "ts_public_host": host}},
 		{"last error", tailnode.Observation{Backend: "Running", CertDomains: []string{host}, FunnelAllowed: true, Listening: true, PublicAnswered: true, LastErr: "boom"},
@@ -96,11 +99,11 @@ func TestStatePublicHostOnlyFromCertDomains(t *testing.T) {
 	}
 }
 
-// TestStateNeverWaitsForever checks the two waiting states turn to errors at
-// their limits and keep their state just under them.
+// TestStateNeverWaitsForever checks the starting state turns to an error at
+// its limit and keeps its state just under it. The wait for the first public
+// answer has its own limit and its own states, checked below.
 func TestStateNeverWaitsForever(t *testing.T) {
 	starting := tailnode.Observation{Backend: "Starting"}
-	setting := tailnode.Observation{Backend: "Running", CertDomains: []string{host}, FunnelAllowed: true, Listening: true}
 	cases := []struct {
 		name  string
 		obs   tailnode.Observation
@@ -108,7 +111,6 @@ func TestStateNeverWaitsForever(t *testing.T) {
 		state string
 	}{
 		{"starting", starting, tailnode.StartingLimit, "starting"},
-		{"setting up", setting, tailnode.SettingUpLimit, "setting-up"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -366,7 +368,7 @@ func answeringObs() tailnode.Observation {
 }
 
 var (
-	routeClasses = []tailnode.ProbeClass{tailnode.ProbeRouteDropped, tailnode.ProbeRouteTLS, tailnode.ProbeRouteServerError}
+	routeClasses = []tailnode.ProbeClass{tailnode.ProbeRouteDropped, tailnode.ProbeRouteTLS, tailnode.ProbeRouteServerError, tailnode.ProbeNameNotPublished}
 	macClasses   = []tailnode.ProbeClass{tailnode.ProbeMacDNS, tailnode.ProbeMacNoRoute, tailnode.ProbeMacRefused, tailnode.ProbeMacTimeout}
 	nodeClasses  = []tailnode.ProbeClass{tailnode.ProbeNodeOffline, tailnode.ProbeNodeHealth, tailnode.ProbeStatusRead}
 )
@@ -1127,7 +1129,8 @@ func TestClassifyProbe(t *testing.T) {
 		{"certificate not trusted", 0, urlErr(x509.UnknownAuthorityError{}), tailnode.ProbeRouteTLS},
 		{"certificate not trusted, as the client reports it", 0, urlErr(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), tailnode.ProbeRouteTLS},
 		{"not a tls server", 0, urlErr(tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}), tailnode.ProbeRouteTLS},
-		{"name not found", 0, dial(&net.DNSError{Err: "no such host", Name: host, IsNotFound: true}), tailnode.ProbeMacDNS},
+		{"own name does not exist", 0, dial(&net.DNSError{Err: "no such host", Name: host, IsNotFound: true}), tailnode.ProbeNameNotPublished},
+		{"resolver timed out", 0, urlErr(&net.OpError{Op: "dial", Net: "udp", Err: &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}}), tailnode.ProbeMacDNS},
 		{"resolver unreachable", 0, urlErr(&net.OpError{Op: "dial", Net: "udp", Err: &net.DNSError{Err: "server misbehaving", Name: host, IsTemporary: true}}), tailnode.ProbeMacDNS},
 		{"connection refused", 0, dial(syscall.ECONNREFUSED), tailnode.ProbeMacRefused},
 		{"host unreachable", 0, dial(syscall.EHOSTUNREACH), tailnode.ProbeMacNoRoute},
@@ -1141,7 +1144,7 @@ func TestClassifyProbe(t *testing.T) {
 			}
 		})
 	}
-	for _, c := range []tailnode.ProbeClass{tailnode.ProbeRouteDropped, tailnode.ProbeRouteTLS, tailnode.ProbeRouteServerError} {
+	for _, c := range []tailnode.ProbeClass{tailnode.ProbeRouteDropped, tailnode.ProbeRouteTLS, tailnode.ProbeRouteServerError, tailnode.ProbeNameNotPublished} {
 		if !c.RouteFailure() || c.MacSide() || c.NodeSide() {
 			t.Errorf("%v: RouteFailure %v, MacSide %v, NodeSide %v", c, c.RouteFailure(), c.MacSide(), c.NodeSide())
 		}
@@ -1245,6 +1248,7 @@ func TestProbeClassNames(t *testing.T) {
 		tailnode.ProbeRouteDropped:     "dropped_during_tls",
 		tailnode.ProbeRouteTLS:         "tls_failure",
 		tailnode.ProbeRouteServerError: "server_error",
+		tailnode.ProbeNameNotPublished: "name_not_published",
 		tailnode.ProbeMacDNS:           "dns_failure",
 		tailnode.ProbeMacNoRoute:       "no_route",
 		tailnode.ProbeMacRefused:       "connect_refused",
@@ -1258,5 +1262,272 @@ func TestProbeClassNames(t *testing.T) {
 		if got := class.String(); got != name {
 			t.Errorf("class %d is named %q, want %q", class, got, name)
 		}
+	}
+}
+
+// The wait for the first public answer. Until the address answers once, the
+// state is publishing, however the tests in that time fail; it turns to
+// not-reachable only after the publishing window, and neither state says
+// anything about the person's internet connection.
+
+// publishingObs is a node that is listening and has not been answered yet,
+// whose wait began at epoch and is now age old.
+func publishingObs(age time.Duration) tailnode.Observation {
+	return tailnode.Observation{
+		Backend: "Running", CertDomains: []string{host}, FunnelAllowed: true, Listening: true,
+		PublishingSince: epoch, Now: epoch.Add(age),
+	}
+}
+
+// statusText is a status as the app receives it, lower-cased, for checks that
+// a word appears nowhere in it.
+func statusText(t *testing.T, s tailnode.Status) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return strings.ToLower(string(b))
+}
+
+// TestStatePublishingUntilTheFirstAnswer protects the person who is waiting
+// for a new address: for the first fifteen minutes the state is publishing
+// with the time it began, never an error and never a word about their
+// internet connection, even when counts of failed tests are already piling up.
+// The state today turns to an error after three minutes, which fails it.
+func TestStatePublishingUntilTheFirstAnswer(t *testing.T) {
+	for _, age := range []time.Duration{0, 2 * time.Minute, 3 * time.Minute, 10 * time.Minute, 15*time.Minute - time.Nanosecond} {
+		o := publishingObs(age)
+		o.Counts = map[string]int{"name_not_published": 12, "dropped_during_tls": 4}
+		s := tailnode.State(o)
+		got := statusAny(t, s)
+		if got["ts_state"] != "publishing" || got["ts_public_host"] != host {
+			t.Errorf("after %v: got %v, want publishing on %s", age, got, host)
+		}
+		if got["ts_publishing_since"] != stamp(0) {
+			t.Errorf("after %v: ts_publishing_since = %v, want %s", age, got["ts_publishing_since"], stamp(0))
+		}
+		if _, ok := got["ts_error"]; ok {
+			t.Errorf("after %v: publishing carries ts_error: %v", age, got)
+		}
+		if txt := statusText(t, s); strings.Contains(txt, "internet") {
+			t.Errorf("after %v: status mentions the internet: %s", age, txt)
+		}
+	}
+}
+
+// TestStateNotReachableAfterThePublishingWindow protects the end of the wait:
+// at fifteen minutes with no answer the state is not-reachable, which is
+// neither the generic error nor the old "check your internet connection"
+// sentence, so the app can show Try Again and the last Tailscale error. A
+// window that is longer or shorter, or that ends in the error state, fails it.
+func TestStateNotReachableAfterThePublishingWindow(t *testing.T) {
+	for _, age := range []time.Duration{15 * time.Minute, 15*time.Minute + time.Nanosecond, time.Hour} {
+		o := publishingObs(age)
+		s := tailnode.State(o)
+		got := statusAny(t, s)
+		if got["ts_state"] != "not-reachable" || got["ts_public_host"] != host {
+			t.Errorf("after %v: got %v, want not-reachable on %s", age, got, host)
+		}
+		if _, ok := got["ts_error"]; ok {
+			t.Errorf("after %v: not-reachable carries ts_error: %v", age, got)
+		}
+		if _, ok := got["ts_tailscale_error"]; ok {
+			t.Errorf("after %v: no Tailscale error was seen, yet one is reported: %v", age, got)
+		}
+		if txt := statusText(t, s); strings.Contains(txt, "internet") {
+			t.Errorf("after %v: status mentions the internet: %s", age, txt)
+		}
+	}
+	// A connection that is down on the Mac's side during the wait does not
+	// bring the old waiting state back before the window ends.
+	o := publishingObs(5 * time.Minute)
+	o.WaitingForInternet = true
+	if got := statusAny(t, tailnode.State(o))["ts_state"]; got != "publishing" {
+		t.Errorf("publishing with a Mac-side failure: ts_state = %v, want publishing", got)
+	}
+}
+
+// tailscaleText returns the error text Tailscale gives for a node that may
+// not use Funnel, taken from the library that gives it so the strings are the
+// real ones.
+func tailscaleText(t *testing.T, caps tailcfg.NodeCapMap) string {
+	t.Helper()
+	err := ipn.NodeCanFunnel(&ipnstate.PeerStatus{CapMap: caps})
+	if err == nil {
+		t.Fatal("the node can funnel; the check cannot produce an error text")
+	}
+	return err.Error()
+}
+
+// TestStateKeepsTheTailscaleError protects the person who is stuck on a
+// refusal: the text Tailscale last gave, and its class, ride on every state
+// that shows the setup or the address, so a refused listen is never only a
+// spinner. Each state is its own member of the class. The text is carried
+// separately from the error state, which it must not cause.
+func TestStateKeepsTheTailscaleError(t *testing.T) {
+	text := tailscaleText(t, tailcfg.NodeCapMap{tailcfg.CapabilityHTTPS: nil})
+	base := tailnode.Observation{
+		Backend: "Running", CertDomains: []string{host},
+		TailscaleErr: text, TailscaleErrClass: tailnode.ErrClassNodeAttribute,
+		PublishingSince: epoch, Now: epoch.Add(time.Minute),
+	}
+	needsFunnel, publishing, notReachable, notAnswering, settingUp := base, base, base, base, base
+	publishing.FunnelAllowed, publishing.Listening = true, true
+	notReachable = publishing
+	notReachable.Now = epoch.Add(20 * time.Minute)
+	notAnswering = publishing
+	notAnswering.PublicAnswered = true
+	notAnswering.NotAnsweringSince = epoch
+	notAnswering.CheckedAt = epoch.Add(-time.Hour)
+	settingUp = publishing
+	settingUp.PublicAnswered = true
+	settingUp.CheckedAt = epoch.Add(-time.Hour)
+	for name, c := range map[string]struct {
+		obs   tailnode.Observation
+		state string
+	}{
+		"needs funnel":  {needsFunnel, "needs-funnel"},
+		"publishing":    {publishing, "publishing"},
+		"not reachable": {notReachable, "not-reachable"},
+		"not answering": {notAnswering, "not-answering"},
+		"setting up":    {settingUp, "setting-up"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := statusAny(t, tailnode.State(c.obs))
+			if got["ts_state"] != c.state {
+				t.Fatalf("ts_state = %v, want %s (all: %v)", got["ts_state"], c.state, got)
+			}
+			if got["ts_tailscale_error"] != text {
+				t.Errorf("ts_tailscale_error = %v, want %q", got["ts_tailscale_error"], text)
+			}
+			if got["ts_error_class"] != "node_attribute_missing" {
+				t.Errorf("ts_error_class = %v, want node_attribute_missing", got["ts_error_class"])
+			}
+			if _, ok := got["ts_error"]; ok {
+				t.Errorf("the Tailscale error turned into the error state: %v", got)
+			}
+		})
+	}
+}
+
+// TestClassifyTailscaleError protects what diagnostics may say: the three
+// classes a refusal falls into, told apart by the real texts Tailscale gives
+// for HTTPS being off and the Funnel attribute missing, and the class name
+// never contains any of the text, an address or a host.
+func TestClassifyTailscaleError(t *testing.T) {
+	https := tailscaleText(t, nil)
+	attr := tailscaleText(t, tailcfg.NodeCapMap{tailcfg.CapabilityHTTPS: nil})
+	other := "listen tcp 100.64.0.9:443: bind: address already in use (" + host + ")"
+	for text, want := range map[string]string{
+		https: "https_disabled",
+		attr:  "node_attribute_missing",
+		other: "listen_failed",
+	} {
+		got := tailnode.ClassifyTailscaleError(text)
+		if got != want {
+			t.Errorf("ClassifyTailscaleError(%q) = %q, want %q", text, got, want)
+		}
+		if strings.Contains(got, "100.64") || strings.Contains(got, "ts.net") || strings.Contains(got, " ") {
+			t.Errorf("class %q carries text", got)
+		}
+	}
+	if got := tailnode.ClassifyTailscaleError(""); got != "" {
+		t.Errorf("no error has class %q, want none", got)
+	}
+}
+
+// TestMonitorNameNotPublishedIsARouteFailure protects the line between "the
+// name is not published" and "the Mac is offline" after the address has
+// answered once: a name that no longer exists counts toward not answering and
+// the repair ladder, is counted under its own name, and is never shown as
+// waiting for the internet. A resolver that cannot be reached stays the Mac's.
+func TestMonitorNameNotPublishedIsARouteFailure(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	r.step(0, tailnode.ProbeNameNotPublished)
+	if got := r.state(); got != "running" {
+		t.Fatalf("after one missing name: ts_state = %q, want running (a blip)", got)
+	}
+	r.step(100*time.Second, tailnode.ProbeNameNotPublished)
+	r.step(240*time.Second, tailnode.ProbeNameNotPublished)
+	if got := r.state(); got != "not-answering" {
+		t.Fatalf("after three missing names over four minutes: ts_state = %q, want not-answering", got)
+	}
+	if !slices.Equal(r.rep.kinds, []string{"reopen"}) {
+		t.Errorf("repairs %v, want a reopen", r.rep.kinds)
+	}
+	if c, _ := r.status()["ts_counts"].(map[string]any); c["name_not_published"] != float64(3) {
+		t.Errorf("ts_counts = %v, want name_not_published 3", r.status()["ts_counts"])
+	}
+	r.step(300*time.Second, tailnode.ProbeMacDNS)
+	if got := r.state(); got != "waiting-for-internet" {
+		t.Errorf("after a resolver that cannot be reached: ts_state = %q, want waiting-for-internet", got)
+	}
+}
+
+// TestMonitorAllowRestartKeepsTheCaps protects the node from a restart loop
+// when people press Try Again: the same ledger as the repair ladder decides,
+// so at most one restart in five minutes and three in an hour, whichever
+// asked. A press that restarts without asking the ledger, or a ledger of its
+// own, fails it.
+func TestMonitorAllowRestartKeepsTheCaps(t *testing.T) {
+	r := newRig(t)
+	for _, c := range []struct {
+		at   time.Duration
+		want bool
+	}{
+		{0, true}, {time.Minute, false}, {5*time.Minute - time.Second, false}, {6 * time.Minute, true},
+		{12 * time.Minute, true}, {18 * time.Minute, false}, {59 * time.Minute, false}, {61 * time.Minute, true},
+	} {
+		r.at(c.at)
+		if got := r.m.AllowRestart(); got != c.want {
+			t.Errorf("at %v: AllowRestart = %v, want %v", c.at, got, c.want)
+		}
+	}
+	// A restart the ladder made counts against a press, and the reverse.
+	l := newRig(t)
+	l.ready()
+	l.step(0, tailnode.ProbeRouteServerError)
+	l.step(100*time.Second, tailnode.ProbeRouteServerError)
+	l.step(240*time.Second, tailnode.ProbeRouteServerError)
+	l.step(300*time.Second, tailnode.ProbeRouteServerError)
+	l.step(360*time.Second, tailnode.ProbeRouteServerError)
+	if len(l.rep.restarts) != 1 {
+		t.Fatalf("the ladder made %d restarts, want 1", len(l.rep.restarts))
+	}
+	l.at(361 * time.Second)
+	if l.m.AllowRestart() {
+		t.Error("a press one second after the ladder's restart was allowed to restart again")
+	}
+}
+
+// TestStateCarriesTheKeyExpiry protects the sign-in warning: the time the
+// node key expires reaches the status in UTC on a node that answers, and a key
+// that has expired is the existing sign-in state, never the error state.
+// A state that drops the time, or turns expiry into a failure, fails it.
+func TestStateCarriesTheKeyExpiry(t *testing.T) {
+	expiry := epoch.Add(10 * 24 * time.Hour)
+	for name, o := range map[string]tailnode.Observation{
+		"ready":         answeringObs(),
+		"publishing":    publishingObs(time.Minute),
+		"not answering": func() tailnode.Observation { o := answeringObs(); o.NotAnsweringSince = epoch; return o }(),
+	} {
+		o.KeyExpiry = expiry
+		got := statusAny(t, tailnode.State(o))
+		if got["ts_key_expiry"] != stamp(10*24*time.Hour) {
+			t.Errorf("%s: ts_key_expiry = %v, want %s", name, got["ts_key_expiry"], stamp(10*24*time.Hour))
+		}
+	}
+	if _, ok := statusAny(t, tailnode.State(answeringObs()))["ts_key_expiry"]; ok {
+		t.Error("a node with no known expiry carries ts_key_expiry")
+	}
+	expired := tailnode.Observation{Backend: "NeedsLogin", LoginURL: "https://login.example.test/a/abc", KeyExpiry: epoch.Add(-time.Hour)}
+	got := statusAny(t, tailnode.State(expired))
+	if got["ts_state"] != "needs-login" || got["ts_login_url"] != "https://login.example.test/a/abc" {
+		t.Errorf("an expired key: got %v, want needs-login with its page", got)
+	}
+	if _, ok := got["ts_error"]; ok {
+		t.Errorf("an expired key carries ts_error: %v", got)
 	}
 }

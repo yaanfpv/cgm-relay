@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -701,5 +702,44 @@ func TestTryAgainRoute(t *testing.T) {
 	}
 	if got := post(secret, secret, serving); got != http.StatusNoContent {
 		t.Errorf("serving: %d, want 204", got)
+	}
+}
+
+// TestSignInAgainRoute checks what POST /tailscale/sign-in decides, the route
+// behind the Sign In Again button: it does not exist without the status
+// secret, needs the secret when there is one, says 409 when the node cannot
+// start a sign-in, and 204 once it has. A route that skipped the secret
+// check, or answered success for a refusal, fails it.
+func TestSignInAgainRoute(t *testing.T) {
+	const secret = "test-secret-value"
+	post := func(secret, sent string, signIn func(context.Context) error) int {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), secret, withTailnodeSignIn(signIn))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/tailscale/sign-in", nil)
+		req.Host = "127.0.0.1:1338"
+		if sent != "" {
+			req.Header.Set(config.StatusSecretHeader, sent)
+		}
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	called := 0
+	starts := func(context.Context) error { called++; return nil }
+	refuses := func(context.Context) error { called++; return errors.New("not signed in to anything") }
+
+	if got := post("", "", starts); got != http.StatusNotFound || called != 0 {
+		t.Errorf("without a status secret: %d, %d calls; want 404 and none", got, called)
+	}
+	if got := post(secret, "", starts); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("without the secret header: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, "wrong", starts); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("with a wrong secret: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := post(secret, secret, refuses); got != http.StatusConflict {
+		t.Errorf("a node that cannot start it: %d, want 409", got)
+	}
+	if got := post(secret, secret, starts); got != http.StatusNoContent {
+		t.Errorf("a node that started it: %d, want 204", got)
 	}
 }

@@ -222,6 +222,195 @@ struct BuiltInRouteStateHealthTests {
     }
 }
 
+/// The wait for a new address: publishing while the first public answer has not
+/// come, not reachable after the window, and what each says to the person.
+@Suite("BuiltInRouteState publishing")
+struct BuiltInRouteStatePublishingTests {
+    private let host = "relay.example-tailnet.ts.net"
+    /// 2026-11-15 10:10:00 UTC, which is 15:40 in Asia/Kolkata.
+    private let since = Date(timeIntervalSince1970: 1_794_737_400)
+    private let utc = TimeZone(identifier: "UTC")!
+    private let publishingText = "Publishing your address… This can take up to 10 minutes"
+
+    private func route(_ fields: String) throws -> BuiltInRouteState {
+        let json = #"{"running": true, "sign_in_failing": false, \#(fields)}"#
+        let status = try JSONDecoder.engineStatusDecoder.decode(EngineStatus.self, from: Data(json.utf8))
+        return BuiltInRouteState.from(status.builtIn)
+    }
+
+    @Test("publishing carries the host and the time it began")
+    func publishing() throws {
+        let got = try route(#""ts_state": "publishing", "ts_public_host": "\#(host)", "ts_publishing_since": "2026-11-15T10:10:00Z""#)
+        #expect(got == .publishing(host: host, since: since))
+        #expect(got.address == nil)
+        #expect(!got.isFailed)
+    }
+
+    @Test("not reachable is its own state with the host, never a failure and never an address")
+    func notReachable() throws {
+        let got = try route(#""ts_state": "not-reachable", "ts_public_host": "\#(host)""#)
+        #expect(got == .notReachable(host: host))
+        #expect(got.address == nil)
+        #expect(!got.isFailed)
+    }
+
+    @Test("with the engine running the route is the engine's publishing, and a stale-report check leaves it alone")
+    func resolvedAndNotExpired() {
+        let report = BuiltInStatus(state: "publishing", publicHost: host, publishingSince: since)
+        let got = BuiltInRouteState.resolve(engineState: .running, status: report)
+        #expect(got == .publishing(host: host, since: since))
+        #expect(got.expiredAt(since.addingTimeInterval(3600)) == got)
+        #expect(BuiltInRouteState.resolve(engineState: .stopped, status: report) == .stopped)
+    }
+
+    @Test("setup reads Publishing your address with the ten minutes, and nothing about the internet")
+    func publishingReason() {
+        let state = BuiltInRouteState.publishing(host: host, since: since)
+        #expect(state.notReadyReason == publishingText)
+        #expect(!state.notReadyReason.lowercased().contains("internet"))
+    }
+
+    @Test("Settings reads the same line with the elapsed time", arguments: [
+        (0.0, "less than 1 min so far"),
+        (59.0, "less than 1 min so far"),
+        (60.0, "1 min so far"),
+        (120.0, "2 min so far"),
+        (14 * 60.0 + 59, "14 min so far"),
+        (16 * 60.0, "16 min so far"),
+    ])
+    func publishingSettingsText(elapsed: Double, clause: String) {
+        let state = BuiltInRouteState.publishing(host: host, since: since)
+        let text = state.settingsStatusText(timeZone: utc, now: since.addingTimeInterval(elapsed))
+        #expect(text == "\(publishingText) (\(clause))")
+        #expect(!text.lowercased().contains("internet"))
+    }
+
+    @Test("with no start time Settings gives the line without an elapsed clause")
+    func publishingWithoutTime() {
+        let state = BuiltInRouteState.publishing(host: host, since: nil)
+        #expect(state.settingsStatusText(timeZone: utc, now: since) == publishingText)
+    }
+
+    @Test("a clock that ran backwards never shows a negative elapsed time")
+    func publishingClockBackwards() {
+        let state = BuiltInRouteState.publishing(host: host, since: since)
+        let text = state.settingsStatusText(timeZone: utc, now: since.addingTimeInterval(-300))
+        #expect(!text.contains("-"))
+    }
+
+    @Test("not reachable says so plainly, offers Try Again, and never blames the connection")
+    func notReachableText() {
+        let state = BuiltInRouteState.notReachable(host: host)
+        #expect(state.notReadyReason == "Your address isn't reachable yet")
+        #expect(state.settingsStatusText(timeZone: utc, now: since) == "Your address isn't reachable yet")
+        #expect(state.showsTryAgain)
+        for text in [state.notReadyReason, state.settingsStatusText(timeZone: utc, now: since)] {
+            #expect(!text.lowercased().contains("internet"))
+            #expect(!text.lowercased().contains("connection"))
+        }
+        #expect(!BuiltInRouteState.publishing(host: host, since: since).showsTryAgain)
+        #expect(!BuiltInRouteState.ready(host: host).showsTryAgain)
+    }
+
+    @Test("the last Tailscale error is shown on the states that show setup or the address, and on no other")
+    func tailscaleErrorShown() {
+        let text = "Funnel not available; HTTPS must be enabled."
+        for state in ["needs-funnel", "publishing", "setting-up", "not-reachable", "not-answering"] {
+            let status = BuiltInStatus(state: state, funnelURL: "https://login.tailscale.com/f/funnel", publicHost: host, tailscaleError: text)
+            #expect(BuiltInRouteState.tailscaleErrorText(from: status) == text, Comment(rawValue: state))
+        }
+        for state in ["running", "starting", "needs-login", "waiting-for-internet"] {
+            let status = BuiltInStatus(state: state, publicHost: host, tailscaleError: text)
+            #expect(BuiltInRouteState.tailscaleErrorText(from: status) == nil, Comment(rawValue: state))
+        }
+        #expect(BuiltInRouteState.tailscaleErrorText(from: BuiltInStatus(state: "publishing", tailscaleError: "  \n ")) == nil)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: BuiltInStatus(state: "publishing")) == nil)
+        #expect(BuiltInRouteState.tailscaleErrorText(from: nil) == nil)
+    }
+
+    @Test("the Tailscale error and its class decode from the engine's report")
+    func errorFieldsDecode() throws {
+        let json = #"{"running": true, "sign_in_failing": false, "ts_state": "publishing", "ts_tailscale_error": "HTTPS must be enabled", "ts_error_class": "https_disabled", "ts_publishing_since": "2026-11-15T10:10:00Z"}"#
+        let status = try JSONDecoder.engineStatusDecoder.decode(EngineStatus.self, from: Data(json.utf8))
+        #expect(status.builtIn?.tailscaleError == "HTTPS must be enabled")
+        #expect(status.builtIn?.errorClass == "https_disabled")
+        #expect(status.builtIn?.publishingSince == since)
+    }
+}
+
+/// The sign-in expiry warning in Settings.
+@Suite("BuiltInKeyExpiry")
+struct BuiltInKeyExpiryTests {
+    /// 2026-11-15 10:12:00 UTC.
+    private let now = Date(timeIntervalSince1970: 1_794_737_520)
+    private let day: TimeInterval = 86_400
+    private let utc = TimeZone(identifier: "UTC")!
+    private let kolkata = TimeZone(identifier: "Asia/Kolkata")!
+
+    private func notice(expiringIn seconds: TimeInterval) -> BuiltInKeyExpiry? {
+        BuiltInKeyExpiry.notice(for: BuiltInStatus(state: "running", publicHost: "relay.example-tailnet.ts.net", keyExpiry: now.addingTimeInterval(seconds)), now: now)
+    }
+
+    @Test("the expiry decodes from the engine's report")
+    func decodes() throws {
+        let json = #"{"running": true, "sign_in_failing": false, "ts_state": "running", "ts_public_host": "h.example.ts.net", "ts_key_expiry": "2026-11-29T23:30:00Z"}"#
+        let status = try JSONDecoder.engineStatusDecoder.decode(EngineStatus.self, from: Data(json.utf8))
+        #expect(status.builtIn?.keyExpiry == now.addingTimeInterval(14 * day + 47_880))
+    }
+
+    @Test("there is a warning within 14 days of expiry, inclusive, and none before")
+    func windowEdges() {
+        #expect(notice(expiringIn: 14 * day) != nil)
+        #expect(notice(expiringIn: 14 * day - 1) != nil)
+        #expect(notice(expiringIn: day) != nil)
+        #expect(notice(expiringIn: 1) != nil)
+        #expect(notice(expiringIn: 14 * day + 1) == nil)
+        #expect(notice(expiringIn: 90 * day) == nil)
+    }
+
+    @Test("after expiry there is no warning, since the sign-in state applies")
+    func afterExpiry() {
+        #expect(notice(expiringIn: 0) == nil)
+        #expect(notice(expiringIn: -1) == nil)
+        #expect(notice(expiringIn: -30 * day) == nil)
+    }
+
+    @Test("no known expiry and no status give no warning")
+    func unknown() {
+        #expect(BuiltInKeyExpiry.notice(for: BuiltInStatus(state: "running"), now: now) == nil)
+        #expect(BuiltInKeyExpiry.notice(for: nil, now: now) == nil)
+    }
+
+    @Test("the warning names the date in the viewer's time zone")
+    func text() {
+        // 2026-11-28 23:30 UTC is already the 29th in Asia/Kolkata.
+        let near = BuiltInKeyExpiry.notice(for: BuiltInStatus(state: "running", keyExpiry: now.addingTimeInterval(13 * day + 47_880)), now: now)
+        #expect(near?.text(timeZone: utc) == "Tailscale sign-in expires on 28 Nov 2026")
+        #expect(near?.text(timeZone: kolkata) == "Tailscale sign-in expires on 29 Nov 2026")
+    }
+
+    @Test("the button reads Sign In Again")
+    func buttonTitle() {
+        #expect(BuiltInKeyExpiry.signInAgainTitle == "Sign In Again")
+    }
+
+    @Test("the page Sign In Again opens is only ever an https page on Tailscale")
+    func signInAgainURL() {
+        let ok = BuiltInStatus(state: "running", signInAgainURL: "https://login.tailscale.com/a/abc123")
+        #expect(BuiltInKeyExpiry.signInAgainURL(from: ok) == URL(string: "https://login.tailscale.com/a/abc123"))
+        for raw in ["http://login.tailscale.com/a/x", "https://evil.example.com/a", "https://tailscale.com.evil.example/a", "garbage", ""] {
+            #expect(BuiltInKeyExpiry.signInAgainURL(from: BuiltInStatus(state: "running", signInAgainURL: raw)) == nil, Comment(rawValue: raw))
+        }
+        #expect(BuiltInKeyExpiry.signInAgainURL(from: nil) == nil)
+    }
+
+    @Test("an expiry date never makes the route a failure or hides Ready")
+    func routeUntouched() {
+        let status = BuiltInStatus(state: "running", publicHost: "relay.example-tailnet.ts.net", checkedAt: now, keyExpiry: now.addingTimeInterval(2 * day))
+        #expect(BuiltInRouteState.from(status) == .ready(host: "relay.example-tailnet.ts.net", checkedAt: now))
+    }
+}
+
 extension BuiltInRouteState {
     var isFailed: Bool {
         if case .failed = self { return true }

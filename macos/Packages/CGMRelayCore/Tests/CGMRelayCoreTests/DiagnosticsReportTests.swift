@@ -80,4 +80,53 @@ struct DiagnosticsReportTests {
         #expect(!text.contains("8675"))
         #expect(text.contains("ingress_denied"))
     }
+
+    private func report(routeCounts: [String: Int] = [:], routeErrorClass: String?) -> String {
+        DiagnosticsReport.build(
+            appVersion: "0.1.0",
+            buildNumber: "1",
+            macOSVersion: "15.0",
+            engineState: .running,
+            lastError: nil,
+            reach: .thisMacOnly,
+            port: 1337,
+            retentionDays: 15,
+            units: .mgDl,
+            noReadingAlertEnabled: false,
+            noReadingAlertMinutes: 20,
+            signInFailingAlertEnabled: false,
+            followerAges: [],
+            routeCounts: routeCounts,
+            routeErrorClass: routeErrorClass
+        )
+    }
+
+    @Test("a name that was not published is counted under its own name")
+    func countsNamesNotPublished() {
+        let text = report(routeCounts: ["name_not_published": 7])
+        #expect(text.contains("name_not_published 7"))
+    }
+
+    @Test("a Tailscale error shows only as one of its three classes")
+    func carriesOnlyTheErrorClass() {
+        for cls in ["listen_failed", "https_disabled", "node_attribute_missing"] {
+            #expect(report(routeErrorClass: cls).contains(cls), Comment(rawValue: cls))
+        }
+        #expect(!report(routeErrorClass: nil).lowercased().contains("tailscale error"))
+    }
+
+    @Test("a class that is really text, an address or a host never reaches the report")
+    func dropsTextPassedAsAClass() {
+        for leaked in [
+            "Funnel not available; HTTPS must be enabled. See https://tailscale.com/s/https.",
+            "listen tcp 100.64.0.9:443: bind: address already in use",
+            "relay.example-tailnet.ts.net",
+        ] {
+            let text = report(routeErrorClass: leaked)
+            #expect(!text.contains("Funnel not available"), Comment(rawValue: leaked))
+            #expect(!text.contains("100.64.0.9"), Comment(rawValue: leaked))
+            #expect(!text.contains("ts.net"), Comment(rawValue: leaked))
+            #expect(!text.contains("bind"), Comment(rawValue: leaked))
+        }
+    }
 }
