@@ -118,6 +118,7 @@ final class AppModel: ObservableObject {
     private let loginItemManager: any LoginItemManaging
     private let statusAddr: String
     private let pairingMinter: any PairingCodeMinting
+    private let addressRetrier: any BuiltInAddressRetrying
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -263,6 +264,7 @@ final class AppModel: ObservableObject {
         self.statusAddr = statusAddr
         let statusSecret = LocalStatusSecret()
         pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
+        addressRetrier = URLSessionBuiltInAddressRetrier(url: AppModel.engineURL(for: statusAddr, path: "tailscale/try-again"), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         let loaded = settingsStore.load()
@@ -665,6 +667,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// tryBuiltInAddressAgain has the engine test the public address at once
+    /// and take its next repair step, then reads the result.
+    func tryBuiltInAddressAgain() {
+        Task {
+            try? await addressRetrier.tryAgain()
+            await statusPoller.pollNow()
+        }
+    }
+
     /// pollBuiltInRouteUntilReady asks the engine for its status every two
     /// seconds while the route is not ready and a screen showing it is open,
     /// so each step shows within moments of the engine reaching it; it ends
@@ -681,11 +692,7 @@ final class AppModel: ObservableObject {
     private func refreshBuiltInRoute() {
         var next: BuiltInRouteState = .starting
         if settings.useBuiltInTailscale {
-            if case .failed = engineState {
-                next = .failed("CGM Relay couldn't start. Try Again.")
-            } else {
-                next = BuiltInRouteState.from(latestStatus?.builtIn)
-            }
+            next = BuiltInRouteState.resolve(engineState: engineState, status: latestStatus?.builtIn).expiredAt(Date())
         }
         if next != builtInRoute { builtInRoute = next }
         builtInSession.reconcile(with: next)
@@ -1207,7 +1214,8 @@ final class AppModel: ObservableObject {
             noReadingAlertEnabled: settings.noReadingAlertEnabled,
             noReadingAlertMinutes: settings.noReadingAlertMinutes,
             signInFailingAlertEnabled: settings.signInFailingAlertEnabled,
-            followerAges: followerAges
+            followerAges: followerAges,
+            routeCounts: latestStatus?.builtIn?.counts ?? [:]
         )
     }
 
@@ -1426,7 +1434,11 @@ final class AppModel: ObservableObject {
     }
 
     private static func pairingURL(for statusAddr: String) -> URL {
-        URL(string: "http://\(statusAddr)/pairing") ?? URL(string: "http://\(RelayDefaults.statusAddr)/pairing")!
+        engineURL(for: statusAddr, path: "pairing")
+    }
+
+    private static func engineURL(for statusAddr: String, path: String) -> URL {
+        URL(string: "http://\(statusAddr)/\(path)") ?? URL(string: "http://\(RelayDefaults.statusAddr)/\(path)")!
     }
 
     private static func statusURL(for statusAddr: String) -> URL {

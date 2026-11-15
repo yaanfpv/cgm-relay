@@ -52,8 +52,21 @@ struct BuiltInRouteView: View {
                 caption: "This can take two minutes.",
                 slot: .checking
             )
-        case .ready(let host):
-            SetupStatusRow(name: "built-in", title: "Your address", caption: host, captionIsMonospaced: true, slot: .done("Ready"))
+        case .ready(let host, _):
+            SetupStatusRow(name: "built-in", title: "Your address", caption: host, captionIsMonospaced: true, slot: .done(model.builtInRoute.settingsStatusText(timeZone: .current)))
+        case .notAnswering:
+            SetupStatusRow(
+                name: "built-in",
+                title: "Your address",
+                caption: model.builtInRoute.settingsStatusText(timeZone: .current),
+                captionIsError: true,
+                wrapsCaption: true,
+                slot: .action("Try Again", accessibleName: "Try your address again") { model.tryBuiltInAddressAgain() }
+            )
+        case .waitingForInternet:
+            SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.settingsStatusText(timeZone: .current), slot: .checking)
+        case .stopped:
+            SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.notReadyReason, wrapsCaption: true, slot: .unavailable(model.builtInRoute.settingsStatusText(timeZone: .current)))
         case .failed(let message):
             SetupStatusRow(
                 name: "built-in",
