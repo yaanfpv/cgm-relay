@@ -278,13 +278,13 @@ const reregisterPause = 2 * time.Second
 // the node tells control afresh that it has Funnel on. The listener is not
 // touched, and Funnel is always put back, even when the wait is cut short.
 func (n *Node) reregister(ctx context.Context) error {
-	return n.reregisterWith(ctx, n.sleep)
+	return n.reregisterWith(ctx, sleep)
 }
 
 // pressReregister is the re-registration a Try Again makes before its test,
 // when the press limits allow one, and reports whether it was made. Its pause
-// is a plain wait, so the test that follows is not held behind the node's
-// scheduled waits.
+// is a plain wait, as every re-registration's is, so the test that follows is
+// not held behind the node's scheduled waits.
 func (n *Node) pressReregister(ctx context.Context) bool {
 	if !n.mon.AllowPress() {
 		return false

@@ -105,6 +105,10 @@ type Monitor struct {
 	// that follows it, which a failed test makes before the ladder may restart
 	// again.
 	afterRestart bool
+	// noStep is set while the test that follows a re-registration is made:
+	// the registration has had no time to show, so a failure of that test is
+	// counted and judged but takes no step of the ladder.
+	noStep bool
 
 	// pendingReconnect is set by a reconnect line and taken by AfterReconnect.
 	// reconnected wakes the serving session, and holds one wake so a line is
@@ -136,6 +140,13 @@ func (m *Monitor) TryAgain(ctx context.Context, host string) time.Duration {
 }
 
 func (m *Monitor) test(ctx context.Context, host string) time.Duration {
+	next, _, _ := m.testOnce(ctx, host)
+	return next
+}
+
+// testOnce is test, and also reports the class the test found and whether it
+// re-registered Funnel as the first failure of a run.
+func (m *Monitor) testOnce(ctx context.Context, host string) (time.Duration, ProbeClass, bool) {
 	// The public test always runs, and an answer is Ready whatever the node
 	// reports. Only a failed test is explained by the node, and only by a node
 	// that is offline or cannot be read: that is waiting, not a route fault.
@@ -154,7 +165,7 @@ func (m *Monitor) test(ctx context.Context, host string) time.Duration {
 	if ctx.Err() != nil {
 		// The test was cut off by the node closing, which says nothing about
 		// the address.
-		return m.Due()
+		return m.Due(), ProbeOK, false
 	}
 	m.mu.Lock()
 	if health && m.counts[ProbeNodeHealth.String()] < MaxCount {
@@ -181,7 +192,7 @@ func (m *Monitor) test(ctx context.Context, host string) time.Duration {
 			_ = m.opts.Repair.RestartNode(ctx)
 		}
 	}
-	return next
+	return next, class, rereg
 }
 
 type repairKind int
@@ -222,7 +233,7 @@ func (m *Monitor) record(class ProbeClass, now time.Time) (time.Duration, repair
 		if m.na.IsZero() && m.runLen >= failuresToNotAnswer && now.Sub(m.runStart) >= notAnsweringSpan {
 			m.na = m.runStart
 		}
-		if !m.na.IsZero() {
+		if !m.na.IsZero() && !m.noStep {
 			repair = m.nextRepair(now)
 		}
 	}
@@ -353,25 +364,44 @@ func (m *Monitor) firstFailureDue(now time.Time) bool {
 	return true
 }
 
-// AfterReconnect acts on the reconnect lines seen since it last ran: Funnel's
-// registration is turned off and on, and the address is tested at once like
-// any other test. It reports whether it did, and how long to wait before the
-// next test. The lines are one reconnect however many there are, and a
-// reconnect within minReregisterGap of the last re-registration is dropped: the
-// first failed test and the repair ladder back it up.
+// AfterReconnect acts on the reconnect lines seen since it last ran: the
+// address is tested at once like any other test, and only a failed one has
+// Funnel's registration turned off and on, followed by another test at once,
+// which takes no ladder step of its own.
+// It reports whether it tested, and how long to wait before the next test. The
+// lines are one reconnect however many there are. A failed test within
+// minReregisterGap of the last re-registration, or of a press's, is not
+// followed by another: the first failed test and the repair ladder back it up.
 func (m *Monitor) AfterReconnect(ctx context.Context, host string) (time.Duration, bool) {
 	m.mu.Lock()
 	pending := m.pendingReconnect
 	m.pendingReconnect = false
-	due := pending && m.reregisterDue(m.opts.Now())
 	m.mu.Unlock()
-	if !due {
+	if !pending {
 		return m.Due(), false
 	}
-	if m.opts.Repair != nil {
-		_ = m.opts.Repair.ReregisterFunnel(ctx)
+	next, class, toggled := m.testOnce(ctx, host)
+	if ctx.Err() != nil || !class.RouteFailure() {
+		return next, true
 	}
-	return m.test(ctx, host), true
+	if !toggled {
+		m.mu.Lock()
+		toggled = m.firstFailureDue(m.opts.Now())
+		m.mu.Unlock()
+		if toggled && m.opts.Repair != nil {
+			_ = m.opts.Repair.ReregisterFunnel(ctx)
+		}
+	}
+	if toggled {
+		m.mu.Lock()
+		m.noStep = true
+		m.mu.Unlock()
+		next = m.test(ctx, host)
+		m.mu.Lock()
+		m.noStep = false
+		m.mu.Unlock()
+	}
+	return next, true
 }
 
 // ReconnectPending reports that a reconnect line has been seen and not acted
