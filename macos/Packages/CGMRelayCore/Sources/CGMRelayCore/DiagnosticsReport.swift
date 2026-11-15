@@ -24,7 +24,8 @@ public enum DiagnosticsReport {
         noReadingAlertMinutes: Int,
         signInFailingAlertEnabled: Bool,
         followerAges: [(client: String, age: String)],
-        routeCounts: [String: Int] = [:]
+        routeCounts: [String: Int] = [:],
+        routeErrorClass: String? = nil
     ) -> String {
         var lines: [String] = [
             "CGM Relay \(appVersion) (\(buildNumber))",
@@ -54,6 +55,9 @@ public enum DiagnosticsReport {
         if !counted.isEmpty {
             lines.append("Address checks: \(counted.joined(separator: ", "))")
         }
+        if let routeErrorClass, errorClasses.contains(routeErrorClass) {
+            lines.append("Address error class: \(routeErrorClass)")
+        }
 
         return lines.joined(separator: "\n")
     }
@@ -62,9 +66,11 @@ public enum DiagnosticsReport {
     /// log lines and its failure classes). A count under any other name is
     /// dropped, so a report can never carry an address or a host the engine
     /// did not mean as a count.
+    private static let errorClasses = ["listen_failed", "https_disabled", "node_attribute_missing"]
+
     private static let countNames = [
         "ingress_denied", "handshake",
-        "dropped_during_tls", "tls_failure", "server_error",
+        "dropped_during_tls", "tls_failure", "server_error", "name_not_published",
         "dns_failure", "no_route", "connect_refused", "connect_timeout",
         "tailnet_address", "node_offline", "node_unhealthy", "status_read_failed",
     ]

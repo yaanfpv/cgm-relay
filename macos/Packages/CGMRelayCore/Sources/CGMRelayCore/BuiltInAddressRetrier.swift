@@ -30,3 +30,24 @@ public struct URLSessionBuiltInAddressRetrier: BuiltInAddressRetrying {
         }
     }
 }
+
+/// BuiltInSignInStarting asks the running engine to start the built-in
+/// node's Tailscale sign-in while it keeps running. The page to open is then
+/// in the engine's status.
+public protocol BuiltInSignInStarting: Sendable {
+    func startSignIn() async throws
+}
+
+/// URLSessionBuiltInSignInStarter posts to the engine's local status
+/// endpoint with the app's LocalStatusSecret.
+public struct URLSessionBuiltInSignInStarter: BuiltInSignInStarting {
+    private let poster: URLSessionBuiltInAddressRetrier
+
+    public init(url: URL, secret: LocalStatusSecret, session: URLSession? = nil) {
+        poster = URLSessionBuiltInAddressRetrier(url: url, secret: secret, session: session)
+    }
+
+    public func startSignIn() async throws {
+        try await poster.tryAgain()
+    }
+}
