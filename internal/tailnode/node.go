@@ -20,6 +20,7 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -46,6 +47,11 @@ const (
 	settleWait = retryMax
 	// publicAttemptTimeout bounds one request to the node's own address.
 	publicAttemptTimeout = 20 * time.Second
+	// publishFirst and publishMax are the waits between the tests made until
+	// the address first answers: a new public name can take minutes to
+	// appear, so the tests start quick and settle at a modest rate.
+	publishFirst = 5 * time.Second
+	publishMax   = 30 * time.Second
 	// loginURLGrace is how long a node that needs a sign-in may lack a
 	// sign-in page before one is asked for.
 	loginURLGrace = 5 * time.Second
@@ -83,6 +89,28 @@ type Options struct {
 	controlURL string
 	// now stands in for time.Now in a test.
 	now func() time.Time
+	// sleep stands in for the waits between tests, startNode for the real
+	// Tailscale server and probe for the public test, in a test.
+	sleep     func(ctx context.Context, d time.Duration) bool
+	probe     ProbeFunc
+	startNode func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error)
+}
+
+// nodeAPI is what the node needs of a running Tailscale server.
+type nodeAPI interface {
+	Status(ctx context.Context) (*ipnstate.Status, error)
+	QueryFunnel(ctx context.Context) (*tailcfg.QueryFeatureResponse, error)
+	ListenFunnel(ctx context.Context) (net.Listener, error)
+	// WarmCertificate has the node fetch or issue the certificate for host.
+	WarmCertificate(ctx context.Context, host string)
+	StartLogin(ctx context.Context) error
+	Watch(ctx context.Context) (ipnWatcher, error)
+	Close() error
+}
+
+type ipnWatcher interface {
+	Next() (ipn.Notify, error)
+	Close() error
 }
 
 // Node is a running built-in Tailscale node.
@@ -95,11 +123,13 @@ type Node struct {
 	done    chan struct{} // closed when the run goroutine has ended
 
 	mon     *Monitor
+	probe   ProbeFunc
 	serving atomic.Bool
 	tryCh   chan chan struct{} // a pending Try Again, answered when its test is done
 
 	mu       sync.Mutex
-	srv      *tsnet.Server
+	srv      *tsnet.Server // the real server, when there is one
+	api      nodeAPI
 	obs      Observation
 	key      string
 	since    time.Time
@@ -109,6 +139,13 @@ type Node struct {
 	cur      *openListener
 	read     *ipnstate.Status // the status the last test read, and its error
 	readErr  error
+	// funnelWasOff is set when a read found Funnel not allowed and cleared
+	// when a later read finds it allowed, which is the one change that has the
+	// node register again.
+	funnelWasOff bool
+	// pendingTry is a Try Again that restarted the node and is answered once
+	// the new server has made its test.
+	pendingTry chan struct{}
 }
 
 // Start begins bringing the node up in the background and returns at once;
@@ -126,7 +163,14 @@ func Start(opts Options) *Node {
 	if n.now == nil {
 		n.now = time.Now
 	}
-	n.mon = NewMonitor(MonitorOptions{Now: n.now, Probe: NewPublicProbe(), Node: n.nodeCheck, Repair: nodeRepair{n}})
+	n.probe = opts.probe
+	if n.probe == nil {
+		n.probe = NewPublicProbe()
+	}
+	if n.opts.startNode == nil {
+		n.opts.startNode = realStart(opts.controlURL)
+	}
+	n.mon = NewMonitor(MonitorOptions{Now: n.now, Probe: n.probe, Node: n.nodeCheck, Repair: nodeRepair{n}})
 	n.since = n.now()
 	ctx, cancel := context.WithCancel(context.Background())
 	n.cancel = cancel
@@ -258,11 +302,11 @@ func (n *Node) Close() {
 		return
 	}
 	n.mu.Lock()
-	srv := n.srv
+	api := n.api
 	n.mu.Unlock()
-	if srv != nil {
+	if api != nil {
 		closed := make(chan struct{})
-		go func() { _ = srv.Close(); close(closed) }()
+		go func() { _ = api.Close(); close(closed) }()
 		select {
 		case <-closed:
 		case <-deadline.C:
@@ -318,29 +362,22 @@ func (n *Node) run(ctx context.Context) {
 	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
 	for first := true; ctx.Err() == nil; first = false {
 		// A server that is restarted keeps the folder, and with it the key.
-		s := &tsnet.Server{
-			Dir:        n.opts.StateDir,
-			Hostname:   n.opts.Hostname,
-			ControlURL: n.opts.controlURL,
-			Logf:       n.logLine,
-			UserLogf:   n.logLine,
-		}
 		gctx, gcancel := context.WithCancel(ctx)
 		n.mu.Lock()
-		n.srv = s
 		n.restart = gcancel
 		n.mu.Unlock()
-		err := s.Start()
+		api, err := n.opts.startNode(n.opts.StateDir, n.opts.Hostname, n.logLine)
 		closeStarted()
 		if err == nil {
-			var lc *local.Client
-			if lc, err = s.LocalClient(); err == nil {
-				n.mu.Lock()
-				close(n.nextUp)
-				n.nextUp = make(chan struct{})
-				n.mu.Unlock()
-				n.watch(gctx, lc, s)
+			n.mu.Lock()
+			n.api = api
+			if rn, ok := api.(*realNode); ok {
+				n.srv = rn.s
 			}
+			close(n.nextUp)
+			n.nextUp = make(chan struct{})
+			n.mu.Unlock()
+			n.watch(gctx, api)
 		}
 		gcancel()
 		n.mu.Lock()
@@ -354,20 +391,107 @@ func (n *Node) run(ctx context.Context) {
 				n.fail("Tailscale could not start: %v", err)
 				return
 			}
-			_ = s.Close()
-			if !sleep(ctx, retryMax) {
+			if !n.sleep(ctx, retryMax) {
 				return
 			}
 			continue
 		}
 		// Only a restart ends the watch while ctx lives. The old server is
 		// closed before the new one takes the folder.
-		_ = s.Close()
+		_ = api.Close()
 		n.update(func(o *Observation) {
 			o.Backend, o.LoginURL, o.NodeIPv4, o.CertDomains, o.FunnelURL = "", "", "", nil, ""
 			o.Listening, o.FunnelAllowed, o.PublicAnswered = false, false, false
 		})
 	}
+}
+
+// realNode is the Tailscale server the engine runs.
+type realNode struct {
+	s  *tsnet.Server
+	lc *local.Client
+}
+
+// realStart starts a Tailscale server on dir, against controlURL when it is
+// set.
+func realStart(controlURL string) func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
+	return func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
+		s := &tsnet.Server{Dir: dir, Hostname: hostname, ControlURL: controlURL, Logf: logf, UserLogf: logf}
+		if err := s.Start(); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		lc, err := s.LocalClient()
+		if err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		return &realNode{s: s, lc: lc}, nil
+	}
+}
+
+func (r *realNode) Status(ctx context.Context) (*ipnstate.Status, error) {
+	return r.lc.StatusWithoutPeers(ctx)
+}
+
+func (r *realNode) QueryFunnel(ctx context.Context) (*tailcfg.QueryFeatureResponse, error) {
+	return r.lc.QueryFeature(ctx, "funnel")
+}
+
+func (r *realNode) StartLogin(ctx context.Context) error { return r.lc.StartLoginInteractive(ctx) }
+
+func (r *realNode) Close() error { return r.s.Close() }
+
+func (r *realNode) Watch(ctx context.Context) (ipnWatcher, error) {
+	return r.lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+}
+
+// ListenFunnel cannot be cancelled by the server, so whatever it returns after
+// ctx is done is closed here and never holds the port.
+func (r *realNode) ListenFunnel(ctx context.Context) (net.Listener, error) {
+	type result struct {
+		ln  net.Listener
+		err error
+	}
+	res := make(chan result, 1)
+	go func() {
+		ln, err := r.s.ListenFunnel("tcp", publicPort)
+		res <- result{ln, err}
+	}()
+	select {
+	case v := <-res:
+		return v.ln, v.err
+	case <-ctx.Done():
+		go func() {
+			if v := <-res; v.ln != nil {
+				_ = v.ln.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
+// WarmCertificate makes the node fetch or issue the certificate for host.
+// Issuing the first one takes tens of seconds, so it is asked for with its own
+// time, which keeps that wait out of the handshake of the public test.
+func (r *realNode) WarmCertificate(ctx context.Context, host string) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.lc.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// sleep waits for d on the node's clock.
+func (n *Node) sleep(ctx context.Context, d time.Duration) bool {
+	if n.opts.sleep != nil {
+		return n.opts.sleep(ctx, d)
+	}
+	return sleep(ctx, d)
 }
 
 // logLine receives the node's own log lines. Only the monitor's two counts
@@ -386,7 +510,7 @@ func prepareStateDir(dir string) error {
 // watch follows the node's own state notifications until ctx is done,
 // starting a serving cycle whenever the node is running and ending it when
 // it stops.
-func (n *Node) watch(ctx context.Context, lc *local.Client, s *tsnet.Server) {
+func (n *Node) watch(ctx context.Context, api nodeAPI) {
 	var cycleCancel context.CancelFunc
 	defer func() {
 		if cycleCancel != nil {
@@ -402,9 +526,9 @@ func (n *Node) watch(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 	}()
 	backoff := retryFirst
 	for ctx.Err() == nil {
-		w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+		w, err := api.Watch(ctx)
 		if err != nil {
-			if !sleep(ctx, backoff) {
+			if !n.sleep(ctx, backoff) {
 				return
 			}
 			backoff = min(backoff*2, retryMax)
@@ -431,7 +555,7 @@ func (n *Node) watch(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 				}
 			})
 			if *note.State == ipn.NeedsLogin {
-				n.askForLoginURL(ctx, lc)
+				n.askForLoginURL(ctx, api)
 			}
 			if *note.State == ipn.Running {
 				if cycleCancel == nil {
@@ -442,7 +566,7 @@ func (n *Node) watch(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 					n.setPrev(done)
 					go func() {
 						defer close(done)
-						n.serve(cctx, lc, s, prev)
+						n.serve(cctx, api, prev)
 					}()
 				}
 				continue
@@ -483,7 +607,7 @@ func (n *Node) setLoginURL(raw string) {
 // askForLoginURL asks the node for a sign-in page when it still needs one
 // after loginURLGrace, which a node that was signed out later has no other
 // way to give.
-func (n *Node) askForLoginURL(ctx context.Context, lc *local.Client) {
+func (n *Node) askForLoginURL(ctx context.Context, api nodeAPI) {
 	time.AfterFunc(loginURLGrace, func() {
 		if ctx.Err() != nil {
 			return
@@ -492,15 +616,15 @@ func (n *Node) askForLoginURL(ctx context.Context, lc *local.Client) {
 		need := n.obs.Backend == "NeedsLogin" && n.obs.LoginURL == ""
 		n.mu.Unlock()
 		if need {
-			_ = lc.StartLoginInteractive(ctx)
+			_ = api.StartLogin(ctx)
 		}
 	})
 }
 
 // serve runs one cycle while the node is running: it turns the public
-// listener on once Funnel is allowed, confirms the public address answers,
+// listener on once Funnel is allowed, waits for the public address to answer,
 // and starts over if Funnel stops being allowed. It ends when ctx is done.
-func (n *Node) serve(ctx context.Context, lc *local.Client, s *tsnet.Server, prev <-chan struct{}) {
+func (n *Node) serve(ctx context.Context, api nodeAPI, prev <-chan struct{}) {
 	if prev != nil {
 		select {
 		case <-prev:
@@ -509,21 +633,22 @@ func (n *Node) serve(ctx context.Context, lc *local.Client, s *tsnet.Server, pre
 		}
 	}
 	for ctx.Err() == nil {
-		n.session(ctx, lc, s)
+		n.session(ctx, api)
 		n.update(func(o *Observation) { o.Listening, o.FunnelAllowed, o.PublicAnswered = false, false, false })
 	}
 }
 
-// refresh reads the node's addresses and the names it may get a certificate
-// for. When the read fails nothing is changed and the error is returned, so a
-// caller never goes on as if the old values were current.
-func (n *Node) refresh(ctx context.Context, lc *local.Client) error {
-	st, err := lc.StatusWithoutPeers(ctx)
+// refresh reads the node's addresses, the names it may get a certificate for
+// and when its key expires. When the read fails nothing is changed and the
+// error is returned, so a caller never goes on as if the old values were
+// current.
+func (n *Node) refresh(ctx context.Context, api nodeAPI) (*ipnstate.Status, error) {
+	st, err := api.Status(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	n.applyStatus(st)
-	return nil
+	return st, nil
 }
 
 func (n *Node) applyStatus(st *ipnstate.Status) {
@@ -535,22 +660,37 @@ func (n *Node) applyStatus(st *ipnstate.Status) {
 		}
 	}
 	domains := append([]string(nil), st.CertDomains...)
-	n.update(func(o *Observation) { o.NodeIPv4, o.CertDomains = ip, domains })
+	var expiry time.Time
+	if st.Self != nil && st.Self.KeyExpiry != nil {
+		expiry = *st.Self.KeyExpiry
+	}
+	n.update(func(o *Observation) { o.NodeIPv4, o.CertDomains, o.KeyExpiry = ip, domains, expiry })
+}
+
+// StartSignIn starts the node's interactive sign-in. The page it names reaches
+// the status as the page to sign in again at, while the node keeps running.
+func (n *Node) StartSignIn(ctx context.Context) error {
+	n.mu.Lock()
+	api := n.api
+	n.mu.Unlock()
+	if api == nil {
+		return ErrNotServing
+	}
+	return api.StartLogin(ctx)
 }
 
 // openListener is the public listener and the server on it, with the
 // handles a repair needs to open them again.
 type openListener struct {
-	lc     *local.Client
-	s      *tsnet.Server
+	api    nodeAPI
 	srv    *http.Server
 	served chan struct{} // closed when srv has stopped serving
 }
 
 // open turns Funnel on and serves the relay on it. It returns false when ctx
-// is done.
-func (n *Node) open(ctx context.Context, lc *local.Client, s *tsnet.Server) (*openListener, bool) {
-	ln, ok := n.listen(ctx, lc, s)
+// is done, or when the node is being restarted to register again.
+func (n *Node) open(ctx context.Context, api nodeAPI) (*openListener, bool) {
+	ln, ok := n.listen(ctx, api)
 	if !ok {
 		return nil, false
 	}
@@ -563,8 +703,17 @@ func (n *Node) open(ctx context.Context, lc *local.Client, s *tsnet.Server) (*op
 		defer close(served)
 		_ = srv.Serve(LimitListener(ln, MaxPublicConns))
 	}()
-	n.update(func(o *Observation) { o.Listening, o.FunnelAllowed, o.FunnelURL = true, true, "" })
-	return &openListener{lc: lc, s: s, srv: srv, served: served}, true
+	answered := n.mon.Answered()
+	now := n.now()
+	n.update(func(o *Observation) {
+		o.Listening, o.FunnelAllowed, o.FunnelURL = true, true, ""
+		// The wait for the first answer begins when the address first starts
+		// being served, and not again when the listener is reopened.
+		if !answered && o.PublishingSince.IsZero() {
+			o.PublishingSince = now
+		}
+	})
+	return &openListener{api: api, srv: srv, served: served}, true
 }
 
 func (l *openListener) stop() {
@@ -587,7 +736,7 @@ func (n *Node) reopen(ctx context.Context) error {
 	}
 	old.stop()
 	n.update(func(o *Observation) { o.Listening = false })
-	fresh, ok := n.open(ctx, old.lc, old.s)
+	fresh, ok := n.open(ctx, old.api)
 	if !ok {
 		return ctx.Err()
 	}
@@ -608,7 +757,23 @@ func (n *Node) currentServed() <-chan struct{} {
 
 // policyOK reports whether the node's tailnet still allows Funnel for it.
 func policyOK(st *ipnstate.Status) bool {
-	return len(st.CertDomains) > 0 && ipn.CheckFunnelAccess(443, st.Self) == nil
+	return len(st.CertDomains) > 0 && st.Self != nil && ipn.CheckFunnelAccess(443, st.Self) == nil
+}
+
+// funnelTurnedOn records what a policy read says and reports whether Funnel
+// is allowed now after a read that found it not allowed. A node whose policy
+// changed while it ran is not known to the Funnel relays until it registers
+// again, so that is the one change that has the node restart.
+func (n *Node) funnelTurnedOn(allowed bool) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if !allowed {
+		n.funnelWasOff = true
+		return false
+	}
+	was := n.funnelWasOff
+	n.funnelWasOff = false
+	return was
 }
 
 // nodeHealth is what the status says about the node itself.
@@ -624,10 +789,20 @@ func nodeHealth(st *ipnstate.Status, err error) ProbeClass {
 	return ProbeOK
 }
 
+// host is the public name, once the node has one.
+func (n *Node) host() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.obs.CertDomains) > 0 {
+		return n.obs.CertDomains[0]
+	}
+	return ""
+}
+
 // session listens for Funnel traffic, serves the relay on it and tests it,
 // until Funnel stops being allowed, the listener dies or ctx is done.
-func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
-	l, ok := n.open(ctx, lc, s)
+func (n *Node) session(ctx context.Context, api nodeAPI) {
+	l, ok := n.open(ctx, api)
 	if !ok {
 		return
 	}
@@ -641,45 +816,39 @@ func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 		n.mu.Unlock()
 		cur.stop()
 	}()
+	n.serving.Store(true)
+	defer n.serving.Store(false)
 
-	wait := settleWait
+	var wait time.Duration
 	if n.mon.Answered() {
-		// The address has answered before, so the node's own first request
-		// is not repeated; the monitor's tests decide from here.
+		// The address has answered before, so the first test is not repeated;
+		// the monitor's tests decide from here.
 		n.update(func(o *Observation) { o.PublicAnswered = true })
 		wait = max(n.mon.Due(), settleWait)
 	} else {
-		if !n.waitPublic(ctx, lc) {
+		if !n.publish(ctx, api) {
 			return
 		}
-		n.mon.MarkAnswered()
 		wait = n.mon.Due()
 	}
 
-	n.serving.Store(true)
-	defer n.serving.Store(false)
 	t := time.NewTimer(wait)
 	defer t.Stop()
 	// test reads the status, ends the session if the tailnet no longer
 	// allows Funnel, and otherwise makes one test. It returns the wait before
 	// the next one and whether the session goes on.
 	test := func(try bool) (time.Duration, bool) {
-		st, err := lc.StatusWithoutPeers(ctx)
-		if err == nil {
-			if !policyOK(st) {
-				return 0, false
-			}
-			n.applyStatus(st)
+		st, err := n.refresh(ctx, api)
+		if err == nil && !policyOK(st) {
+			n.funnelTurnedOn(false)
+			return 0, false
 		}
 		// The monitor judges the node by this read, so a failed one is a
 		// failed test and never leaves the old state standing.
 		n.mu.Lock()
 		n.read, n.readErr = st, err
-		var host string
-		if len(n.obs.CertDomains) > 0 {
-			host = n.obs.CertDomains[0]
-		}
 		n.mu.Unlock()
+		host := n.host()
 		if host == "" {
 			return n.mon.Due(), true
 		}
@@ -709,131 +878,155 @@ func (n *Node) session(ctx context.Context, lc *local.Client, s *tsnet.Server) {
 	}
 }
 
-// listen turns Funnel on, retrying on a short backoff while it is refused
-// and offering the page that fixes it. It returns false when ctx is done.
+// publish makes the public tests of a new address until one is answered, and
+// reports whether one was. A new public name can take minutes to exist and a
+// relay can drop a connection meanwhile, so no failure here ends the wait; the
+// state turns to not reachable by its own age. A person who presses Try Again
+// has the node registered again, within the restart limits, and tested at
+// once.
+func (n *Node) publish(ctx context.Context, api nodeAPI) bool {
+	wait := publishFirst
+	n.mu.Lock()
+	try := n.pendingTry
+	n.pendingTry = nil
+	n.mu.Unlock()
+	first := true
+	for {
+		if !first && try == nil {
+			var ok bool
+			d := wait
+			wait = min(wait*2, publishMax)
+			if try, ok = n.waitOrTry(ctx, d); !ok {
+				return false
+			}
+			if try != nil && n.mon.AllowRestart() {
+				n.mu.Lock()
+				n.pendingTry = try
+				n.mu.Unlock()
+				// Registering again starts the wait over.
+				n.update(func(o *Observation) { o.PublishingSince = time.Time{} })
+				n.requestRestart()
+				return false
+			}
+		}
+		first = false
+		answered := n.publicTest(ctx, api)
+		if try != nil {
+			close(try)
+			try = nil
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if answered {
+			return true
+		}
+	}
+}
+
+// publicTest makes one test of the address and, when it is answered, records
+// it as the first. A failed test is only counted.
+func (n *Node) publicTest(ctx context.Context, api nodeAPI) bool {
+	if _, err := n.refresh(ctx, api); err != nil {
+		return false
+	}
+	host := n.host()
+	if host == "" {
+		return false
+	}
+	api.WarmCertificate(ctx, host)
+	if ctx.Err() != nil {
+		return false
+	}
+	class := n.probe(ctx, host)
+	if ctx.Err() != nil {
+		return false
+	}
+	if class != ProbeOK {
+		n.mon.NoteFailure(class)
+		return false
+	}
+	n.mon.MarkAnswered()
+	n.update(func(o *Observation) {
+		o.PublicAnswered = true
+		o.PublishingSince = time.Time{}
+		o.TailscaleErr, o.TailscaleErrClass = "", ""
+	})
+	return true
+}
+
+// waitOrTry waits d, or until a Try Again arrives, which it returns. It
+// reports false when ctx is done.
+func (n *Node) waitOrTry(ctx context.Context, d time.Duration) (chan struct{}, bool) {
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	slept := make(chan bool, 1)
+	go func() { slept <- n.sleep(wctx, d) }()
+	select {
+	case ok := <-slept:
+		return nil, ok
+	case try := <-n.tryCh:
+		cancel()
+		<-slept
+		return try, ctx.Err() == nil
+	case <-ctx.Done():
+		cancel()
+		<-slept
+		return nil, false
+	}
+}
+
+// listen turns Funnel on, retrying on a short backoff while it is refused,
+// and keeping the text of each refusal for the person. It returns false when
+// ctx is done, or when Funnel has just become allowed on a node that was
+// running without it, which is restarted to register again.
 //
 // The listener is not Funnel-only: a phone that also runs Tailscale resolves
 // the public name to the node's tailnet address, and a Funnel-only listener
 // refuses it.
-func (n *Node) listen(ctx context.Context, lc *local.Client, s *tsnet.Server) (net.Listener, bool) {
+func (n *Node) listen(ctx context.Context, api nodeAPI) (net.Listener, bool) {
 	wait := retryFirst
 	for {
-		if n.refresh(ctx, lc) != nil {
+		st, err := n.refresh(ctx, api)
+		if err != nil {
 			// Without a current read the node cannot be told to listen.
-			if !sleep(ctx, wait) {
+			if !n.sleep(ctx, wait) {
 				return nil, false
 			}
 			wait = min(wait*2, retryMax)
 			continue
 		}
-		fr, err := lc.QueryFeature(ctx, "funnel")
+		if n.funnelTurnedOn(policyOK(st)) {
+			n.mon.RecordRestart()
+			n.requestRestart()
+			return nil, false
+		}
+		fr, qerr := api.QueryFunnel(ctx)
 		funnelURL := ""
-		if err == nil && !fr.Complete {
+		if qerr == nil && !fr.Complete {
 			funnelURL = fr.URL
 		}
 		n.update(func(o *Observation) { o.FunnelURL = funnelURL })
 
-		type result struct {
-			ln  net.Listener
-			err error
+		ln, lerr := api.ListenFunnel(ctx)
+		if lerr == nil {
+			return ln, true
 		}
-		res := make(chan result, 1)
-		go func() {
-			ln, err := s.ListenFunnel("tcp", publicPort)
-			res <- result{ln, err}
-		}()
-		select {
-		case r := <-res:
-			if r.err == nil {
-				return r.ln, true
-			}
-		case <-ctx.Done():
-			// ListenFunnel cannot be cancelled; whatever it returns is
-			// closed here so it never holds the port.
-			go func() {
-				if r := <-res; r.ln != nil {
-					_ = r.ln.Close()
-				}
-			}()
+		if ctx.Err() != nil {
 			return nil, false
 		}
-		n.update(func(o *Observation) { o.Listening, o.FunnelAllowed = false, false })
-		if !sleep(ctx, wait) {
+		// The text may name an address or the host, so it goes to the status
+		// for the person and nowhere else; only its class is counted.
+		text := lerr.Error()
+		n.update(func(o *Observation) {
+			o.Listening, o.FunnelAllowed = false, false
+			o.TailscaleErr, o.TailscaleErrClass = text, ClassifyTailscaleError(text)
+		})
+		if !n.sleep(ctx, wait) {
 			return nil, false
 		}
 		wait = min(wait*2, retryMax)
 	}
-}
-
-// waitPublic makes the node's first request to its own public address and
-// repeats it on a backoff until one is answered or ctx is done. The request
-// goes through the machine's own network and resolver, not the node's
-// dialer, so it travels the route a phone's request travels and a name that
-// only the tailnet resolves cannot pass for the public one.
-func (n *Node) waitPublic(ctx context.Context, lc *local.Client) bool {
-	wait := retryFirst
-	client := &http.Client{
-		Timeout: publicAttemptTimeout,
-		Transport: &http.Transport{
-			DisableKeepAlives:   true,
-			TLSHandshakeTimeout: publicAttemptTimeout,
-		},
-	}
-	defer client.CloseIdleConnections()
-	for {
-		var host string
-		if n.refresh(ctx, lc) == nil {
-			n.mu.Lock()
-			if len(n.obs.CertDomains) > 0 {
-				host = n.obs.CertDomains[0]
-			}
-			n.mu.Unlock()
-		}
-		if host != "" {
-			// Issuing the first certificate takes tens of seconds; asking for
-			// it here, with its own time, keeps that wait out of the
-			// handshake of the request below.
-			n.warmCertificate(ctx, lc, host)
-			if ctx.Err() != nil {
-				return false
-			}
-			if answered(ctx, client, host) {
-				n.update(func(o *Observation) { o.PublicAnswered = true })
-				return true
-			}
-		}
-		if !sleep(ctx, wait) {
-			return false
-		}
-		wait = min(wait*2, retryMax)
-	}
-}
-
-// warmCertificate makes the node fetch or issue the certificate for host.
-func (n *Node) warmCertificate(ctx context.Context, lc *local.Client, host string) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = lc.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
-}
-
-func answered(ctx context.Context, client *http.Client, host string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+publicCheckPath, nil)
-	if err != nil {
-		return false
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	return resp.StatusCode == http.StatusOK
 }
 
 // sleep waits for d or ctx, and reports whether the full wait passed.
