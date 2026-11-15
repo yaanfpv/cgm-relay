@@ -104,12 +104,18 @@ func (m *Monitor) TryAgain(ctx context.Context, host string) time.Duration {
 
 func (m *Monitor) test(ctx context.Context, host string) time.Duration {
 	// The public test always runs, and an answer is Ready whatever the node
-	// reports. Only a failed test is explained by the node: one that is
-	// offline, unhealthy or unreadable makes it waiting, not a route fault.
+	// reports. Only a failed test is explained by the node, and only by a node
+	// that is offline or cannot be read: that is waiting, not a route fault.
+	// Health warnings are counted and change nothing, since one that never
+	// clears must not hide a real drop or stop its repair.
 	class := m.opts.Probe(ctx, host)
+	health := false
 	if class != ProbeOK && class != ProbeTailnetAddress && m.opts.Node != nil {
-		if node := m.opts.Node(ctx); node != ProbeOK {
+		switch node := m.opts.Node(ctx); node {
+		case ProbeNodeOffline, ProbeStatusRead:
 			class = node
+		case ProbeNodeHealth:
+			health = true
 		}
 	}
 	if ctx.Err() != nil {
@@ -118,6 +124,9 @@ func (m *Monitor) test(ctx context.Context, host string) time.Duration {
 		return m.Due()
 	}
 	m.mu.Lock()
+	if health && m.counts[ProbeNodeHealth.String()] < MaxCount {
+		m.counts[ProbeNodeHealth.String()]++
+	}
 	next, repair := m.record(class, m.opts.Now())
 	m.mu.Unlock()
 	if m.opts.Repair != nil {

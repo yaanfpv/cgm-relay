@@ -722,7 +722,12 @@ func TestMonitorMacSideFailureWaitsAndNeverRepairs(t *testing.T) {
 		pairs = append(pairs, pair{class, tailnode.ProbeOK})
 	}
 	for _, class := range nodeClasses {
-		pairs = append(pairs, pair{class, tailnode.ProbeRouteDropped}, pair{class, tailnode.ProbeMacDNS})
+		// A health warning explains nothing about a route failure, so it is
+		// paired with a failure on the Mac's side only.
+		if class != tailnode.ProbeNodeHealth {
+			pairs = append(pairs, pair{class, tailnode.ProbeRouteDropped})
+		}
+		pairs = append(pairs, pair{class, tailnode.ProbeMacDNS})
 	}
 	for _, p := range pairs {
 		t.Run(p.class.String()+"/"+p.probe.String(), func(t *testing.T) {
@@ -777,6 +782,31 @@ func TestMonitorMacSideFailureWaitsAndNeverRepairs(t *testing.T) {
 			t.Errorf("repairs ran while the Mac's network was down: %v", r.rep.kinds[before:])
 		}
 	})
+}
+
+// TestMonitorHealthWarningNeverHidesARouteFailure protects the repair of a
+// real drop on a node that carries a health warning which never clears: the
+// route failures count toward not answering and the ladder runs as usual,
+// and the warning is only counted. A warning that turned the state into
+// waiting would leave the address dead with nothing repairing it.
+func TestMonitorHealthWarningNeverHidesARouteFailure(t *testing.T) {
+	r := newRig(t)
+	r.ready()
+	r.node = tailnode.ProbeNodeHealth
+	for _, d := range []time.Duration{0, 100 * time.Second, 240 * time.Second} {
+		r.step(d, tailnode.ProbeRouteDropped)
+	}
+	if got := r.state(); got != "not-answering" {
+		t.Fatalf("ts_state = %q, want not-answering", got)
+	}
+	r.step(300*time.Second, tailnode.ProbeRouteDropped)
+	r.step(360*time.Second, tailnode.ProbeRouteDropped)
+	if want := []string{"reopen", "reopen", "restart"}; !slices.Equal(r.rep.kinds, want) {
+		t.Errorf("repairs %v, want %v", r.rep.kinds, want)
+	}
+	if got := r.m.Counts()["node_unhealthy"]; got != 5 {
+		t.Errorf("node_unhealthy count = %d, want 5", got)
+	}
 }
 
 // TestMonitorTailnetAddressCountsAsNeither protects against a name that
