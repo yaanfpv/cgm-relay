@@ -208,7 +208,8 @@ func (n *Node) logState(changed bool, key string) {
 }
 
 // TryAgain makes a public test at once and takes the next repair step if it
-// fails, then returns. It returns ErrNotServing while there is no listener to
+// fails, then returns. While the address is publishing or not reachable the
+// press first switches Funnel off and on, within the press limits. It returns ErrNotServing while there is no listener to
 // test, and does nothing more when a press is already waiting.
 func (n *Node) TryAgain(ctx context.Context) error {
 	if !n.serving.Load() {

@@ -63,12 +63,13 @@ public enum DiagnosticsReport {
         return lines.joined(separator: "\n")
     }
 
+    /// errorClasses are the only Tailscale error classes a report carries.
+    private static let errorClasses = ["listen_failed", "https_disabled", "node_attribute_missing"]
+
     /// countNames are the only names the engine counts under (its Tailscale
     /// log lines and its failure classes). A count under any other name is
     /// dropped, so a report can never carry an address or a host the engine
     /// did not mean as a count.
-    private static let errorClasses = ["listen_failed", "https_disabled", "node_attribute_missing"]
-
     private static let countNames = [
         "ingress_denied", "handshake", "control_reconnect",
         "dropped_during_tls", "tls_failure", "server_error", "name_not_published",

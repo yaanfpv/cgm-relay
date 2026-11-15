@@ -193,7 +193,7 @@ struct DiagnosticsReportTests {
         }
     }
 
-    @Test("without the built-in route the line is the chosen reach, as before")
+    @Test("without the built-in route the line is the chosen reach")
     func otherRouteUnchanged() {
         #expect(reachLine(builtIn: nil) == "Reach: This Mac only")
         #expect(reachLine(builtIn: nil, reach: .myTailnet) == "Reach: My tailnet")

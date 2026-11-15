@@ -807,8 +807,9 @@ func TestNodeNotReachableAfterFifteenMinutesAndTryAgainReRegistersWithoutRestart
 	tn.waitState("running")
 }
 
-// TestNodeAnswerAfterTheWindowStillFinishesSetup protects that setup finishes without a press: after the window has passed and the state is not-reachable, the
-// next ordinary test that is answered makes the address ready with no press.
+// TestNodeAnswerAfterTheWindowStillFinishesSetup protects setup finishing
+// without a press: once the window has passed and the state is not-reachable,
+// the next ordinary test that is answered makes the address ready.
 func TestNodeAnswerAfterTheWindowStillFinishesSetup(t *testing.T) {
 	tn := newFakeTailnet(t)
 	n := tn.run()
@@ -857,16 +858,13 @@ func TestNodeTryAgainKeepsTheReRegisterCaps(t *testing.T) {
 // node has a registration the servers may not have taken yet, so the first
 // failed public test after any restart switches Funnel off and on, once, on
 // the new node, before the ladder may restart again, however many restarts
-// the ladder makes. The tests are the ones a
-// person's presses make, since a serving node's own tests wait on a real
-// timer. So that a press's own toggle can never stand in for the one under
-// test, three presses spent the press limit first (one toggle per five
-// minutes, three per hour) while the address answered, and every press after
-// them is a minute from the last and inside that hour: any toggle seen on a
-// new node is the failed test's.
+// the ladder makes. The failed tests are driven by presses, since a serving
+// node's own tests wait on a real timer. A press on a serving node never
+// re-registers Funnel itself, so any toggle seen on a new node is the failed
+// test's.
 func TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart(t *testing.T) {
 	tn := newFakeTailnet(t)
-	tn.runReady() // the first press
+	tn.runReady()
 	for i := 0; i < 2; i++ {
 		tn.clock.advance(5 * time.Minute)
 		tn.settle(time.Hour)
@@ -882,7 +880,7 @@ func TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart(t *test
 		t.Fatalf("the ladder never restarted the node, so the check cannot tell: %v", evs)
 	}
 	if over := tn.clock.Now().Sub(spent); over >= 50*time.Minute {
-		t.Fatalf("%v of failed tests: the press limit is no longer spent, so the check cannot tell", over)
+		t.Fatalf("%v of failed tests: the failed tests ran past the hour, so the check cannot tell", over)
 	}
 	for gen := 2; gen <= tn.startCount(); gen++ {
 		started := slices.Index(evs, fmt.Sprintf("start#%d", gen))

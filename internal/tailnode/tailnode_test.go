@@ -654,9 +654,9 @@ func TestMonitorNotAnsweringNeedsThreeFailuresOverFourMinutes(t *testing.T) {
 	}
 }
 
-// TestMonitorSuccessEndsTheRun protects that the first successful test returns Ready and that a success starts the count again: two failures, a success
-// and two more failures are not a run of three, and the run that does
-// complete is timed from its own first failure.
+// TestMonitorSuccessEndsTheRun protects the run count restarting after a
+// success: two failures, a success and two more failures are not a run of
+// three, and the run that does complete is timed from its own first failure.
 func TestMonitorSuccessEndsTheRun(t *testing.T) {
 	r := newRig(t)
 	r.ready()
