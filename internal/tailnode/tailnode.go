@@ -22,7 +22,14 @@ const (
 	StateNeedsFunnel   = "needs-funnel"
 	StateSettingUp     = "setting-up"
 	StateRunning       = "running"
-	StateError         = "error"
+	// StateNotAnswering is a running node whose public address stopped
+	// answering while the Mac's own network is fine; the engine is repairing it.
+	StateNotAnswering = "not-answering"
+	// StateWaitingForInternet is a running node whose test could not be made,
+	// or could not say anything about the public route, because the Mac or the
+	// node is offline or unhealthy. Nothing is repaired for it.
+	StateWaitingForInternet = "waiting-for-internet"
+	StateError              = "error"
 )
 
 // StartingLimit is how long the node may stay in starting before the state
@@ -38,6 +45,11 @@ const StartingLimit = 2 * time.Minute
 // three minutes covers the slowest first run seen with a margin and still
 // reports a stuck address while a person is looking at the screen.
 const SettingUpLimit = 3 * time.Minute
+
+// ReadyFreshness is how old the last successful public test may be before
+// the state stops saying running. Tests come every two minutes, so a healthy
+// address never reaches it.
+const ReadyFreshness = 6 * time.Minute
 
 // MaxPublicConns caps the connections open at once on the public listener. A
 // follower phone holds one or two, so the cap only ever bites a flood.
@@ -68,6 +80,20 @@ type Observation struct {
 	// PublicAnswered reports that a request the node made to its own public
 	// address was answered.
 	PublicAnswered bool
+	// Now is the time of the observation. While it is set, running needs a
+	// successful public test no older than ReadyFreshness before it.
+	Now time.Time
+	// CheckedAt is when the public address last answered a test.
+	CheckedAt time.Time
+	// NotAnsweringSince is when the run of failed tests that made the public
+	// address stop answering began; zero while it answers.
+	NotAnsweringSince time.Time
+	// WaitingForInternet reports that the last test failed on the Mac's side
+	// or the node's, which says nothing about the public route.
+	WaitingForInternet bool
+	// Counts are bounded counts of failure classes and of two kinds of
+	// Tailscale log line, for diagnostics. They never hold a line or an address.
+	Counts map[string]int
 	// InStateFor is how long the observation has led to the same state.
 	InStateFor time.Duration
 	// LastErr is a failure the node cannot recover from by waiting.
@@ -83,11 +109,25 @@ type Status struct {
 	FunnelURL  string `json:"ts_funnel_url,omitempty"`
 	PublicHost string `json:"ts_public_host,omitempty"`
 	Error      string `json:"ts_error,omitempty"`
+	// CheckedAt is when the public address last answered, UTC, on a running
+	// state.
+	CheckedAt string `json:"ts_checked_at,omitempty"`
+	// NotAnsweringSince is when the address stopped answering, UTC.
+	NotAnsweringSince string         `json:"ts_not_answering_since,omitempty"`
+	Counts            map[string]int `json:"ts_counts,omitempty"`
 }
 
 // State maps an observation to the status to report. It reads no clock and
 // does no I/O.
 func State(o Observation) Status {
+	s := stateOf(o)
+	if len(o.Counts) > 0 {
+		s.Counts = o.Counts
+	}
+	return s
+}
+
+func stateOf(o Observation) Status {
 	if o.LastErr != "" {
 		return Status{State: StateError, Error: o.LastErr}
 	}
@@ -115,14 +155,29 @@ func running(o Observation) Status {
 		return Status{State: StateNeedsFunnel, FunnelURL: o.FunnelURL}
 	}
 	host := o.CertDomains[0]
-	if !o.Listening || !o.PublicAnswered {
+	// A Mac that cannot test says nothing about the route, so it outranks a
+	// not-answering report from before.
+	if o.WaitingForInternet {
+		return Status{State: StateWaitingForInternet, PublicHost: host}
+	}
+	if !o.NotAnsweringSince.IsZero() {
+		return Status{State: StateNotAnswering, PublicHost: host, NotAnsweringSince: stamp(o.NotAnsweringSince)}
+	}
+	stale := !o.Now.IsZero() && (o.CheckedAt.IsZero() || o.Now.Sub(o.CheckedAt) > ReadyFreshness)
+	if !o.Listening || !o.PublicAnswered || stale {
 		if o.InStateFor >= SettingUpLimit {
 			return Status{State: StateError, Error: "Your address did not answer in time. Check your internet connection and try again."}
 		}
 		return Status{State: StateSettingUp, PublicHost: host}
 	}
-	return Status{State: StateRunning, PublicHost: host}
+	s := Status{State: StateRunning, PublicHost: host}
+	if !o.CheckedAt.IsZero() {
+		s.CheckedAt = stamp(o.CheckedAt)
+	}
+	return s
 }
+
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // allowedExact are the paths of the follower API the relay serves. They are
 // the paths internal/nightscout registers; a path added there is not public
