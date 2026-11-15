@@ -864,23 +864,35 @@ func TestNodeTryAgainKeepsTheReRegisterCaps(t *testing.T) {
 // TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart
 // protects the repair ladder's last rung from undoing itself: a restarted
 // node has a registration the servers may not have taken yet, so the first
-// failed public test after any restart switches Funnel off and on, on the new
-// node, before the ladder may restart again, however many restarts the
-// ladder makes. A ladder that restarts a second time with no re-registration
-// between the two fails it. The tests are the ones a person's presses make a
-// minute apart, since a serving node's own tests wait on a real timer.
+// failed public test after any restart switches Funnel off and on, once, on
+// the new node, before the ladder may restart again, however many restarts
+// the ladder makes. A ladder that restarts a second time with no
+// re-registration between the two fails it. The tests are the ones a
+// person's presses make, since a serving node's own tests wait on a real
+// timer. So that a press's own toggle can never stand in for the one under
+// test, three presses spent the press limit first (one toggle per five
+// minutes, three per hour) while the address answered, and every press after
+// them is a minute from the last and inside that hour: any toggle seen on a
+// new node is the failed test's.
 func TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart(t *testing.T) {
 	tn := newFakeTailnet(t)
-	tn.runReady()
+	tn.runReady() // the first press
+	for i := 0; i < 2; i++ {
+		tn.clock.advance(5 * time.Minute)
+		tn.settle(time.Hour)
+	}
+	spent := tn.clock.Now()
 	tn.setResult(ProbeRouteDropped)
 	for i := 0; i < 40 && tn.startCount() < 3; i++ {
 		tn.clock.advance(time.Minute)
-		tn.event("press")
 		tn.settle(time.Hour)
 	}
 	evs := tn.log()
 	if tn.startCount() < 2 {
 		t.Fatalf("the ladder never restarted the node, so the check cannot tell: %v", evs)
+	}
+	if over := tn.clock.Now().Sub(spent); over >= 50*time.Minute {
+		t.Fatalf("%v of failed tests: the press limit is no longer spent, so the check cannot tell", over)
 	}
 	for gen := 2; gen <= tn.startCount(); gen++ {
 		started := slices.Index(evs, fmt.Sprintf("start#%d", gen))
@@ -889,17 +901,12 @@ func TestNodeFirstFailedTestAfterARestartReRegistersBeforeTheNextRestart(t *test
 			end = n
 		}
 		window := evs[started:end]
-		firstTest := slices.Index(window, "press")
-		if firstTest < 0 {
+		if !slices.Contains(window, "probe") {
 			continue
 		}
-		stop := len(window)
-		if n := slices.Index(window[firstTest+1:], "press"); n >= 0 {
-			stop = firstTest + 1 + n
-		}
 		off, on := slices.Index(window, fmt.Sprintf("funnel-off#%d", gen)), slices.Index(window, fmt.Sprintf("funnel-on#%d", gen))
-		if off < 0 || on < off || on > stop {
-			t.Errorf("after restart %d the first failed test did not re-register Funnel on the new node before the next test: %v", gen-1, window)
+		if off < 0 || on < off || countPrefix(window, "funnel-off") != 1 {
+			t.Errorf("after restart %d the failed tests made %d re-registrations on the new node before the next restart, want exactly one: %v", gen-1, countPrefix(window, "funnel-off"), window)
 		}
 	}
 }
@@ -1062,15 +1069,39 @@ func (tn *fakeTailnet) runReady() *Node {
 // way is released, and a wait longer than limit fails the test.
 func (tn *fakeTailnet) settle(limit time.Duration) {
 	tn.t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- tn.node.TryAgain(context.Background()) }()
+	for {
+		done := make(chan error, 1)
+		go func() { done <- tn.node.TryAgain(context.Background()) }()
+		if tn.settleWait(done, limit) {
+			return
+		}
+		// The node was between two servers, as a restart leaves it until the
+		// new one serves. It is waited for on its own flag; the limit is only
+		// the hang ceiling.
+		stop := time.Now().Add(hangCeiling)
+		for !tn.node.serving.Load() {
+			if time.Now().After(stop) {
+				tn.t.Fatalf("the node never served again; events %v", tn.log())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+// settleWait waits for one press to end, releasing the waits the node makes on
+// the way. It reports false when the node was not serving.
+func (tn *fakeTailnet) settleWait(done chan error, limit time.Duration) bool {
+	tn.t.Helper()
 	for {
 		select {
 		case err := <-done:
-			if err != nil {
-				tn.t.Fatalf("TryAgain: %v", err)
+			if errors.Is(err, ErrNotServing) {
+				return false
 			}
-			return
+			if err != nil {
+				tn.t.Fatalf("TryAgain: %v; events %v", err, tn.log())
+			}
+			return true
 		case d := <-tn.sleeping:
 			if d > limit {
 				tn.t.Fatalf("the node waited %v, want at most %v; events %v", d, limit, tn.log())
