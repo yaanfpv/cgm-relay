@@ -285,6 +285,8 @@ type fakeTailnet struct {
 	nodeLogf    func(string, ...any)            // the log hook the node handed the running server
 	funnelOn    bool                            // whether the server's serve config allows Funnel
 	offTimes    []time.Time                     // when Funnel was switched off
+	logoutErr   error                           // what the fake's Logout answers
+	logoutHangs bool                            // Logout waits for its context to end
 
 	probes   atomic.Int64
 	stateCh  chan string
@@ -590,6 +592,22 @@ func (f *fakeNode) StartLogin(context.Context) error {
 	u := "https://login.tailscale.com/a/abc123"
 	f.notes <- ipn.Notify{BrowseToURL: &u}
 	return nil
+}
+
+// Logout is the node telling its control server that this machine leaves the
+// account. It is logged when it starts and again when it returns, so a test
+// can order it against the node's Close.
+func (f *fakeNode) Logout(ctx context.Context) error {
+	f.tn.event(fmt.Sprintf("logout#%d", f.gen))
+	f.tn.mu.Lock()
+	err, hangs := f.tn.logoutErr, f.tn.logoutHangs
+	f.tn.mu.Unlock()
+	if hangs {
+		<-ctx.Done()
+		err = ctx.Err()
+	}
+	f.tn.event(fmt.Sprintf("logout-done#%d", f.gen))
+	return err
 }
 
 func (f *fakeNode) Close() error {
@@ -1586,5 +1604,226 @@ func TestPublicListenerThroughTheNode(t *testing.T) {
 	}
 	if !freed {
 		t.Error("after one of sender A's connections closed, no new connection from A was ever served: its slot was never freed")
+	}
+}
+
+// plantKey puts a file standing for the node key into the state folder and
+// returns its path.
+func (tn *fakeTailnet) plantKey() string {
+	tn.t.Helper()
+	p := filepath.Join(tn.dir, "tailscaled.state")
+	if err := os.WriteFile(p, []byte("node-key"), 0o600); err != nil {
+		tn.t.Fatalf("plant the key: %v", err)
+	}
+	return p
+}
+
+func (tn *fakeTailnet) failLogout(err error) {
+	tn.mu.Lock()
+	tn.logoutErr = err
+	tn.mu.Unlock()
+}
+
+// requireKeptState fails unless the state folder and the key file in it are
+// as plantKey left them.
+func requireKeptState(t *testing.T, tn *fakeTailnet, key, when string) {
+	t.Helper()
+	if got, err := os.ReadFile(key); err != nil || string(got) != "node-key" {
+		t.Errorf("%s: the key file is %q, %v; want it kept unchanged", when, got, err)
+	}
+	if fi, err := os.Stat(tn.dir); err != nil || !fi.IsDir() {
+		t.Errorf("%s: the state folder is gone: %v", when, err)
+	}
+}
+
+// TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder protects the
+// person's Tailscale account from a ghost machine: leaving the built-in route
+// tells the control server first, and only then lets the node stop, and once
+// that has succeeded the folder that held the node key is gone. A node that
+// stopped before logging out, never logged out, or left the folder behind
+// fails it.
+func TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	key := tn.plantKey()
+
+	res, err := n.LeaveTailnet(context.Background())
+	if err != nil || res != LeftAndRemoved {
+		t.Fatalf("LeaveTailnet = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	evs := tn.log()
+	if tn.count("logout#") != 1 {
+		t.Fatalf("the node logged out %d times, want once: %v", tn.count("logout#"), evs)
+	}
+	done := slices.Index(evs, "logout-done#1")
+	if done < 0 {
+		t.Fatalf("logout never returned before LeaveTailnet did: %v", evs)
+	}
+	if cl := slices.Index(evs, "close#1"); cl >= 0 && cl < done {
+		t.Errorf("the node was closed before the logout finished: %v", evs)
+	}
+	if _, err := os.Stat(key); !os.IsNotExist(err) {
+		t.Errorf("the key file is still there after a successful logout: %v", err)
+	}
+	if _, err := os.Stat(tn.dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after a successful logout: %v", err)
+	}
+	if tn.startCount() != 1 {
+		t.Errorf("leaving started a node again: %v", evs)
+	}
+}
+
+// TestLeaveTailnetThatFailsKeepsTheFolderAndTheKey protects the only way to
+// remove the machine later: a logout that did not reach the control server
+// (the Mac is offline) must leave the key where it is, and say so, so the
+// next launch can try again. A folder deleted anyway, or a failure reported as
+// a success, fails it.
+func TestLeaveTailnetThatFailsKeepsTheFolderAndTheKey(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	key := tn.plantKey()
+	tn.failLogout(errors.New("control server unreachable"))
+
+	res, _ := n.LeaveTailnet(context.Background())
+	if res != KeptForRetry {
+		t.Errorf("a failed logout answered %v, want KeptForRetry", res)
+	}
+	if tn.count("logout#") != 1 {
+		t.Errorf("the node tried to log out %d times, want once: %v", tn.count("logout#"), tn.log())
+	}
+	requireKeptState(t, tn, key, "after a failed logout")
+}
+
+// TestLeaveTailnetThatNeverAnswersKeepsTheFolderAndTheKey is the offline Mac
+// whose logout hangs: when the call ends without an answer (here, the caller's
+// context ends once the node is waiting on the control server) the result is
+// the same as a failure, and nothing is deleted.
+func TestLeaveTailnetThatNeverAnswersKeepsTheFolderAndTheKey(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	key := tn.plantKey()
+	tn.mu.Lock()
+	tn.logoutHangs = true
+	tn.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan LeaveResult, 1)
+	go func() {
+		res, _ := n.LeaveTailnet(ctx)
+		got <- res
+	}()
+	tn.waitForEvent("logout#")
+	cancel()
+	select {
+	case res := <-got:
+		if res != KeptForRetry {
+			t.Errorf("a logout that never answered gave %v, want KeptForRetry", res)
+		}
+	case <-time.After(hangCeiling):
+		t.Fatalf("LeaveTailnet never returned after its context ended; events %v", tn.log())
+	}
+	requireKeptState(t, tn, key, "after a logout that never answered")
+}
+
+// TestFailedLeaveIsRetriedOnTheNextLaunch protects the retry: after a failed
+// logout and a quit, a new node started on the kept folder can leave, and then
+// the folder is gone. The first node's end never logs out on its own.
+func TestFailedLeaveIsRetriedOnTheNextLaunch(t *testing.T) {
+	first := newFakeTailnet(t)
+	n := first.runReady()
+	key := first.plantKey()
+	first.failLogout(errors.New("control server unreachable"))
+	if res, _ := n.LeaveTailnet(context.Background()); res != KeptForRetry {
+		t.Fatalf("the first leave answered %v, so the check cannot tell", res)
+	}
+	n.Close()
+	requireKeptState(t, first, key, "after the quit that followed the failed leave")
+	if first.count("logout#") != 1 {
+		t.Errorf("the quit logged out again: %v", first.log())
+	}
+
+	second := newFakeTailnet(t)
+	second.dir = first.dir
+	n2 := second.runReady()
+	res, err := n2.LeaveTailnet(context.Background())
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("the retry = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if _, err := os.Stat(first.dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after the retry succeeded: %v", err)
+	}
+}
+
+// TestNoRestartPathLogsOut protects the node key and the public address from
+// every restart the engine makes: a restart, the repair ladder's restarts and
+// the end of the node all keep the folder and its key, hand the same folder to
+// the next server, and never log out. Only LeaveTailnet logs out.
+func TestNoRestartPathLogsOut(t *testing.T) {
+	t.Run("Restart", func(t *testing.T) {
+		tn := newFakeTailnet(t)
+		n := tn.runReady()
+		key := tn.plantKey()
+		if err := n.Restart(context.Background()); err != nil {
+			t.Fatalf("Restart: %v", err)
+		}
+		tn.settle(time.Hour)
+		if tn.startCount() != 2 {
+			t.Fatalf("starts = %d, want 2, so the check cannot tell: %v", tn.startCount(), tn.log())
+		}
+		if tn.count("logout") != 0 {
+			t.Errorf("a restart logged out: %v", tn.log())
+		}
+		requireKeptState(t, tn, key, "after a restart")
+		tn.requireOneFolder()
+	})
+	t.Run("repair ladder", func(t *testing.T) {
+		tn := newFakeTailnet(t)
+		tn.runReady()
+		key := tn.plantKey()
+		for i := 0; i < 2; i++ {
+			tn.clock.advance(5 * time.Minute)
+			tn.settle(time.Hour)
+		}
+		tn.setResult(ProbeRouteDropped)
+		for i := 0; i < 40 && tn.startCount() < 3; i++ {
+			tn.clock.advance(time.Minute)
+			tn.settle(time.Hour)
+		}
+		if tn.startCount() < 2 {
+			t.Fatalf("the ladder never restarted the node, so the check cannot tell: %v", tn.log())
+		}
+		if tn.count("logout") != 0 {
+			t.Errorf("a repair restart logged out: %v", tn.log())
+		}
+		requireKeptState(t, tn, key, "after the repair restarts")
+		tn.requireOneFolder()
+	})
+	t.Run("Close", func(t *testing.T) {
+		tn := newFakeTailnet(t)
+		n := tn.runReady()
+		key := tn.plantKey()
+		n.Close()
+		if tn.count("close#") == 0 {
+			t.Fatalf("Close never closed the node, so the check cannot tell: %v", tn.log())
+		}
+		if tn.count("logout") != 0 {
+			t.Errorf("Close logged out: %v", tn.log())
+		}
+		requireKeptState(t, tn, key, "after Close")
+	})
+}
+
+// requireOneFolder fails unless every start of the node was on the one state
+// folder of the test.
+func (tn *fakeTailnet) requireOneFolder() {
+	tn.t.Helper()
+	tn.mu.Lock()
+	starts := slices.Clone(tn.starts)
+	tn.mu.Unlock()
+	for _, s := range starts {
+		if s.dir != tn.dir {
+			tn.t.Errorf("a server was started on %s, want the folder %s every time", s.dir, tn.dir)
+		}
 	}
 }

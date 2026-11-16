@@ -535,4 +535,12 @@ struct ReachContinueTests {
             #expect(SetupCompletion.mayContinueFromReach(route: route, choseSetUpLater: true, now: now))
         }
     }
+
+    @Test("the update window's Continue past the route step needs the built-in route chosen and reachable, and only then")
+    func updateRouteStepContinue() {
+        #expect(UpdateRouteStepGate.mayContinue(chosen: true, reachable: true))
+        #expect(!UpdateRouteStepGate.mayContinue(chosen: true, reachable: false), "chosen but not reachable yet")
+        #expect(!UpdateRouteStepGate.mayContinue(chosen: false, reachable: true), "an address that answers on its own is not a choice")
+        #expect(!UpdateRouteStepGate.mayContinue(chosen: false, reachable: false), "nothing chosen must not enable Continue and record the step as answered")
+    }
 }

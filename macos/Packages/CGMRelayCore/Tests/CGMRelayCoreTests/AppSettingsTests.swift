@@ -739,4 +739,34 @@ struct UpdateStepsTests {
             #expect(SetupPlan.make(settings: decoded, tailscaleInstalled: installed) == .updateSteps([.movedToBuiltIn, .stayAwake]))
         }
     }
+
+    @Test("a leave that did not reach Tailscale is remembered across launches, and nothing else asks for a retry")
+    func pendingLeaveRetryPersistsAndDrivesTheRetry() throws {
+        #expect(AppSettings.default.pendingLeaveRetry == false)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: AppSettings.default) == false)
+
+        var pending = AppSettings.default
+        pending.pendingLeaveRetry = true
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(pending))
+        #expect(decoded.pendingLeaveRetry == true, "the retry must survive a quit")
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: decoded) == true)
+
+        // The person who left the built-in route has useBuiltInTailscale off by now; the retry still runs.
+        #expect(decoded.useBuiltInTailscale == false)
+
+        // A launch that still uses the built-in route, with nothing pending, must never leave.
+        var using = AppSettings.default
+        using.useBuiltInTailscale = true
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: using) == false)
+
+        // Settings saved before this existed have nothing pending.
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "useBuiltInTailscale": true}"#.utf8))
+        #expect(older.pendingLeaveRetry == false)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: older) == false)
+
+        // A stored value of the wrong kind falls back instead of resetting the rest.
+        let garbled = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4242, "pendingLeaveRetry": "yes"}"#.utf8))
+        #expect(garbled.port == 4242)
+        #expect(garbled.pendingLeaveRetry == false)
+    }
 }
