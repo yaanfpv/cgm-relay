@@ -14,32 +14,31 @@ import Security
 /// to. A power source change looks at once.
 let intervalSeconds: TimeInterval = 20
 
-/// appIsRunning is whether a process of CGM Relay is in the process list:
-/// one whose code signature meets SleepResetHelper.appRequirement, which
-/// names the bundle identifier. The process's file name only narrows the
-/// list to the few worth checking.
-func appIsRunning() -> Bool {
+/// processListing is the real process list for SleepResetHelper.appIsRunning,
+/// nil when the signature requirement cannot be built (the caller then counts
+/// the app as running).
+func processListing() -> SleepResetHelper.ProcessListing? {
     var requirement: SecRequirement?
     guard SecRequirementCreateWithString(SleepResetHelper.appRequirement as CFString, [], &requirement) == errSecSuccess,
           let requirement
-    else { return true }
-    let count = proc_listallpids(nil, 0)
-    guard count > 0 else { return true }
-    var pids = [pid_t](repeating: 0, count: Int(count) + 64)
-    let filled = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
-    guard filled > 0 else { return true }
-    var pathBuffer = [CChar](repeating: 0, count: 4096)
-    for pid in pids.prefix(Int(filled)) where pid > 0 {
-        let length = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
-        guard length > 0 else { continue }
-        let path = String(decoding: pathBuffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-        guard (path as NSString).lastPathComponent == SleepResetHelper.appExecutableName else { continue }
-        var code: SecCode?
-        let attributes = [kSecGuestAttributePid: pid] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { continue }
-        if SecCodeCheckValidity(code, [], requirement) == errSecSuccess { return true }
-    }
-    return false
+    else { return nil }
+    return SleepResetHelper.ProcessListing(
+        countHint: { proc_listallpids(nil, 0) },
+        fill: { pids in proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)) },
+        executableName: { pid in
+            var pathBuffer = [CChar](repeating: 0, count: 4096)
+            let length = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
+            guard length > 0 else { return nil }
+            let path = String(decoding: pathBuffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            return (path as NSString).lastPathComponent
+        },
+        isGenuineApp: { pid in
+            var code: SecCode?
+            let attributes = [kSecGuestAttributePid: pid] as CFDictionary
+            guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { return false }
+            return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+        }
+    )
 }
 
 /// sleepDisabled is the system's current sleep setting, nil when it cannot
@@ -71,31 +70,24 @@ func runResetCommand() -> Bool {
     }
 }
 
-/// wroteWithoutReading is set after a write made while the setting could
-/// not be read, so an unreadable setting does not run the command at every
-/// look. Anything that could have changed the answer clears it: the app
-/// running, or a power source change.
-nonisolated(unsafe) var wroteWithoutReading = false
+nonisolated(unsafe) var state = SleepResetHelper.Look()
 
 func look() {
-    let running = appIsRunning()
+    let running = processListing().map { SleepResetHelper.appIsRunning(using: $0) } ?? true
     let power = SystemPowerSource().snapshot()
-    let current = sleepDisabled()
-    if running || current != nil { wroteWithoutReading = false }
-    guard SleepResetPolicy.decide(
+    state.run(
         appRunning: running,
         onBattery: power.isLaptop && !power.onACPower,
-        sleepDisabled: current
-    ) == .writeOff else { return }
-    if current == nil && wroteWithoutReading { return }
-    if runResetCommand() && current == nil { wroteWithoutReading = true }
+        sleepDisabled: sleepDisabled(),
+        runCommand: runResetCommand
+    )
 }
 
 look()
 let timer = Timer(timeInterval: intervalSeconds, repeats: true) { _ in look() }
 RunLoop.main.add(timer, forMode: .common)
 if let source = IOPSNotificationCreateRunLoopSource({ _ in
-    wroteWithoutReading = false
+    state.powerSourceChanged()
     look()
 }, nil)?.takeRetainedValue() {
     CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)

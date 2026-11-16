@@ -103,4 +103,81 @@ public enum SleepResetHelper {
     /// to meet to count as this app: its signing identifier is the bundle
     /// identifier, and an Apple-issued certificate signed it.
     public static let appRequirement = "identifier \"\(appBundleIdentifier)\" and anchor apple generic"
+
+    /// ProcessListing is the process list as the helper reads it, in the four
+    /// reads appIsRunning needs, so the system calls stay in the helper's
+    /// main.swift.
+    public struct ProcessListing {
+        /// countHint is the number of processes the system reports before the
+        /// list is copied.
+        public var countHint: () -> Int32
+        /// fill copies pids into the buffer and returns how many it copied.
+        public var fill: (inout [pid_t]) -> Int32
+        public var executableName: (pid_t) -> String?
+        /// isGenuineApp is whether the process meets appRequirement.
+        public var isGenuineApp: (pid_t) -> Bool
+
+        public init(
+            countHint: @escaping () -> Int32,
+            fill: @escaping (inout [pid_t]) -> Int32,
+            executableName: @escaping (pid_t) -> String?,
+            isGenuineApp: @escaping (pid_t) -> Bool
+        ) {
+            self.countHint = countHint
+            self.fill = fill
+            self.executableName = executableName
+            self.isGenuineApp = isGenuineApp
+        }
+    }
+
+    /// slack is how many slots the buffer holds beyond countHint.
+    static let listSlack = 64
+
+    /// appIsRunning is whether CGM Relay counts as running. It reads the list
+    /// once into a buffer of countHint plus listSlack slots. A list that is
+    /// not proven whole (nothing copied, or the copy filled the buffer, so
+    /// more may exist) counts as running; only a whole list with no genuine
+    /// process of the app says it is not. A process whose name or signature
+    /// cannot be read is skipped.
+    public static func appIsRunning(using listing: ProcessListing) -> Bool {
+        let hint = listing.countHint()
+        guard hint > 0 else { return true }
+        var pids = [pid_t](repeating: 0, count: Int(hint) + listSlack)
+        let filled = listing.fill(&pids)
+        guard filled > 0, Int(filled) < pids.count else { return true }
+        for pid in pids.prefix(Int(filled)) where pid > 0 {
+            guard listing.executableName(pid) == appExecutableName else { continue }
+            if listing.isGenuineApp(pid) { return true }
+        }
+        return false
+    }
+
+    /// Look is the helper's state across looks: whether a write was made while
+    /// the setting could not be read, so an unreadable setting does not run
+    /// the command at every look.
+    public struct Look {
+        private var wroteWithoutReading = false
+
+        public init() {}
+
+        /// powerSourceChanged clears what a power source change could have
+        /// changed the answer to.
+        public mutating func powerSourceChanged() {
+            wroteWithoutReading = false
+        }
+
+        /// run is one look: it decides with SleepResetPolicy and calls
+        /// runCommand, which returns whether the command succeeded, only for
+        /// a write.
+        public mutating func run(
+            appRunning: Bool, onBattery: Bool, sleepDisabled: Bool?, runCommand: () -> Bool
+        ) {
+            if appRunning || sleepDisabled != nil { wroteWithoutReading = false }
+            guard SleepResetPolicy.decide(
+                appRunning: appRunning, onBattery: onBattery, sleepDisabled: sleepDisabled
+            ) == .writeOff else { return }
+            if sleepDisabled == nil && wroteWithoutReading { return }
+            if runCommand() && sleepDisabled == nil { wroteWithoutReading = true }
+        }
+    }
 }
