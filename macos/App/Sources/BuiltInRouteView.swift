@@ -177,7 +177,7 @@ struct UseBuiltInTailscaleSection: View {
 /// TailscaleChoiceView asks "Use your Tailscale?" where Tailscale's Mac app
 /// is installed: use it (the Tailscale HTTPS and My tailnet ways) or the one
 /// built into CGM Relay. It is shown only when the app is installed; without
-/// it the built-in route is the only one. It belongs inside a Form.
+/// it the built-in route is the only Tailscale one. It belongs inside a Form.
 struct TailscaleChoiceView: View {
     @ObservedObject var model: AppModel
 
