@@ -489,3 +489,65 @@ struct PrivilegedSleepSettingWriterTests {
         ])
     }
 }
+
+// MARK: - Sleep reset helper
+
+@Suite("SleepResetPolicy")
+struct SleepResetPolicyTests {
+    private let settings: [Bool?] = [true, false, nil]
+
+    @Test("with the app not running, the setting on or unknown is written off, on power or on battery")
+    func notRunningClearsAStuckSetting() {
+        for onBattery in [false, true] {
+            for disabled in [true, nil] as [Bool?] {
+                #expect(
+                    SleepResetPolicy.decide(appRunning: false, onBattery: onBattery, sleepDisabled: disabled) == .writeOff,
+                    "app not running, onBattery \(onBattery), sleepDisabled \(String(describing: disabled))"
+                )
+            }
+        }
+    }
+
+    @Test("with the app not running and the setting already off, nothing is written")
+    func notRunningAndAlreadyOff() {
+        for onBattery in [false, true] {
+            #expect(
+                SleepResetPolicy.decide(appRunning: false, onBattery: onBattery, sleepDisabled: false) == .leaveAlone,
+                "onBattery \(onBattery)"
+            )
+        }
+    }
+
+    @Test("while the app runs the helper never writes, whatever the power source or the setting")
+    func runningIsNeverOverridden() {
+        for onBattery in [false, true] {
+            for disabled in settings {
+                #expect(
+                    SleepResetPolicy.decide(appRunning: true, onBattery: onBattery, sleepDisabled: disabled) == .leaveAlone,
+                    "app running, onBattery \(onBattery), sleepDisabled \(String(describing: disabled))"
+                )
+            }
+        }
+    }
+}
+
+@Suite("SleepResetHelper")
+struct SleepResetHelperTests {
+    @Test("the one command the helper may run is pmset -a disablesleep 0")
+    func commandIsFixed() {
+        #expect(SleepResetHelper.command == ["/usr/bin/pmset", "-a", "disablesleep", "0"])
+    }
+
+    @Test("the helper reads only the process list and the power source")
+    func inputsAreTwo() {
+        #expect(SleepResetHelper.inputs == [.processList, .powerSource])
+    }
+
+    @Test("the boot job runs the same single command as the helper")
+    func bootJobMatchesHelper() throws {
+        let plist = try #require(
+            PropertyListSerialization.propertyList(from: SleepRuleInstaller.bootResetPlist(), format: nil) as? [String: Any]
+        )
+        #expect(plist["ProgramArguments"] as? [String] == SleepResetHelper.command)
+    }
+}
