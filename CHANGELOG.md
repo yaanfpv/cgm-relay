@@ -6,12 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
 ### Added
 
 - Keep this Mac awake, in setup and in Settings: while CGM Relay runs and the Mac is plugged in it doesn't sleep, lid closed included on a laptop, and on battery it sleeps as usual. Turning it on asks for your Mac's password once.
-- Use the Tailscale built into CGM Relay, in setup and in Settings. If you already have Tailscale you choose between yours and the built-in one; if not, you sign in once in a window CGM Relay opens and get a public https address that only your token opens, so your phone needs nothing installed.
+- Use the Tailscale built into CGM Relay, in setup and in Settings. If you already have Tailscale you choose between yours and the built-in one; if not, you sign in once in a window CGM Relay opens and get a public https address that only your token opens, so your phone needs nothing installed. CGM Relay tests the address every two minutes and says Ready only while it answers, with the time it last did; it says when the address stops answering and repairs it by itself, waits quietly while your Mac is offline, and has a Try Again button. A new address shows as publishing while Tailscale makes its name exist, Tailscale's own error appears when it gives one, and Settings warns you before your Tailscale sign-in expires, with a button to sign in again. Setup lets you continue only once the address works, unless you choose Set Up Later.
 - Sweet Dreams and Zukka join the follower apps in Connect. Sweet Dreams reads from its own servers, so it needs the built-in Tailscale address, and Connect offers to switch if you are on your own Tailscale. Zukka, the App Store build of xDrip4iOS, gets the same Connect steps as xDrip4iOS.
 - People updating from an earlier version see only the new steps, in a short "What's new in this update" window, instead of the whole setup again. Each answer is saved as you give it, and Later closes the window until the next launch.
+- Copy Diagnostics includes counts of what went wrong with the built-in address.
 
 ### Changed
 
@@ -22,8 +25,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- The built-in Tailscale address no longer says Ready while it has stopped answering: Settings shows when it was last checked, says when it stops answering and reconnects by itself, waits quietly while your Mac is offline, has a Try Again button, and shows stopped after you stop CGM Relay. Setup now waits while Tailscale publishes a new address, up to 15 minutes, instead of failing after a couple of minutes, shows Tailscale's own error if it gives one, and warns you in Settings before your Tailscale sign-in expires, with a button to sign in again. When Tailscale's connection drops and comes back, the address is tested at once and re-registers itself within seconds if it stopped answering, instead of staying unreachable. Setup now shows only what is true: a Tailscale error appears only while the address is in trouble, Turn On says the address is being turned on after you close its page, and Continue waits for a working address unless you choose Set Up Later. Copy Diagnostics now includes counts of what went wrong.
-- Keeping the Mac awake no longer fails when CGM Relay is busy.
 - Opening CGM Relay while it is already running brings the running copy forward instead of starting a second one.
 - A second copy started at the same moment can no longer undo the sign-in or keys the first one saved.
 - Stopping the relay, or giving up on a check that took too long, now signals only the process CGM Relay started and the processes it started in turn. CGM Relay keeps hold of each process until it has ended, so its number cannot pass to another process while a stop could still be sent, and nothing is sent once it has ended.
