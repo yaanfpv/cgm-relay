@@ -158,6 +158,7 @@ type statusConfig struct {
 	tailnode func() tailnode.Status
 	tryAgain func(context.Context) error
 	signIn   func(context.Context) error
+	leave    func(context.Context) (tailnode.LeaveResult, error)
 }
 
 // withTailnode adds the built-in Tailscale route's status to GET /status.
@@ -179,6 +180,18 @@ func withTailnodeTryAgain(tryAgain func(context.Context) error) statusOption {
 func withTailnodeSignIn(signIn func(context.Context) error) statusOption {
 	return func(c *statusConfig) { c.signIn = signIn }
 }
+
+// withTailnodeLeave adds POST /tailscale/leave, which has the built-in
+// Tailscale node log out of the person's account and remove its state folder.
+// It answers 204 once the node has left and 409 when the folder was kept for a
+// retry.
+func withTailnodeLeave(leave func(context.Context) (tailnode.LeaveResult, error)) statusOption {
+	return func(c *statusConfig) { c.leave = leave }
+}
+
+// leaveTimeout bounds one leave: a logout that the control server does not
+// answer is given up as a failed one, so the app is not left waiting.
+const leaveTimeout = 20 * time.Second
 
 // tryAgainTimeout bounds one press of Try Again: a test can take as long as
 // its own attempt limit plus a repair.
@@ -262,16 +275,31 @@ func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
+	leave := http.NotFoundHandler()
+	if sc.leave != nil {
+		leave = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), leaveTimeout)
+			defer cancel()
+			res, err := sc.leave(ctx)
+			if err != nil || res != tailnode.LeftAndRemoved {
+				http.Error(w, "relay: this Mac is not yet removed from the Tailscale account", http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
 	if statusSecret == "" {
 		mux.HandleFunc("GET /status", statusRoute)
 		mux.Handle("POST /pairing", http.NotFoundHandler())
 		mux.Handle("POST /tailscale/try-again", http.NotFoundHandler())
 		mux.Handle("POST /tailscale/sign-in", http.NotFoundHandler())
+		mux.Handle("POST /tailscale/leave", http.NotFoundHandler())
 	} else {
 		mux.Handle("GET /status", requireStatusSecret(statusSecret, http.HandlerFunc(statusRoute)))
 		mux.Handle("POST /pairing", requireStatusSecret(statusSecret, pairing.MintHandler(pairings)))
 		mux.Handle("POST /tailscale/try-again", requireStatusSecret(statusSecret, tryAgain))
 		mux.Handle("POST /tailscale/sign-in", requireStatusSecret(statusSecret, signIn))
+		mux.Handle("POST /tailscale/leave", requireStatusSecret(statusSecret, leave))
 	}
 	return requireLoopbackHost(mux)
 }

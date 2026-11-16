@@ -176,6 +176,16 @@ public enum SetupCompletion {
     }
 }
 
+/// UpdateRouteStepGate decides Continue in the update window's route step: only
+/// once the person chose the built-in route and its address answers. An address
+/// that answers with nothing chosen is not an answer, so Continue stays off and
+/// the step is not recorded as answered.
+public enum UpdateRouteStepGate {
+    public static func mayContinue(chosen: Bool, reachable: Bool) -> Bool {
+        chosen && reachable
+    }
+}
+
 /// PhoneReachability is whether a phone can be given an address for this
 /// Mac at all, by the choices made so far. Setup's reach step continues
 /// only on `.reachable`, and the connect step is shown only then; a

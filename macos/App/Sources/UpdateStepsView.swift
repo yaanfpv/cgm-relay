@@ -107,7 +107,10 @@ struct UpdateStepsView: View {
             AccessibleButton("Later", style: .plain) { dismissWindow(id: UpdateStepsWindow.id) }
             Spacer()
             switch step {
-            case .movedToBuiltIn, .tailscaleChoice:
+            case .movedToBuiltIn:
+                AccessibleButton(continueTitle, style: .primary) { answer(step) }
+                    .disabled(!UpdateRouteStepGate.mayContinue(chosen: model.settings.useBuiltInTailscale, reachable: model.phoneReachability.isReachable))
+            case .tailscaleChoice:
                 AccessibleButton(continueTitle, style: .primary) { answer(step) }
                     .disabled(model.settings.useBuiltInTailscale && !model.phoneReachability.isReachable)
             case .stayAwake:
@@ -157,10 +160,13 @@ private struct UpdateMovedStep: View {
                 Text("The local network route is gone in this version, because it stopped working whenever you were away from home. CGM Relay now gives this Mac its own public https address through a built-in Tailscale, so your phone can reach it from anywhere.")
                     .fixedSize(horizontal: false, vertical: true)
             }
-            BuiltInRouteView(model: model)
+            if model.settings.useBuiltInTailscale {
+                BuiltInRouteView(model: model)
+            } else {
+                UseBuiltInTailscaleSection(model: model)
+            }
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
-        .onAppear { model.chooseBuiltInTailscale() }
     }
 }

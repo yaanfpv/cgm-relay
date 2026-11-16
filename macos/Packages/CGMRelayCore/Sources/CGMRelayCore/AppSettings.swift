@@ -146,6 +146,10 @@ public struct AppSettings: Equatable, Sendable {
     /// the Tailscale built into CGM Relay, which gives it its own public
     /// https address, instead of their own Tailscale.
     public var useBuiltInTailscale: Bool
+    /// pendingLeaveRetry is set when leaving the built-in route did not reach
+    /// Tailscale, so the folder and key were kept and the next launch leaves
+    /// again.
+    public var pendingLeaveRetry: Bool
     /// answeredUpdateSteps are the update steps the person has already
     /// answered, so an update interrupted halfway asks only what is left.
     public var answeredUpdateSteps: Set<UpdateStep>
@@ -261,6 +265,7 @@ public struct AppSettings: Equatable, Sendable {
         setupVersion: Int = 0,
         stayAwake: StayAwakeChoice? = nil,
         useBuiltInTailscale: Bool = false,
+        pendingLeaveRetry: Bool = false,
         answeredUpdateSteps: Set<UpdateStep> = []
     ) {
         self.port = port
@@ -280,6 +285,7 @@ public struct AppSettings: Equatable, Sendable {
         self.setupVersion = setupVersion
         self.stayAwake = stayAwake
         self.useBuiltInTailscale = useBuiltInTailscale
+        self.pendingLeaveRetry = pendingLeaveRetry
         self.answeredUpdateSteps = answeredUpdateSteps
     }
 }
@@ -296,7 +302,7 @@ extension AppSettings: Codable {
         case port, reach, retentionDays, units, noReadingAlertEnabled, noReadingAlertMinutes, signInFailingAlertEnabled
         case tailscaleHTTPSEnabled, setupFinished, showReadingInMenuBar, connectFollowerApp, safetyNoticeAcceptance
         case lastHandlerObservation
-        case movedFromLocalRoute, setupVersion, stayAwake, useBuiltInTailscale, answeredUpdateSteps
+        case movedFromLocalRoute, setupVersion, stayAwake, useBuiltInTailscale, answeredUpdateSteps, pendingLeaveRetry
     }
 
     public init(from decoder: Decoder) throws {
@@ -343,6 +349,7 @@ extension AppSettings: Codable {
         // An answer this version does not know reads as not yet asked.
         stayAwake = ((try? container.decodeIfPresent(StayAwakeChoice.self, forKey: .stayAwake)) ?? nil)
         useBuiltInTailscale = ((try? container.decodeIfPresent(Bool.self, forKey: .useBuiltInTailscale)) ?? nil) ?? fallback.useBuiltInTailscale
+        pendingLeaveRetry = ((try? container.decodeIfPresent(Bool.self, forKey: .pendingLeaveRetry)) ?? nil) ?? fallback.pendingLeaveRetry
         // A step this version does not know is dropped, and the rest kept.
         let storedSteps = ((try? container.decodeIfPresent([String].self, forKey: .answeredUpdateSteps)) ?? nil) ?? []
         answeredUpdateSteps = Set(storedSteps.compactMap(UpdateStep.init(rawValue:)))
@@ -367,6 +374,7 @@ extension AppSettings: Codable {
         try container.encode(setupVersion, forKey: .setupVersion)
         try container.encodeIfPresent(stayAwake, forKey: .stayAwake)
         try container.encode(useBuiltInTailscale, forKey: .useBuiltInTailscale)
+        try container.encode(pendingLeaveRetry, forKey: .pendingLeaveRetry)
         try container.encode(answeredUpdateSteps.map(\.rawValue).sorted(), forKey: .answeredUpdateSteps)
     }
 }

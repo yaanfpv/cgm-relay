@@ -109,6 +109,9 @@ type nodeAPI interface {
 	// WarmCertificate has the node fetch or issue the certificate for host.
 	WarmCertificate(ctx context.Context, host string)
 	StartLogin(ctx context.Context) error
+	// Logout tells the control server this machine leaves the account, which
+	// expires its node key. It does not touch the state folder.
+	Logout(ctx context.Context) error
 	Watch(ctx context.Context) (ipnWatcher, error)
 	Close() error
 }
@@ -367,6 +370,40 @@ func (n *Node) Close() {
 	}
 }
 
+// LeaveResult is how far LeaveTailnet got.
+type LeaveResult int
+
+const (
+	// LeftAndRemoved means the control server was told, the node has stopped
+	// and the state folder is gone.
+	LeftAndRemoved LeaveResult = iota
+	// KeptForRetry means the machine may still be on the account: the node and
+	// its folder, with the key, are kept so a later launch can leave again.
+	KeptForRetry
+)
+
+// LeaveTailnet logs the node out of the person's account, then stops it and
+// removes its state folder. The node is stopped only after the logout has
+// answered, and the folder is removed only after that. A logout that fails or
+// is cut short by ctx keeps the folder and the key and answers KeptForRetry.
+// Nothing else logs out: Close and every restart keep the key.
+func (n *Node) LeaveTailnet(ctx context.Context) (LeaveResult, error) {
+	n.mu.Lock()
+	api := n.api
+	n.mu.Unlock()
+	if api == nil {
+		return KeptForRetry, ErrNotServing
+	}
+	if err := api.Logout(ctx); err != nil {
+		return KeptForRetry, err
+	}
+	n.Close()
+	if err := os.RemoveAll(n.opts.StateDir); err != nil {
+		return KeptForRetry, err
+	}
+	return LeftAndRemoved, nil
+}
+
 // update applies f to the observation and restarts the clock when the state
 // it leads to changes.
 func (n *Node) update(f func(*Observation)) {
@@ -491,6 +528,8 @@ func (r *realNode) QueryFunnel(ctx context.Context) (*tailcfg.QueryFeatureRespon
 
 func (r *realNode) StartLogin(ctx context.Context) error { return r.lc.StartLoginInteractive(ctx) }
 
+func (r *realNode) Logout(ctx context.Context) error { return r.lc.Logout(ctx) }
+
 func (r *realNode) Close() error { return r.s.Close() }
 
 // SetFunnelAllowed reads the serve config, takes the Funnel entries out of it
@@ -602,12 +641,15 @@ func (n *Node) logLine(format string, args ...any) {
 }
 
 // prepareStateDir creates dir, or tightens it, to mode 0700 regardless of
-// the process umask: it holds the node's key.
+// the process umask, and keeps it out of backups: it holds the node's key.
 func prepareStateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, 0o700)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	return excludeFromBackup(dir)
 }
 
 // watch follows the node's own state notifications until ctx is done,

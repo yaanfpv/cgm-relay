@@ -130,6 +130,50 @@ enum BuiltInRouteCopy {
     static let disclosure = "This gives your Mac a public https address that only your token opens. Its name appears in public certificate logs. A Tailscale account is free, and your phone needs nothing installed."
 }
 
+/// BuiltInRouteCopy's companion notice: shown wherever the route is chosen
+/// once a leave did not reach Tailscale.
+struct LeavePendingNotice: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if LeaveTailnetOutcome.shouldRetryLeave(settings: model.settings) {
+            Text("This Mac is not yet removed from your Tailscale account. CGM Relay will try again the next time it opens.")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// UseBuiltInTailscaleSection is the one button that chooses the built-in
+/// route on a Mac without Tailscale's app, so nothing signs this Mac in to
+/// Tailscale until it is pressed. It belongs inside a Form.
+struct UseBuiltInTailscaleSection: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Section {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Give this Mac its own public address. Your phone needs no Tailscale.")
+                    Text("Choosing it signs this Mac in to Tailscale.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                AccessibleButton("Use Built-In Tailscale", style: .primary) { model.chooseBuiltInTailscale() }
+                    .fixedSize()
+            }
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                LeavePendingNotice(model: model)
+                Text(BuiltInRouteCopy.disclosure)
+            }
+        }
+    }
+}
+
 /// TailscaleChoiceView asks "Use your Tailscale?" where Tailscale's Mac app
 /// is installed: use it (the Tailscale HTTPS and My tailnet ways) or the one
 /// built into CGM Relay. It is shown only when the app is installed; without
@@ -151,6 +195,8 @@ struct TailscaleChoiceView: View {
             ) { model.chooseBuiltInTailscale() }
         } header: {
             Text("Use your Tailscale?")
+        } footer: {
+            LeavePendingNotice(model: model)
         }
     }
 

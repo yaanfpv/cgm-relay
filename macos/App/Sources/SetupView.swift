@@ -285,8 +285,8 @@ struct SetupView: View {
 }
 
 /// SetupReachStep is step 2. With Tailscale's Mac app installed it first asks
-/// whether to use it; without the app, or when the person picks the built-in
-/// one, the built-in route's status row is all there is. Otherwise Tailscale's state and its HTTPS setting read as
+/// whether to use it; without the app it offers the built-in route as a button,
+/// and once the person picks the built-in route its status row is all there is. Otherwise Tailscale's state and its HTTPS setting read as
 /// status rows, and beneath them every way a phone can reach this Mac that
 /// Advanced has (without This Mac only, which no phone can use), Tailscale
 /// HTTPS among them. Continue waits for the chosen way to work. Under the
@@ -299,6 +299,8 @@ private struct SetupReachStep: View {
         Form {
             if model.tailscaleAppInstalled {
                 TailscaleChoiceView(model: model)
+            } else if !model.settings.useBuiltInTailscale {
+                UseBuiltInTailscaleSection(model: model)
             }
             if model.settings.useBuiltInTailscale {
                 BuiltInRouteView(model: model)
@@ -327,10 +329,7 @@ private struct SetupReachStep: View {
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
-        .onAppear {
-            model.refreshTailscaleAppInstalled()
-            model.chooseBuiltInTailscaleWithoutTailscaleApp()
-        }
+        .onAppear { model.refreshTailscaleAppInstalled() }
     }
 
     @ViewBuilder

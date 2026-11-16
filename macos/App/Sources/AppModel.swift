@@ -130,6 +130,11 @@ final class AppModel: ObservableObject {
     private let pairingMinter: any PairingCodeMinting
     private let addressRetrier: any BuiltInAddressRetrying
     private let signInStarter: any BuiltInSignInStarting
+    private let routeLeaver: any BuiltInRouteLeaving
+    /// isLeavingRoute is whether a way out of the built-in route is waiting on
+    /// the engine's logout, so a second press does not start another.
+    private var isLeavingRoute = false
+    private var isRetryingLeave = false
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -277,6 +282,7 @@ final class AppModel: ObservableObject {
         pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
         addressRetrier = URLSessionBuiltInAddressRetrier(url: AppModel.engineURL(for: statusAddr, path: "tailscale/try-again"), secret: statusSecret)
         signInStarter = URLSessionBuiltInSignInStarter(url: AppModel.engineURL(for: statusAddr, path: "tailscale/sign-in"), secret: statusSecret)
+        routeLeaver = URLSessionBuiltInRouteLeaver(url: AppModel.engineURL(for: statusAddr, path: "tailscale/leave"), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         let loaded = settingsStore.load()
@@ -350,6 +356,7 @@ final class AppModel: ObservableObject {
         async let pollerStarted: Void = statusPoller.start()
         async let tailscaleRead: Void = refreshTailscale()
         _ = await (engineStarted, pollerStarted, tailscaleRead)
+        Task { await retryPendingLeave() }
     }
 
     /// removeRetiredCertificateSecrets deletes the certificate entries an
@@ -471,6 +478,7 @@ final class AppModel: ObservableObject {
             refreshCredentialsConfigured()
             if canStart {
                 await startEngine()
+                Task { await retryPendingLeave() }
             }
         }
         return outcome
@@ -484,17 +492,20 @@ final class AppModel: ObservableObject {
     /// were gone.
     @discardableResult
     func signOut() async -> Bool {
-        stopRequested = true
-        await supervisor.stop()
-        stayAwake.relayStopped()
-        boundHost = nil
-        await alertEngine.pauseForEngineStop()
-        let succeeded: Bool
-        do {
-            try accountSignIn.signOut()
-            succeeded = true
-        } catch {
-            succeeded = false
+        var succeeded = false
+        await leaveBuiltInRoute(for: .signOut) {
+            do {
+                try self.accountSignIn.signOut()
+                succeeded = true
+            } catch {
+                succeeded = false
+            }
+        } stopEngine: {
+            self.stopRequested = true
+            await self.supervisor.stop()
+            self.stayAwake.relayStopped()
+            self.boundHost = nil
+            await self.alertEngine.pauseForEngineStop()
         }
         refreshCredentialsConfigured()
         return succeeded
@@ -623,19 +634,14 @@ final class AppModel: ObservableObject {
         if installed != tailscaleAppInstalled { tailscaleAppInstalled = installed }
     }
 
-    /// chooseBuiltInTailscaleWithoutTailscaleApp takes the person straight
-    /// into the built-in route when Tailscale's Mac app is not installed and
-    /// no way has been chosen yet.
-    func chooseBuiltInTailscaleWithoutTailscaleApp() {
-        guard !tailscaleAppInstalled, settings.chosenWay == .thisMacOnly else { return }
-        chooseBuiltInTailscale()
-    }
-
     /// chooseBuiltInTailscale moves the choice to the Tailscale built into
-    /// CGM Relay and restarts the engine with its state folder.
+    /// CGM Relay and restarts the engine with its state folder. It runs only
+    /// from a button the person pressed. A leave still waiting for a retry is
+    /// over: the folder it kept is the one in use again.
     func chooseBuiltInTailscale() {
-        guard !settings.useBuiltInTailscale else { return }
+        guard !settings.useBuiltInTailscale, !isLeavingRoute else { return }
         settings.useBuiltInTailscale = true
+        settings.pendingLeaveRetry = false
         settings.tailscaleHTTPSEnabled = false
         persistSettings()
         refreshBuiltInRoute()
@@ -645,15 +651,87 @@ final class AppModel: ObservableObject {
     }
 
     /// chooseOwnTailscale moves the choice back to the person's own
-    /// Tailscale and restarts the engine without the built-in node.
+    /// Tailscale. The built-in node leaves their Tailscale account first, then
+    /// the engine restarts without it.
     func chooseOwnTailscale() {
-        guard settings.useBuiltInTailscale else { return }
-        settings.useBuiltInTailscale = false
-        persistSettings()
-        refreshBuiltInRoute()
-        recomputeMenuState()
-        refreshNetworkAddresses()
-        Task { await restartEngineIfRunning() }
+        guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        Task {
+            await leaveBuiltInRoute(for: .chooseOwnTailscale) {
+                self.settings.useBuiltInTailscale = false
+                self.persistSettings()
+                self.refreshBuiltInRoute()
+                self.recomputeMenuState()
+                self.refreshNetworkAddresses()
+                await self.restartEngineIfRunning()
+            }
+        }
+    }
+
+    /// chooseThisMacOnlyLeavingBuiltIn moves the choice to This Mac only from
+    /// the built-in route, leaving the person's Tailscale account first.
+    private func chooseThisMacOnlyLeavingBuiltIn() {
+        guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        Task {
+            await leaveBuiltInRoute(for: .chooseThisMacOnly) {
+                self.settings.useBuiltInTailscale = false
+                self.settings = self.settings.choosing(.thisMacOnly)
+                self.persistSettings()
+                self.refreshBuiltInRoute()
+                self.recomputeMenuState()
+                self.refreshNetworkAddresses()
+                await self.restartEngineIfRunning()
+            }
+        }
+    }
+
+    /// leaveBuiltInRoute runs the steps LeaveTailnetSequence gives for a way
+    /// out of the built-in route. The leave is awaited, with its own timeout,
+    /// before the engine stops, since the node that logs out lives in the
+    /// engine. What the leave answered is saved, so a launch retries it when
+    /// the Mac was not yet removed.
+    private func leaveBuiltInRoute(
+        for trigger: LeaveTrigger,
+        applyChoice: () async -> Void,
+        stopEngine: () async -> Void = {}
+    ) async {
+        isLeavingRoute = true
+        defer { isLeavingRoute = false }
+        for step in LeaveTailnetSequence.steps(for: trigger, builtInOn: settings.useBuiltInTailscale) {
+            switch step {
+            case .leave:
+                builtInSession.cancel()
+                let outcome = await routeLeaver.leave()
+                LeaveTailnetOutcome.record(outcome, into: &settings)
+                persistSettings()
+            case .stopEngine:
+                await stopEngine()
+            case .applyChoice:
+                await applyChoice()
+            }
+        }
+    }
+
+    /// retryPendingLeave tries again to remove this Mac from the person's
+    /// Tailscale account after a leave that did not reach it. The engine
+    /// starts the node on the kept folder, which takes a few seconds, so the
+    /// leave is tried a few times while the engine runs. A person who has
+    /// chosen the built-in route since has nothing to leave.
+    private func retryPendingLeave() async {
+        guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale, !isRetryingLeave else { return }
+        isRetryingLeave = true
+        defer { isRetryingLeave = false }
+        for _ in 0..<6 {
+            guard engineState == .running || engineState == .starting else { return }
+            try? await Task.sleep(for: .seconds(5))
+            guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale else { return }
+            let outcome = await routeLeaver.leave()
+            LeaveTailnetOutcome.record(outcome, into: &settings)
+            persistSettings()
+            if outcome == .removed {
+                await restartEngineIfRunning()
+                return
+            }
+        }
     }
 
     /// openBuiltInStep opens the page the current step asks for, in the
@@ -748,13 +826,13 @@ final class AppModel: ObservableObject {
     }
 
     /// builtInStateDirectory is where the built-in node keeps its state,
-    /// beside the database, readable only by this user. nil if it cannot be
-    /// made, which keeps the engine from starting without one.
+    /// beside the database, readable only by this user and left out of
+    /// backups. nil if it cannot be made, which keeps the engine from
+    /// starting without one.
     private func builtInStateDirectory() -> String? {
         let directory = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try StateDirectoryPolicy.prepare(at: directory)
             return directory.path
         } catch {
             recoveryLogger.error("could not make the Tailscale state folder: \(error, privacy: .public)")
@@ -807,6 +885,10 @@ final class AppModel: ObservableObject {
     /// HTTPS is chosen only while its handler is serving; turning it on is the
     /// button's own command.
     func chooseWay(_ way: ReachWay) {
+        if way == .thisMacOnly, settings.useBuiltInTailscale {
+            chooseThisMacOnlyLeavingBuiltIn()
+            return
+        }
         guard settings.chosenWay != way else { return }
         guard way.pickability(https: httpsState, tailnetAvailable: tailnetAvailable) == .pickable else { return }
         settings = settings.choosing(way)
@@ -1323,6 +1405,13 @@ final class AppModel: ObservableObject {
             return
         }
         var stateDirectory: String?
+        // A leave that did not reach Tailscale needs the node up on the kept
+        // folder to try again; nothing is created for it.
+        var keptStateDirectory: String?
+        if !settings.useBuiltInTailscale, LeaveTailnetOutcome.shouldRetryLeave(settings: settings) {
+            let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
+            if FileManager.default.fileExists(atPath: kept.path) { keptStateDirectory = kept.path }
+        }
         if settings.useBuiltInTailscale {
             stateDirectory = builtInStateDirectory()
             if stateDirectory == nil {
@@ -1332,7 +1421,7 @@ final class AppModel: ObservableObject {
             }
         }
         guard
-            let configuration = try? SettingsEngineConfigurationBuilder.build(
+            var configuration = try? SettingsEngineConfigurationBuilder.build(
                 settings: settings,
                 from: credentialStore,
                 interfaces: interfaces,
@@ -1345,6 +1434,10 @@ final class AppModel: ObservableObject {
             boundHost = nil
             await supervisor.fail(.configurationUnreadable)
             return
+        }
+        if let keptStateDirectory {
+            configuration.tailscaleStateDir = keptStateDirectory
+            configuration.tailscaleHostname = SettingsEngineConfigurationBuilder.builtInHostname
         }
         boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         // A status from before this start must not read as this node's.

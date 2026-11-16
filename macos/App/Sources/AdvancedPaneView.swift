@@ -64,6 +64,8 @@ struct AdvancedPaneView: View {
 
             if model.tailscaleAppInstalled {
                 TailscaleChoiceView(model: model)
+            } else if !model.settings.useBuiltInTailscale {
+                UseBuiltInTailscaleSection(model: model)
             }
 
             if model.settings.useBuiltInTailscale {
