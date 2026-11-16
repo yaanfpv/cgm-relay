@@ -619,6 +619,87 @@ struct SleepResetHelperTests {
     }
 }
 
+@Suite("SleepResetHelper process list")
+struct SleepResetHelperProcessListTests {
+    private static let appName = SleepResetHelper.appExecutableName
+    private static let appPid: pid_t = 250
+
+    /// listing builds a fake process list. fill mirrors proc_listallpids: it
+    /// copies at most buffer.count pids, but never more than `cap`.
+    private static func listing(
+        population: Int, hint: Int32? = nil, cap: Int = .max, appPid: pid_t?, genuine: Bool = true
+    ) -> SleepResetHelper.ProcessListing {
+        let pids: [pid_t] = (1...Int32(population)).map { $0 }
+        return SleepResetHelper.ProcessListing(
+            countHint: { hint ?? Int32(population) },
+            fill: { buffer in
+                let n = min(buffer.count, cap, pids.count)
+                for i in 0..<n { buffer[i] = pids[i] }
+                return Int32(n)
+            },
+            executableName: { $0 == appPid ? appName : "other" },
+            isGenuineApp: { $0 == appPid && genuine }
+        )
+    }
+
+    /// writes feeds one listing through the helper's look three times (first
+    /// look, interval, power change), the sleep setting on and the Mac on battery.
+    private func writes(_ listing: SleepResetHelper.ProcessListing) -> Int {
+        var look = SleepResetHelper.Look()
+        var count = 0
+        for _ in 0..<3 {
+            look.run(
+                appRunning: SleepResetHelper.appIsRunning(using: listing),
+                onBattery: true, sleepDisabled: true, runCommand: { count += 1; return true }
+            )
+        }
+        return count
+    }
+
+    @Test("a list cut short, with the genuine app beyond the copied part, writes nothing on any look")
+    func truncatedListWritesNothing() {
+        let cut = Self.listing(population: 300, hint: 120, cap: 184, appPid: Self.appPid)
+        #expect(SleepResetHelper.appIsRunning(using: cut) == true)
+        #expect(writes(cut) == 0)
+    }
+
+    @Test("a list that grew past an honest fill still never writes while the app is beyond the copied part")
+    func grownListWritesNothing() {
+        let grown = Self.listing(population: 300, hint: 120, appPid: Self.appPid)
+        #expect(writes(grown) == 0)
+    }
+
+    @Test("a list read whole with the genuine app writes nothing")
+    func wholeListWithAppWritesNothing() {
+        let whole = Self.listing(population: 120, appPid: 100)
+        #expect(SleepResetHelper.appIsRunning(using: whole) == true)
+        #expect(writes(whole) == 0)
+    }
+
+    @Test("a list read whole with no app allows the write on every look")
+    func wholeListWithoutAppWrites() {
+        let whole = Self.listing(population: 120, appPid: nil)
+        #expect(SleepResetHelper.appIsRunning(using: whole) == false)
+        #expect(writes(whole) == 3)
+    }
+
+    @Test("a list read whole with a same-named process that fails the signature check allows the write")
+    func wholeListWithImpostorWrites() {
+        let whole = Self.listing(population: 120, appPid: 100, genuine: false)
+        #expect(SleepResetHelper.appIsRunning(using: whole) == false)
+        #expect(writes(whole) == 3)
+    }
+
+    @Test("a list that cannot be read at all counts as the app running")
+    func unreadableListCountsAsRunning() {
+        let none = SleepResetHelper.ProcessListing(
+            countHint: { 0 }, fill: { _ in 0 }, executableName: { _ in nil }, isGenuineApp: { _ in false }
+        )
+        #expect(SleepResetHelper.appIsRunning(using: none) == true)
+        #expect(writes(none) == 0)
+    }
+}
+
 @Suite("StayAwakeCopy")
 struct StayAwakeCopyTests {
     @Test("the permission note says it stays once granted and offers no way to remove it")

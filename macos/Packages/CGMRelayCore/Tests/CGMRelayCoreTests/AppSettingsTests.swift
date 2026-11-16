@@ -796,7 +796,7 @@ struct UpdateStepsTests {
 
     @Test("every way out of the built-in route leaves first, and the engine stops only after the leave")
     func leaveSequenceOrder() {
-        let triggers: [LeaveTrigger] = [.chooseOwnTailscale, .chooseThisMacOnly, .signOut]
+        let triggers: [LeaveTrigger] = [.chooseOwnTailscale, .chooseThisMacOnly]
         for trigger in triggers {
             let on = LeaveTailnetSequence.steps(for: trigger, builtInOn: true)
             #expect(on.first == .leave, "\(trigger): the leave must come first")
@@ -809,7 +809,22 @@ struct UpdateStepsTests {
             #expect(!off.contains(.leave), "\(trigger): nothing to leave when the built-in route is off")
             #expect(off.contains(.applyChoice), "\(trigger): the choice is still applied")
         }
-        #expect(LeaveTailnetSequence.steps(for: .signOut, builtInOn: true).contains(.stopEngine), "Sign Out stops the engine")
+    }
+
+    @Test("Sign Out is not a way out of the built-in route: the only triggers are the two opt-outs")
+    func signOutIsNotALeaveTrigger() {
+        // An exhaustive switch over two cases compiles only while LeaveTrigger has exactly
+        // those two, so a signOut case (and a leave entered for it) cannot exist.
+        func isOptOut(_ trigger: LeaveTrigger) -> Bool {
+            switch trigger {
+            case .chooseOwnTailscale, .chooseThisMacOnly: return true
+            }
+        }
+        #expect(isOptOut(.chooseOwnTailscale) && isOptOut(.chooseThisMacOnly))
+        for trigger in [LeaveTrigger.chooseOwnTailscale, .chooseThisMacOnly] {
+            let steps = LeaveTailnetSequence.steps(for: trigger, builtInOn: true)
+            #expect(steps == [.leave, .applyChoice], "\(trigger): leave first, then the choice, no engine stop of its own")
+        }
     }
 
     @Test("the kept folder goes to the engine only while a leave retry runs, so no ordinary restart brings the node back")
