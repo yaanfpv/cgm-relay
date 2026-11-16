@@ -62,7 +62,7 @@ public protocol BuiltInRouteLeaving: Sendable {
 /// URLSessionBuiltInRouteLeaver posts to the engine's local status endpoint
 /// with the app's LocalStatusSecret. Anything but the engine's answer that the
 /// node left (an engine that is not running, a refusal, no answer within its
-/// own time) reads as not yet removed, so the folder and key are kept.
+/// own time) reads as not yet logged out, so the folder and key are kept.
 public struct URLSessionBuiltInRouteLeaver: BuiltInRouteLeaving {
     /// timeout is longer than the engine's own limit on a logout, so the engine
     /// is the one that gives up.

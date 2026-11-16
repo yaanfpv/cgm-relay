@@ -654,7 +654,7 @@ final class AppModel: ObservableObject {
     }
 
     /// chooseOwnTailscale moves the choice back to the person's own
-    /// Tailscale. The built-in node leaves their Tailscale account first, then
+    /// Tailscale. The built-in node logs out of their Tailscale account first, then
     /// the engine restarts without it.
     func chooseOwnTailscale() {
         guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
@@ -671,7 +671,7 @@ final class AppModel: ObservableObject {
     }
 
     /// chooseThisMacOnlyLeavingBuiltIn moves the choice to This Mac only from
-    /// the built-in route, leaving the person's Tailscale account first.
+    /// the built-in route, logging out of the person's Tailscale account first.
     private func chooseThisMacOnlyLeavingBuiltIn() {
         guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
         Task {
@@ -691,7 +691,7 @@ final class AppModel: ObservableObject {
     /// out of the built-in route. The leave is awaited, with its own timeout,
     /// before the engine stops, since the node that logs out lives in the
     /// engine. What the leave answered is saved, so a launch retries it when
-    /// the Mac was not yet removed.
+    /// the Mac was not yet logged out.
     private func leaveBuiltInRoute(
         for trigger: LeaveTrigger,
         applyChoice: () async -> Void
@@ -714,7 +714,7 @@ final class AppModel: ObservableObject {
         Task { await retryPendingLeave() }
     }
 
-    /// retryPendingLeave tries again to remove this Mac from the person's
+    /// retryPendingLeave tries again to log this Mac out of the person's
     /// Tailscale account after a leave that did not reach it. The engine
     /// starts the node on the kept folder, which takes a few seconds, so the
     /// leave is tried a few times while the engine runs. A person who has

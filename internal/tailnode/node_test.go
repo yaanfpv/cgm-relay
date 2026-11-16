@@ -596,9 +596,9 @@ func (f *fakeNode) StartLogin(context.Context) error {
 	return nil
 }
 
-// Logout is the node telling its control server that this machine leaves the
-// account. It is logged when it starts and again when it returns, so a test
-// can order it against the node's Close.
+// Logout is the node telling its control server to expire this machine's key.
+// It is logged when it starts and again when it returns, so a test can order
+// it against the node's Close.
 func (f *fakeNode) Logout(ctx context.Context) error {
 	f.tn.event(fmt.Sprintf("logout#%d", f.gen))
 	f.tn.mu.Lock()
@@ -1639,11 +1639,11 @@ func requireKeptState(t *testing.T, tn *fakeTailnet, key, when string) {
 }
 
 // TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder protects the
-// person's Tailscale account from a ghost machine: leaving the built-in route
-// tells the control server first, and only then lets the node stop, and once
-// that has succeeded the folder that held the node key is gone. A node that
-// stopped before logging out, never logged out, or left the folder behind
-// fails it.
+// person's Tailscale account from a machine that still holds a working key:
+// leaving the built-in route tells the control server first, and only then
+// lets the node stop, and once that has succeeded the folder that held the
+// node key is gone. A node that stopped before logging out, never logged out,
+// or left the folder behind fails it.
 func TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder(t *testing.T) {
 	tn := newFakeTailnet(t)
 	n := tn.runReady()
@@ -1676,7 +1676,7 @@ func TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder(t *testing.T) 
 }
 
 // TestLeaveTailnetThatFailsKeepsTheFolderAndTheKey protects the only way to
-// remove the machine later: a logout that did not reach the control server
+// log the machine out later: a logout that did not reach the control server
 // (the Mac is offline) must leave the key where it is, and say so, so the
 // next launch can try again. A folder deleted anyway, or a failure reported as
 // a success, fails it.

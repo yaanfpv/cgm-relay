@@ -78,7 +78,7 @@ struct AdvancedPaneView: View {
                     ) {}
                     ChoiceRow(
                         title: "This Mac only",
-                        description: "Only apps on this Mac can connect. This Mac is removed from your Tailscale account.",
+                        description: "Only apps on this Mac can connect. This Mac is logged out of your Tailscale account.",
                         selected: false
                     ) { model.chooseWay(.thisMacOnly) }
                 } header: {

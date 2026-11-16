@@ -34,7 +34,7 @@ public enum LeaveTailnetOutcome: Sendable, Equatable {
     /// removed means this Mac's Tailscale sign-in is gone and its folder with it.
     case removed
     /// notYetRemoved means the logout did not reach Tailscale, so the folder and
-    /// key were kept and this Mac may still be listed on the account.
+    /// key were kept and this Mac's key may still be working.
     case notYetRemoved
 
     /// record remembers the outcome, so the next launch knows whether to retry.

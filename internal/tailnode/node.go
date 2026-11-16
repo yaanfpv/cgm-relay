@@ -109,8 +109,9 @@ type nodeAPI interface {
 	// WarmCertificate has the node fetch or issue the certificate for host.
 	WarmCertificate(ctx context.Context, host string)
 	StartLogin(ctx context.Context) error
-	// Logout tells the control server this machine leaves the account, which
-	// expires its node key. It does not touch the state folder.
+	// Logout tells the control server to expire this machine's node key; the
+	// machine stays listed in the account, expired, until the person removes
+	// it. It does not touch the state folder.
 	Logout(ctx context.Context) error
 	Watch(ctx context.Context) (ipnWatcher, error)
 	Close() error
@@ -377,7 +378,7 @@ const (
 	// LeftAndRemoved means the control server was told, the node has stopped
 	// and the state folder is gone.
 	LeftAndRemoved LeaveResult = iota
-	// KeptForRetry means the machine may still be on the account: the node and
+	// KeptForRetry means the machine's key may still be working: the node and
 	// its folder, with the key, are kept so a later launch can leave again.
 	KeptForRetry
 )

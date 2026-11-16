@@ -282,7 +282,7 @@ func newStatusHandler(p pollerStatus, tracker *clientTracker, pairings *pairing.
 			defer cancel()
 			res, err := sc.leave(ctx)
 			if err != nil || res != tailnode.LeftAndRemoved {
-				http.Error(w, "relay: this Mac is not yet removed from the Tailscale account", http.StatusConflict)
+				http.Error(w, "relay: this Mac is not yet logged out of the Tailscale account", http.StatusConflict)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)

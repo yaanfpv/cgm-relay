@@ -137,7 +137,7 @@ struct LeavePendingNotice: View {
 
     var body: some View {
         if LeaveTailnetOutcome.shouldRetryLeave(settings: model.settings) {
-            Text("This Mac is not yet removed from your Tailscale account. CGM Relay will try again the next time it opens.")
+            Text("This Mac is not yet logged out of your Tailscale account. CGM Relay will try again the next time it opens.")
                 .font(.caption)
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
