@@ -130,7 +130,7 @@ public enum SleepResetHelper {
         }
     }
 
-    /// slack is how many slots the buffer holds beyond countHint.
+    /// listSlack is how many slots the buffer holds beyond countHint.
     static let listSlack = 64
 
     /// appIsRunning is whether CGM Relay counts as running. It reads the list

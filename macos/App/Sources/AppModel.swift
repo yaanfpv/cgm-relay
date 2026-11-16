@@ -705,8 +705,6 @@ final class AppModel: ObservableObject {
                 let outcome = await routeLeaver.leave()
                 LeaveTailnetOutcome.record(outcome, into: &settings)
                 persistSettings()
-            case .stopEngine:
-                break
             case .applyChoice:
                 await applyChoice()
             }

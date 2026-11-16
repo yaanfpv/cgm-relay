@@ -11,9 +11,6 @@ public enum LeaveStep: Sendable, Equatable {
     /// leave has the engine log this Mac out of the person's Tailscale account
     /// and waits for its answer.
     case leave
-    /// stopEngine stops the engine. No way out of the built-in route has it
-    /// today; the engine stops only after a leave.
-    case stopEngine
     /// applyChoice makes the change the person asked for: the new route.
     case applyChoice
 }

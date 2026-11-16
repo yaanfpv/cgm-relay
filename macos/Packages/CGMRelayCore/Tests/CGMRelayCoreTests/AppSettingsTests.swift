@@ -802,9 +802,6 @@ struct UpdateStepsTests {
             #expect(on.first == .leave, "\(trigger): the leave must come first")
             #expect(on.filter { $0 == .leave }.count == 1, "\(trigger): leave exactly once")
             #expect(on.contains(.applyChoice), "\(trigger): the choice is still applied")
-            if let stop = on.firstIndex(of: .stopEngine), let leave = on.firstIndex(of: .leave) {
-                #expect(leave < stop, "\(trigger): the engine must not stop before the leave")
-            }
             let off = LeaveTailnetSequence.steps(for: trigger, builtInOn: false)
             #expect(!off.contains(.leave), "\(trigger): nothing to leave when the built-in route is off")
             #expect(off.contains(.applyChoice), "\(trigger): the choice is still applied")
