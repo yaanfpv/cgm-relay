@@ -136,7 +136,12 @@ struct LeavePendingNotice: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        if LeaveTailnetOutcome.shouldRetryLeave(settings: model.settings) {
+        if let reason = model.builtInChoiceBlockedReason {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if LeaveTailnetOutcome.shouldRetryLeave(settings: model.settings) {
             Text("This Mac is not yet logged out of your Tailscale account. CGM Relay will try again the next time it opens.")
                 .font(.caption)
                 .foregroundStyle(.red)
@@ -163,6 +168,7 @@ struct UseBuiltInTailscaleSection: View {
                 .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 12)
                 AccessibleButton("Use Built-In Tailscale", style: .primary) { model.chooseBuiltInTailscale() }
+                    .disabled(model.builtInChoiceBlockedReason != nil)
                     .fixedSize()
             }
         } footer: {
@@ -191,7 +197,8 @@ struct TailscaleChoiceView: View {
             ChoiceRow(
                 title: "Use Built-In Tailscale",
                 description: "Give this Mac its own public address. Your phone needs no Tailscale.",
-                selected: model.settings.useBuiltInTailscale
+                selected: model.settings.useBuiltInTailscale,
+                disabled: model.builtInChoiceBlockedReason != nil
             ) { model.chooseBuiltInTailscale() }
         } header: {
             Text("Use your Tailscale?")
@@ -203,22 +210,25 @@ struct TailscaleChoiceView: View {
 
 /// ChoiceRow is one radio-style option with a title and a description, a
 /// button with an accessible radio name. It calls action whether or not it
-/// is selected.
+/// is selected. A disabled row is dimmed and cannot be picked; the reason is
+/// shown by the view that disables it.
 struct ChoiceRow: View {
     let title: String
     let description: String
     let selected: Bool
+    var disabled: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(disabled ? AnyShapeStyle(.tertiary) : (selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary)))
                     .imageScale(.large)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
+                        .foregroundStyle(disabled ? .secondary : .primary)
                     Text(description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -230,5 +240,6 @@ struct ChoiceRow: View {
         .buttonStyle(.plain)
         .padding(.vertical, 4)
         .accessibleRadioName(title, isSelected: selected, action: action)
+        .disabled(disabled)
     }
 }

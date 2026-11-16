@@ -852,4 +852,10 @@ struct UpdateStepsTests {
 
         #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: AppSettings.default, engineHoldsFolder: false), "defaults have nothing pending")
     }
+
+    @Test func builtInChoiceIsBlockedWithTheReasonWhileALeaveChildRuns() {
+        #expect(LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: true) == LeaveTailnetOutcome.loggingOutNotice)
+        #expect(LeaveTailnetOutcome.loggingOutNotice == "Logging this Mac out of Tailscale\u{2026}")
+        #expect(LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: false) == nil)
+    }
 }

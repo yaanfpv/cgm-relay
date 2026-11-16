@@ -136,7 +136,7 @@ final class AppModel: ObservableObject {
     private var isLeavingRoute = false
     /// isRunningLeaveChild is whether a leave child is running, so a second
     /// one never starts beside it.
-    private var isRunningLeaveChild = false
+    @Published private(set) var isRunningLeaveChild = false
     private let engineURL: URL
     private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
@@ -198,6 +198,13 @@ final class AppModel: ObservableObject {
     }
 
     var isPortLocked: Bool { portLockNote != nil }
+
+    /// builtInChoiceBlockedReason is why Use Built-In Tailscale cannot be
+    /// chosen right now, nil when it can. Every control that chooses the
+    /// built-in route reads it for both its disabled state and its caption.
+    var builtInChoiceBlockedReason: String? {
+        LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: isRunningLeaveChild)
+    }
 
     var canStart: Bool { credentialsConfigured && engineState == .stopped }
 

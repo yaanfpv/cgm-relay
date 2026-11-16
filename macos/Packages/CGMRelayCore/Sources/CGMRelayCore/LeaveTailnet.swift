@@ -56,6 +56,17 @@ public enum LeaveTailnetOutcome: Sendable, Equatable {
         exitCode == 0 ? .removed : .notYetRemoved
     }
 
+    /// loggingOutNotice is what the route area says while a leave child runs.
+    public static let loggingOutNotice = "Logging this Mac out of Tailscale\u{2026}"
+
+    /// builtInChoiceBlockedReason is why Use Built-In Tailscale cannot be
+    /// chosen right now, nil when it can. The child works on the folder the
+    /// built-in route would use, so the choice waits for it to end. The
+    /// private choices are never blocked.
+    public static func builtInChoiceBlockedReason(leaveChildRunning: Bool) -> String? {
+        leaveChildRunning ? loggingOutNotice : nil
+    }
+
     /// shouldRunLeaveChild is whether the leave child runs now: a leave is
     /// pending, the built-in route is off, and the engine is not holding the
     /// folder. It needs no LibreLinkUp sign-in, since the child reads none.
