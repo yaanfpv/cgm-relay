@@ -183,12 +183,12 @@ struct TailscaleChoiceView: View {
 
     var body: some View {
         Section {
-            choiceRow(
+            ChoiceRow(
                 title: "Use My Tailscale",
                 description: "Reach this Mac over your own Tailscale, on a private address.",
                 selected: !model.settings.useBuiltInTailscale
             ) { model.chooseOwnTailscale() }
-            choiceRow(
+            ChoiceRow(
                 title: "Use Built-In Tailscale",
                 description: "Give this Mac its own public address. Your phone needs no Tailscale.",
                 selected: model.settings.useBuiltInTailscale
@@ -199,8 +199,18 @@ struct TailscaleChoiceView: View {
             LeavePendingNotice(model: model)
         }
     }
+}
 
-    private func choiceRow(title: String, description: String, selected: Bool, action: @escaping () -> Void) -> some View {
+/// ChoiceRow is one radio-style option with a title and a description, a
+/// button with an accessible radio name. It calls action whether or not it
+/// is selected.
+struct ChoiceRow: View {
+    let title: String
+    let description: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
