@@ -137,6 +137,10 @@ final class AppModel: ObservableObject {
     /// isRunningLeaveChild is whether a leave child is running, so a second
     /// one never starts beside it.
     private var isRunningLeaveChild = false
+    /// builtInChosenDuringLeaveChild is a press of Use Built-In Tailscale made
+    /// while a leave child had the kept folder; it is carried out when the
+    /// child ends, so the press is never dropped.
+    private var builtInChosenDuringLeaveChild = false
     private let engineURL: URL
     private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
@@ -647,11 +651,15 @@ final class AppModel: ObservableObject {
 
     /// chooseBuiltInTailscale moves the choice to the Tailscale built into
     /// CGM Relay and restarts the engine with its state folder. It runs only
-    /// from a button the person pressed, and not while a leave child is using
-    /// the kept folder. A leave still waiting for a retry is over: the folder
-    /// it kept is the one in use again.
+    /// from a button the person pressed; a press while a leave child is using
+    /// the kept folder waits for the child. A leave still waiting for a retry
+    /// is over: the folder it kept is the one in use again.
     func chooseBuiltInTailscale() {
-        guard !settings.useBuiltInTailscale, !isLeavingRoute, !isRunningLeaveChild else { return }
+        guard !settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        if isRunningLeaveChild {
+            builtInChosenDuringLeaveChild = true
+            return
+        }
         settings.useBuiltInTailscale = true
         settings.pendingLeaveRetry = false
         settings.tailscaleHTTPSEnabled = false
@@ -745,7 +753,13 @@ final class AppModel: ObservableObject {
               LeaveTailnetOutcome.shouldRunLeaveChild(settings: settings, engineHoldsFolder: engineHoldsFolder)
         else { return }
         isRunningLeaveChild = true
-        defer { isRunningLeaveChild = false }
+        defer {
+            isRunningLeaveChild = false
+            if builtInChosenDuringLeaveChild {
+                builtInChosenDuringLeaveChild = false
+                chooseBuiltInTailscale()
+            }
+        }
         let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
         let request = ["tailscale_state_dir": kept.path, "tailscale_hostname": SettingsEngineConfigurationBuilder.builtInHostname]
         guard let input = try? JSONSerialization.data(withJSONObject: request) else { return }
