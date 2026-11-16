@@ -498,20 +498,17 @@ final class AppModel: ObservableObject {
     /// were gone.
     @discardableResult
     func signOut() async -> Bool {
-        var succeeded = false
-        await leaveBuiltInRoute(for: .signOut) {
-            do {
-                try self.accountSignIn.signOut()
-                succeeded = true
-            } catch {
-                succeeded = false
-            }
-        } stopEngine: {
-            self.stopRequested = true
-            await self.supervisor.stop()
-            self.stayAwake.relayStopped()
-            self.boundHost = nil
-            await self.alertEngine.pauseForEngineStop()
+        stopRequested = true
+        await supervisor.stop()
+        stayAwake.relayStopped()
+        boundHost = nil
+        await alertEngine.pauseForEngineStop()
+        let succeeded: Bool
+        do {
+            try accountSignIn.signOut()
+            succeeded = true
+        } catch {
+            succeeded = false
         }
         refreshCredentialsConfigured()
         return succeeded
@@ -697,8 +694,7 @@ final class AppModel: ObservableObject {
     /// the Mac was not yet removed.
     private func leaveBuiltInRoute(
         for trigger: LeaveTrigger,
-        applyChoice: () async -> Void,
-        stopEngine: () async -> Void = {}
+        applyChoice: () async -> Void
     ) async {
         isLeavingRoute = true
         defer { isLeavingRoute = false }
@@ -710,7 +706,7 @@ final class AppModel: ObservableObject {
                 LeaveTailnetOutcome.record(outcome, into: &settings)
                 persistSettings()
             case .stopEngine:
-                await stopEngine()
+                break
             case .applyChoice:
                 await applyChoice()
             }

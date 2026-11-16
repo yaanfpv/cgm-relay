@@ -109,13 +109,8 @@ struct AccountPaneView: View {
         .padding(.bottom, 16)
     }
 
-    @ViewBuilder
     private var signOutDialogMessage: some View {
-        if model.settings.useBuiltInTailscale {
-            Text("Every follower app stops getting readings until you sign in again. Your public address is removed with this Mac's Tailscale sign-in, so follower apps need the new address after you sign in again.")
-        } else {
-            Text("Every follower app stops getting readings until you sign in again.")
-        }
+        Text("Every follower app stops getting readings until you sign in again.")
     }
 
     /// setupSignedInSection is the signed-in account as setup shows it: the

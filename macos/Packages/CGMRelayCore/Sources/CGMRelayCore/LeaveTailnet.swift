@@ -4,7 +4,6 @@ import Foundation
 public enum LeaveTrigger: Sendable, Equatable {
     case chooseOwnTailscale
     case chooseThisMacOnly
-    case signOut
 }
 
 /// LeaveStep is one step of leaving the built-in route, in the order it runs.
@@ -12,10 +11,10 @@ public enum LeaveStep: Sendable, Equatable {
     /// leave has the engine log this Mac out of the person's Tailscale account
     /// and waits for its answer.
     case leave
-    /// stopEngine stops the engine, which Sign Out does.
+    /// stopEngine stops the engine. No way out of the built-in route has it
+    /// today; the engine stops only after a leave.
     case stopEngine
-    /// applyChoice makes the change the person asked for: the new route, or
-    /// the rest of signing out.
+    /// applyChoice makes the change the person asked for: the new route.
     case applyChoice
 }
 
@@ -29,8 +28,6 @@ public enum LeaveTailnetSequence {
         switch trigger {
         case .chooseOwnTailscale, .chooseThisMacOnly:
             return leave + [.applyChoice]
-        case .signOut:
-            return leave + [.stopEngine, .applyChoice]
         }
     }
 }
