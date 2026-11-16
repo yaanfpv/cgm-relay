@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
-	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail"
@@ -448,10 +447,6 @@ func (n *Node) run(ctx context.Context) {
 	}
 	// The node's own logs stay on this Mac: logtail would otherwise upload them to Tailscale's log service.
 	logtail.Disable()
-	// Port mapping probes the local network for a router (SSDP and the
-	// gateway), which makes macOS ask the person to allow local network
-	// access. Funnel and the public listener do not use it.
-	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
 	for first := true; ctx.Err() == nil; first = false {
 		// A server that is restarted keeps the folder, and with it the key.
 		gctx, gcancel := context.WithCancel(ctx)
@@ -512,6 +507,7 @@ type realNode struct {
 // set.
 func realStart(controlURL string) func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
 	return func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
+		prepareNodeEnv()
 		s := &tsnet.Server{Dir: dir, Hostname: hostname, ControlURL: controlURL, Logf: logf, UserLogf: logf}
 		if err := s.Start(); err != nil {
 			_ = s.Close()
@@ -678,6 +674,7 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 		}
 	}()
 	backoff := retryFirst
+	var receipt signInReceipt
 	for ctx.Err() == nil {
 		w, err := api.Watch(ctx)
 		if err != nil {
@@ -697,10 +694,12 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 			if note.BrowseToURL != nil {
 				n.setLoginURL(*note.BrowseToURL)
 			}
+			if receipt.observe(note) {
+				n.markSettled()
+			}
 			if note.State == nil {
 				continue
 			}
-			n.markSettled(*note.State)
 			state := note.State.String()
 			n.update(func(o *Observation) {
 				o.Backend = state
@@ -735,11 +734,8 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 }
 
 // markSettled records that the current server's own sign-in attempt has
-// settled, when state shows it.
-func (n *Node) markSettled(state ipn.State) {
-	if !signInSettled(state) {
-		return
-	}
+// settled.
+func (n *Node) markSettled() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	select {

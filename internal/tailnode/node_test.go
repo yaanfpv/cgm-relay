@@ -2445,8 +2445,14 @@ func TestNodeLeaveTailnetWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder(t
 }
 
 // grantNetmapCaching makes the fake control server grant every node the
-// capability to cache its network map in its state folder.
+// capability to cache its network map in its state folder, and lets the
+// test's own setup node write that cache: an earlier node started by the
+// product switches the cache off for the whole process, and the setup must
+// leave the cache the product's leave then runs on top of.
 func (r *leaveRig) grantNetmapCaching() {
+	prev := os.Getenv("TS_USE_CACHED_NETMAP")
+	envknob.Setenv("TS_USE_CACHED_NETMAP", "true")
+	r.t.Cleanup(func() { envknob.Setenv("TS_USE_CACHED_NETMAP", prev) })
 	caps := tailcfg.NodeCapMap{
 		tailcfg.NodeAttrCacheNetworkMaps: []tailcfg.RawMessage{},
 	}
@@ -2545,17 +2551,16 @@ func TestLeaveKeptFolderSavedAsLoggedOutLogsOutOnlyAfterTheSignInIsAnswered(t *t
 	t.Setenv("TS_CONTROL_URL", r.url())
 	dir := filepath.Join(t.TempDir(), "ts")
 	nodeKey := r.loginNode(dir)
-	// A logout that fails at the control server saves the folder as logged
-	// out and keeps the key.
-	r.refuseLogoutsFromNowOn(true)
-	if res, _ := leaveWithin(t, hangCeiling, dir); res != KeptForRetry {
-		t.Fatalf("the first leave answered %v with the logout refused, so the check cannot tell", res)
-	}
-	requireKeyKept(t, dir, "after the failed leave")
+	// A logout that fails at the control server leaves the folder saved as
+	// logged out with its key kept. A node that has just signed in can still
+	// receive a map update after that logout starts, which marks it logged
+	// in again, so a failed leave does not reliably produce this folder. The
+	// folder is saved that way directly instead.
+	saveStateAsLoggedOut(t, dir)
+	requireKeyKept(t, dir, "after saving the folder as logged out")
 	if !stateSavedAsLoggedOut(t, dir) {
 		t.Fatalf("the folder's saved state is not logged out, so the check cannot tell")
 	}
-	r.refuseLogoutsFromNowOn(false)
 	refused := len(r.loggedOut())
 	r.holdSignIn()
 
@@ -2580,6 +2585,48 @@ func TestLeaveKeptFolderSavedAsLoggedOutLogsOutOnlyAfterTheSignInIsAnswered(t *t
 	}
 	if out := r.loggedOut(); len(out) != refused+1 || out[len(out)-1] != nodeKey {
 		t.Errorf("the control server saw logouts for %v, want one more after the refused one, for %v", out, nodeKey)
+	}
+}
+
+// saveStateAsLoggedOut marks every saved profile in dir that holds a node key
+// as logged out and not wanting to run, as a logout that failed at the
+// control server leaves it, and keeps the key.
+func saveStateAsLoggedOut(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "tailscaled.state")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the node state: %v", err)
+	}
+	var entries map[string][]byte
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("parsing the node state: %v", err)
+	}
+	changed := false
+	for k, v := range entries {
+		var p ipn.Prefs
+		if json.Unmarshal(v, &p) != nil || p.Persist == nil || p.Persist.PrivateNodeKey.IsZero() {
+			continue
+		}
+		p.LoggedOut, p.WantRunning = true, false
+		if entries[k], err = json.Marshal(&p); err != nil {
+			t.Fatalf("encoding the saved profile: %v", err)
+		}
+		changed = true
+	}
+	if !changed {
+		t.Fatalf("the folder's saved state holds no profile with a node key, so the check cannot tell")
+	}
+	out, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encoding the node state: %v", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		t.Fatalf("writing the node state: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("replacing the node state: %v", err)
 	}
 }
 
