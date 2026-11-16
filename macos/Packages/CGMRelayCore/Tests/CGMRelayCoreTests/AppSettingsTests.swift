@@ -824,18 +824,32 @@ struct UpdateStepsTests {
         }
     }
 
-    @Test("the kept folder goes to the engine only while a leave retry runs, so no ordinary restart brings the node back")
-    func keptFolderIsAttachedOnlyDuringARetry() {
+    @Test("a leave child's exit code maps to removed only for 0; a failed logout, a signal death or a timeout all stay not yet removed")
+    func leaveChildExitCodeMapsToAnOutcome() {
+        #expect(LeaveTailnetOutcome.fromLeaveChild(exitCode: 0) == .removed)
+        // 3 is the child's "kept for retry", 2 a bad config, 1 a crash: none of them removed the folder.
+        for code: Int32 in [3, 1, 2, -1, 9, 15, 137, 255] {
+            #expect(LeaveTailnetOutcome.fromLeaveChild(exitCode: code) == .notYetRemoved, "exit code \(code) must not read as removed")
+        }
+    }
+
+    @Test("the leave child runs only for a pending leave with the route off and the engine not holding the folder, and needs no LibreLinkUp credentials (AppSettings carries none)")
+    func leaveChildRunsOnlyForAPendingLeaveWithTheFolderFree() {
         var pending = AppSettings.default
         pending.pendingLeaveRetry = true
-        #expect(LeaveTailnetOutcome.attachesKeptFolder(settings: pending, retryRunning: true))
-        #expect(!LeaveTailnetOutcome.attachesKeptFolder(settings: pending, retryRunning: false), "a restart with a leave pending must not start the node")
+        pending.useBuiltInTailscale = false
+        #expect(LeaveTailnetOutcome.shouldRunLeaveChild(settings: pending, engineHoldsFolder: false))
+
+        var notPending = pending
+        notPending.pendingLeaveRetry = false
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: notPending, engineHoldsFolder: false), "nothing pending, nothing to leave")
 
         var using = pending
         using.useBuiltInTailscale = true
-        #expect(!LeaveTailnetOutcome.attachesKeptFolder(settings: using, retryRunning: true), "a person using the route has nothing to leave")
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: using, engineHoldsFolder: false), "a person using the route has nothing to leave")
 
-        let nothingPending = AppSettings.default
-        #expect(!LeaveTailnetOutcome.attachesKeptFolder(settings: nothingPending, retryRunning: true))
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: pending, engineHoldsFolder: true), "the engine holds the folder, so a second node on it must not start")
+
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: AppSettings.default, engineHoldsFolder: false), "defaults have nothing pending")
     }
 }
