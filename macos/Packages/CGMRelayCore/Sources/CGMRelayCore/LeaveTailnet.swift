@@ -48,11 +48,18 @@ public enum LeaveTailnetOutcome: Sendable, Equatable {
         settings.pendingLeaveRetry
     }
 
-    /// attachesKeptFolder is whether the engine is given the folder a failed
-    /// leave kept, so its node can log out again. Only while a retry is running
-    /// and the built-in route is off: any other start, restart included, runs
-    /// without the node, so the public address does not come back.
-    public static func attachesKeptFolder(settings: AppSettings, retryRunning: Bool) -> Bool {
-        retryRunning && settings.pendingLeaveRetry && !settings.useBuiltInTailscale
+    /// fromLeaveChild is the outcome of the `cgm-relay leave-tailnet` child by
+    /// its exit code: only 0 (logged out, folder removed) is removed. Exit 3
+    /// (kept for retry), 2 (bad request), a crash, a signal death and a
+    /// timeout all leave the folder, so the leave stays pending.
+    public static func fromLeaveChild(exitCode: Int32) -> LeaveTailnetOutcome {
+        exitCode == 0 ? .removed : .notYetRemoved
+    }
+
+    /// shouldRunLeaveChild is whether the leave child runs now: a leave is
+    /// pending, the built-in route is off, and the engine is not holding the
+    /// folder. It needs no LibreLinkUp sign-in, since the child reads none.
+    public static func shouldRunLeaveChild(settings: AppSettings, engineHoldsFolder: Bool) -> Bool {
+        settings.pendingLeaveRetry && !settings.useBuiltInTailscale && !engineHoldsFolder
     }
 }

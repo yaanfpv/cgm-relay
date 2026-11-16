@@ -134,7 +134,11 @@ final class AppModel: ObservableObject {
     /// isLeavingRoute is whether a way out of the built-in route is waiting on
     /// the engine's logout, so a second press does not start another.
     private var isLeavingRoute = false
-    private var isRetryingLeave = false
+    /// isRunningLeaveChild is whether a leave child is running, so a second
+    /// one never starts beside it.
+    private var isRunningLeaveChild = false
+    private let engineURL: URL
+    private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -254,6 +258,7 @@ final class AppModel: ObservableObject {
         databasePath: String,
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
+        leaveRunner: any BoundedProcessRunning = RealBoundedProcessRunner(),
         loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
         portBinder: any PortBinding = SystemPortBinder(),
         powerSource: any PowerSourceReading = SystemPowerSource(),
@@ -269,6 +274,8 @@ final class AppModel: ObservableObject {
         self.sleepHelper = sleepHelper
         sleepHelperStatus = sleepHelper.status
         self.tailscale = tailscale
+        self.engineURL = engineURL
+        self.leaveRunner = leaveRunner
         self.portBinder = portBinder
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
@@ -358,11 +365,13 @@ final class AppModel: ObservableObject {
         }
         await alertEngine.setNoReadingAlert(enabled: settings.noReadingAlertEnabled, minutes: settings.noReadingAlertMinutes)
         await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
+        // A leave that did not reach Tailscale is tried again here whether or
+        // not the engine can start: the child needs no LibreLinkUp sign-in.
+        Task { await runPendingLeaveChild() }
         async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
         async let tailscaleRead: Void = refreshTailscale()
         _ = await (engineStarted, pollerStarted, tailscaleRead)
-        Task { await retryPendingLeave() }
     }
 
     /// removeRetiredCertificateSecrets deletes the certificate entries an
@@ -484,7 +493,6 @@ final class AppModel: ObservableObject {
             refreshCredentialsConfigured()
             if canStart {
                 await startEngine()
-                Task { await retryPendingLeave() }
             }
         }
         return outcome
@@ -639,10 +647,11 @@ final class AppModel: ObservableObject {
 
     /// chooseBuiltInTailscale moves the choice to the Tailscale built into
     /// CGM Relay and restarts the engine with its state folder. It runs only
-    /// from a button the person pressed. A leave still waiting for a retry is
-    /// over: the folder it kept is the one in use again.
+    /// from a button the person pressed, and not while a leave child is using
+    /// the kept folder. A leave still waiting for a retry is over: the folder
+    /// it kept is the one in use again.
     func chooseBuiltInTailscale() {
-        guard !settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        guard !settings.useBuiltInTailscale, !isLeavingRoute, !isRunningLeaveChild else { return }
         settings.useBuiltInTailscale = true
         settings.pendingLeaveRetry = false
         settings.tailscaleHTTPSEnabled = false
@@ -709,37 +718,53 @@ final class AppModel: ObservableObject {
                 await applyChoice()
             }
         }
-        // A leave that did not reach Tailscale is tried again now, not only at
+        // A leave that did not reach Tailscale is tried again now, once the
+        // route change's engine restart has released the folder, not only at
         // the next launch.
-        Task { await retryPendingLeave() }
+        Task { await runPendingLeaveChild() }
     }
 
-    /// retryPendingLeave tries again to log this Mac out of the person's
-    /// Tailscale account after a leave that did not reach it. The engine
-    /// starts the node on the kept folder, which takes a few seconds, so the
-    /// leave is tried a few times while the engine runs. A person who has
-    /// chosen the built-in route since has nothing to leave.
-    private func retryPendingLeave() async {
-        guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale, !isRetryingLeave else { return }
+    /// engineHoldsFolder is whether an engine is running with the built-in
+    /// route on, the only time the engine uses the kept Tailscale folder.
+    private var engineHoldsFolder: Bool {
+        guard settings.useBuiltInTailscale else { return false }
         switch engineState {
-        case .starting, .running, .waitingToRestart: break
-        case .stopped, .failed: return
+        case .starting, .running, .waitingToRestart: return true
+        case .stopped, .failed: return false
         }
-        isRetryingLeave = true
-        // The engine takes the kept folder only inside this window, so no
-        // ordinary restart brings the node back up.
-        await restartEngineIfRunning()
-        for _ in 0..<6 {
-            guard engineState == .running || engineState == .starting else { break }
-            try? await Task.sleep(for: .seconds(5))
-            guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale else { break }
-            let outcome = await routeLeaver.leave()
-            LeaveTailnetOutcome.record(outcome, into: &settings)
-            persistSettings()
-            if outcome == .removed { break }
+    }
+
+    /// runPendingLeaveChild tries again to log this Mac out of the person's
+    /// Tailscale account after a leave that did not reach it, by running
+    /// `cgm-relay leave-tailnet --config-stdin` on the kept folder. It runs
+    /// in a process of its own, with no engine and no LibreLinkUp sign-in,
+    /// and one at a time. The exit code is recorded with
+    /// LeaveTailnetOutcome.fromLeaveChild.
+    private func runPendingLeaveChild() async {
+        guard !isRunningLeaveChild,
+              LeaveTailnetOutcome.shouldRunLeaveChild(settings: settings, engineHoldsFolder: engineHoldsFolder)
+        else { return }
+        isRunningLeaveChild = true
+        defer { isRunningLeaveChild = false }
+        let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
+        let request = ["tailscale_state_dir": kept.path, "tailscale_hostname": SettingsEngineConfigurationBuilder.builtInHostname]
+        guard let input = try? JSONSerialization.data(withJSONObject: request) else { return }
+        let result = await leaveRunner.run(
+            executableURL: engineURL,
+            arguments: ["leave-tailnet", "--config-stdin"],
+            standardInputData: input,
+            timeout: .seconds(30)
+        )
+        let outcome: LeaveTailnetOutcome
+        if case .exited(let code) = result {
+            outcome = LeaveTailnetOutcome.fromLeaveChild(exitCode: code)
+        } else {
+            outcome = .notYetRemoved
         }
-        isRetryingLeave = false
-        await restartEngineIfRunning()
+        LeaveTailnetOutcome.record(outcome, into: &settings)
+        persistSettings()
+        refreshBuiltInRoute()
+        recomputeMenuState()
     }
 
     /// openBuiltInStep opens the page the current step asks for, in the
@@ -1410,13 +1435,6 @@ final class AppModel: ObservableObject {
             return
         }
         var stateDirectory: String?
-        // A leave that did not reach Tailscale needs the node up on the kept
-        // folder to try again; nothing is created for it.
-        var keptStateDirectory: String?
-        if LeaveTailnetOutcome.attachesKeptFolder(settings: settings, retryRunning: isRetryingLeave) {
-            let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
-            if FileManager.default.fileExists(atPath: kept.path) { keptStateDirectory = kept.path }
-        }
         if settings.useBuiltInTailscale {
             stateDirectory = builtInStateDirectory()
             if stateDirectory == nil {
@@ -1426,7 +1444,7 @@ final class AppModel: ObservableObject {
             }
         }
         guard
-            var configuration = try? SettingsEngineConfigurationBuilder.build(
+            let configuration = try? SettingsEngineConfigurationBuilder.build(
                 settings: settings,
                 from: credentialStore,
                 interfaces: interfaces,
@@ -1439,10 +1457,6 @@ final class AppModel: ObservableObject {
             boundHost = nil
             await supervisor.fail(.configurationUnreadable)
             return
-        }
-        if let keptStateDirectory {
-            configuration.tailscaleStateDir = keptStateDirectory
-            configuration.tailscaleHostname = SettingsEngineConfigurationBuilder.builtInHostname
         }
         boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         // A status from before this start must not read as this node's.
