@@ -1,10 +1,12 @@
 package tailnode
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaanfpv/cgm-relay/internal/cgm"
+	"github.com/yaanfpv/cgm-relay/internal/nightscout"
+	"github.com/yaanfpv/cgm-relay/internal/store"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -274,9 +279,12 @@ type fakeTailnet struct {
 	result      ProbeClass
 	cur         *fakeNode
 	loginStarts int
-	nodeLogf    func(string, ...any) // the log hook the node handed the running server
-	funnelOn    bool                 // whether the server's serve config allows Funnel
-	offTimes    []time.Time          // when Funnel was switched off
+	ln          net.Listener                    // the public listener ListenFunnel hands out, when set
+	handler     http.Handler                    // the node's Handler, when set
+	newServer   func(http.Handler) *http.Server // the node's NewServer, when set
+	nodeLogf    func(string, ...any)            // the log hook the node handed the running server
+	funnelOn    bool                            // whether the server's serve config allows Funnel
+	offTimes    []time.Time                     // when Funnel was switched off
 
 	probes   atomic.Int64
 	stateCh  chan string
@@ -402,10 +410,17 @@ func (tn *fakeTailnet) start(dir, hostname string, logf func(string, ...any)) (n
 
 // run starts the node under test.
 func (tn *fakeTailnet) run() *Node {
+	handler, newServer := tn.handler, tn.newServer
+	if handler == nil {
+		handler = http.NotFoundHandler()
+	}
+	if newServer == nil {
+		newServer = func(h http.Handler) *http.Server { return &http.Server{Handler: h} }
+	}
 	n := Start(Options{
 		StateDir: tn.dir, Hostname: "relay-test",
-		Handler:   http.NotFoundHandler(),
-		NewServer: func(h http.Handler) *http.Server { return &http.Server{Handler: h} },
+		Handler:   handler,
+		NewServer: newServer,
 		Logf:      tn.logf, now: tn.clock.Now, sleep: tn.sleep, probe: tn.probe, startNode: tn.start,
 	})
 	tn.t.Cleanup(n.Close)
@@ -535,7 +550,11 @@ func (f *fakeNode) ListenFunnel(context.Context) (net.Listener, error) {
 	}
 	f.tn.funnelOn = true
 	f.tn.events = append(f.tn.events, fmt.Sprintf("listen-ok#%d", f.gen))
+	ln := f.tn.ln
 	f.tn.mu.Unlock()
+	if ln != nil {
+		return ln, nil
+	}
 	return &fakeListener{done: make(chan struct{})}, nil
 }
 
@@ -1417,5 +1436,155 @@ func TestNodeReconnectTestFeedsTheMonitor(t *testing.T) {
 	}
 	if got := n.mon.Counts()[ProbeRouteDropped.String()]; got < 3 {
 		t.Errorf("%d failed tests counted, want at least 3: the one after the reconnect, the one after the toggle and the press", got)
+	}
+}
+
+// ---- Connection limits on the public address, through the node ----
+
+// feedListener is a public listener whose connections the test hands over in
+// order; accepting is closed when the server first asks it for one.
+type feedListener struct {
+	conns     chan net.Conn
+	done      chan struct{}
+	once      sync.Once
+	accepting chan struct{}
+	askOnce   sync.Once
+}
+
+func newFeedListener() *feedListener {
+	return &feedListener{conns: make(chan net.Conn, 256), done: make(chan struct{}), accepting: make(chan struct{})}
+}
+
+func (l *feedListener) Accept() (net.Conn, error) {
+	l.askOnce.Do(func() { close(l.accepting) })
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+func (l *feedListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
+func (l *feedListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// relayConn reports the Funnel relay as its RemoteAddr, as every Funnel
+// connection does.
+type relayConn struct{ net.Conn }
+
+func (relayConn) RemoteAddr() net.Addr {
+	return net.TCPAddrFromAddrPort(netip.MustParseAddrPort("100.64.0.9:443"))
+}
+
+type noReadings struct{}
+
+func (noReadings) Range(context.Context, store.RangeQuery) ([]cgm.Reading, error) { return nil, nil }
+
+// funnelFrom hands the feed a Funnel connection from src and returns the
+// client's end of it.
+func (l *feedListener) funnelFrom(src string) net.Conn {
+	s, c := net.Pipe()
+	l.conns <- &ipn.FunnelConn{Conn: relayConn{s}, Src: netip.MustParseAddrPort(src)}
+	return c
+}
+
+// answer sends a request on c and reads the response; it returns the status,
+// or an error when the connection ends without one.
+func answer(c net.Conn, br *bufio.Reader, target string) (int, error) {
+	go io.WriteString(c, "GET "+target+" HTTP/1.1\r\nHost: relay.example-tailnet.ts.net\r\n\r\n")
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		return 0, err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// TestPublicListenerThroughTheNode protects the public address against one
+// sender holding it. It serves the node's real public server on a listener
+// that hands over Funnel connections from chosen senders, all arriving
+// through one relay RemoteAddr, and checks what open() built: the idle
+// timeout is 10 s with header read 5 s and read and write 10 s untouched (a
+// timeout that must be observed is asserted as the server's field; the
+// duration itself is the net/http server's), and with sender A holding its 8
+// idle connections a ninth from A is closed unserved, a follower request from
+// sender B and the app's own public self-test (sender C, the Mac's address)
+// are both answered, a closed connection of A frees its slot, and the
+// listener keeps serving throughout. Breaks it fails: 60 s idle on the public
+// server, any Funnel client counted as the relay (B or C refused), a port in
+// the key, a refusal that stops Serve, a slot never freed, and an
+// unconfigured per-sender cap (the ninth served).
+func TestPublicListenerThroughTheNode(t *testing.T) {
+	const token = "public-token"
+	ns, err := nightscout.New(noReadings{}, token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed := newFeedListener()
+	var built atomic.Pointer[http.Server]
+	tn := newFakeTailnet(t)
+	tn.ln = feed
+	tn.handler = ns
+	tn.newServer = func(h http.Handler) *http.Server {
+		srv := &http.Server{
+			Handler: h, ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
+		}
+		built.Store(srv)
+		return srv
+	}
+	tn.run()
+	select {
+	case <-feed.accepting:
+	case <-time.After(hangCeiling):
+		t.Fatalf("the public server never started serving; events %v", tn.log())
+	}
+	srv := built.Load()
+	if srv.IdleTimeout != 10*time.Second {
+		t.Errorf("public IdleTimeout = %v, want 10s", srv.IdleTimeout)
+	}
+	if srv.ReadHeaderTimeout != 5*time.Second || srv.ReadTimeout != 10*time.Second || srv.WriteTimeout != 10*time.Second {
+		t.Errorf("public header %v read %v write %v, want 5s 10s 10s", srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout)
+	}
+
+	// Sender A holds its 8 connections, each from its own port, idle.
+	var idle []net.Conn
+	for i := 0; i < MaxConnsPerSender; i++ {
+		idle = append(idle, feed.funnelFrom(fmt.Sprintf("203.0.113.5:%d", 40000+i)))
+	}
+	ninth := feed.funnelFrom("203.0.113.5:50000")
+	if _, err := answer(ninth, bufio.NewReader(ninth), "/"); err == nil {
+		t.Error("a ninth connection from one sender was served")
+	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.ErrClosedPipe) {
+		// http.ReadResponse reports a connection closed before the status line
+		// as io.ErrUnexpectedEOF, so that is what a refused connection reads as.
+		t.Errorf("ninth connection: %v, want it closed", err)
+	}
+
+	// The flood holds; another sender's follower request and the app's own
+	// public self-test are both answered.
+	follower := feed.funnelFrom("198.51.100.20:1234")
+	if code, err := answer(follower, bufio.NewReader(follower), "/api/v1/entries.json?token="+token); err != nil || code != 200 {
+		t.Errorf("follower request from another sender while A holds 8: %d, %v; want 200", code, err)
+	}
+	self := feed.funnelFrom("192.0.2.77:9999")
+	if code, err := answer(self, bufio.NewReader(self), "/api/v1/status.json"); err != nil || code != 200 {
+		t.Errorf("self-test while A holds 8: %d, %v; want 200", code, err)
+	}
+
+	// A's closed connection frees its slot. The server notices the close
+	// asynchronously, so a connection that arrives before that is refused
+	// like any other; each refusal is itself an answer, and the loop ends at
+	// the first success, or fails when no slot ever frees.
+	idle[0].Close()
+	freed := false
+	for attempt := 0; attempt < 100000 && !freed; attempt++ {
+		c := feed.funnelFrom(fmt.Sprintf("203.0.113.5:%d", 51000+attempt%10000))
+		code, err := answer(c, bufio.NewReader(c), "/")
+		freed = err == nil && code == 200
+		c.Close()
+	}
+	if !freed {
+		t.Error("after one of sender A's connections closed, no new connection from A was ever served: its slot was never freed")
 	}
 }

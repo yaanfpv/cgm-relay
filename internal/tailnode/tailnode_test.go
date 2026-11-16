@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1875,5 +1876,336 @@ func TestStateCarriesTheKeyExpiry(t *testing.T) {
 	}
 	if _, ok := got["ts_error"]; ok {
 		t.Errorf("an expired key carries ts_error: %v", got)
+	}
+}
+
+// ---- Connection limits on the public address ----
+
+// relayAddrConn is a connection whose RemoteAddr is the Funnel relay, as
+// every Funnel connection's is, over one end of a pipe.
+type relayAddrConn struct{ net.Conn }
+
+func (relayAddrConn) RemoteAddr() net.Addr {
+	return net.TCPAddrFromAddrPort(netip.MustParseAddrPort("100.64.0.9:443"))
+}
+
+// fromAddrConn is a plain connection reporting the given RemoteAddr.
+type fromAddrConn struct {
+	net.Conn
+	from netip.AddrPort
+}
+
+func (c fromAddrConn) RemoteAddr() net.Addr { return net.TCPAddrFromAddrPort(c.from) }
+
+// netConnWrapper is a wrapper that exposes the connection under it.
+type netConnWrapper struct{ net.Conn }
+
+func (w netConnWrapper) NetConn() net.Conn { return w.Conn }
+
+// funnelConn is a Funnel connection from src that arrived through the relay.
+func funnelConn(src string) (server, client net.Conn) {
+	s, c := net.Pipe()
+	return &ipn.FunnelConn{Conn: relayAddrConn{s}, Src: netip.MustParseAddrPort(src)}, c
+}
+
+// TestSenderKey protects the sender decision: the key is the Funnel client's
+// own address (port dropped), found through any wrapper and *tls.Conn, not
+// the relay's RemoteAddr; IPv4 per address, IPv6 per /64; a connection that
+// is not a FunnelConn uses its RemoteAddr. Breaks it fails: counting every
+// Funnel client as the relay (one key for all), keeping the port in the key
+// (a sender dodges the cap by opening from new ports), keying IPv6 per
+// address (a sender with a /64 dodges it), and not unwrapping tls.
+func TestSenderKey(t *testing.T) {
+	key := func(c net.Conn) string { t.Helper(); return tailnode.SenderKey(c) }
+	fc := func(src string) net.Conn { s, _ := funnelConn(src); return s }
+	tlsOver := func(c net.Conn) net.Conn { return tls.Server(c, &tls.Config{}) }
+	plain := func(from string) net.Conn {
+		s, _ := net.Pipe()
+		return fromAddrConn{s, netip.MustParseAddrPort(from)}
+	}
+
+	same := []struct {
+		name string
+		a, b net.Conn
+	}{
+		{"funnel port dropped", fc("203.0.113.5:1111"), fc("203.0.113.5:2222")},
+		{"funnel through tls", fc("203.0.113.5:1111"), tlsOver(fc("203.0.113.5:2222"))},
+		{"funnel through wrapper and tls", fc("203.0.113.5:1111"), netConnWrapper{tlsOver(netConnWrapper{fc("203.0.113.5:3")})}},
+		{"funnel ipv6 same /64", fc("[2001:db8:1:2::1]:10"), fc("[2001:db8:1:2:ffff:ffff:ffff:ffff]:11")},
+		{"funnel ipv6 same /64 through tls", fc("[2001:db8:1:2::1]:10"), tlsOver(fc("[2001:db8:1:2:aaaa::9]:11"))},
+		{"plain port dropped", plain("198.51.100.7:1234"), plain("198.51.100.7:4321")},
+		{"plain ipv6 same /64", plain("[2001:db8:9:9::1]:5"), plain("[2001:db8:9:9::2]:6")},
+		{"plain and funnel from the same address", plain("203.0.113.5:80"), fc("203.0.113.5:81")},
+	}
+	for _, c := range same {
+		if key(c.a) != key(c.b) {
+			t.Errorf("%s: keys differ (%q, %q), want one sender", c.name, key(c.a), key(c.b))
+		}
+	}
+	differ := []struct {
+		name string
+		a, b net.Conn
+	}{
+		{"two funnel clients behind one relay address", fc("203.0.113.5:1"), fc("203.0.113.6:1")},
+		{"two funnel clients through tls", tlsOver(fc("203.0.113.5:1")), tlsOver(fc("203.0.113.6:1"))},
+		{"funnel ipv6 other /64", fc("[2001:db8:1:2::1]:10"), fc("[2001:db8:1:3::1]:10")},
+		{"plain ipv4 other address", plain("198.51.100.7:1"), plain("198.51.100.8:1")},
+		{"plain ipv6 other /64", plain("[2001:db8:9:9::1]:5"), plain("[2001:db8:9:a::1]:5")},
+		{"funnel client is not the relay", fc("203.0.113.5:1"), plain("100.64.0.9:443")},
+	}
+	for _, c := range differ {
+		if key(c.a) == key(c.b) {
+			t.Errorf("%s: both keyed %q, want two senders", c.name, key(c.a))
+		}
+	}
+}
+
+// TestPublicLimitConstants pins the public listener limits: 8 connections per sender, a 10 s idle timeout, 128 connections in all.
+func TestPublicLimitConstants(t *testing.T) {
+	if tailnode.MaxConnsPerSender != 8 || tailnode.PublicIdleTimeout != 10*time.Second || tailnode.MaxPublicConns != 128 {
+		t.Errorf("MaxConnsPerSender %d, PublicIdleTimeout %v, MaxPublicConns %d; want 8, 10s, 128",
+			tailnode.MaxConnsPerSender, tailnode.PublicIdleTimeout, tailnode.MaxPublicConns)
+	}
+}
+
+// feedListener is a listener whose connections the test hands over one at a
+// time, in order.
+type feedListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newFeedListener() *feedListener {
+	return &feedListener{conns: make(chan net.Conn, 256), done: make(chan struct{})}
+}
+
+func (l *feedListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+func (l *feedListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
+func (l *feedListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// acceptOne calls Accept and fails the test on an error or when nothing
+// comes (hang ceiling only).
+func acceptOne(t *testing.T, l net.Listener) net.Conn {
+	t.Helper()
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() { c, err := l.Accept(); ch <- res{c, err} }()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("Accept returned %v; a refused connection must not end Accept", r.err)
+		}
+		return r.c
+	case <-time.After(2 * time.Minute): // hang ceiling only, not an expectation
+		t.Fatal("Accept never returned")
+		return nil
+	}
+}
+
+// closedByPeer reports whether reading c ends with EOF, which is how a
+// connection closed unserved looks from the sender's side. It waits on that
+// event; the only limit is the hang ceiling.
+func closedByPeer(c net.Conn) bool {
+	ch := make(chan error, 1)
+	go func() { _, err := c.Read(make([]byte, 1)); ch <- err }()
+	select {
+	case err := <-ch:
+		return errors.Is(err, io.EOF)
+	case <-time.After(2 * time.Minute): // hang ceiling only, not an expectation
+		return false
+	}
+}
+
+// TestPerSenderListener protects the per-sender cap: a sender over its cap
+// is closed at accept and skipped while Accept goes on, another sender is
+// still accepted even when it arrives through the same relay RemoteAddr, a
+// closed connection frees its slot, and closing one connection twice frees
+// one slot only. Breaks it fails: all Funnel clients counted as one sender
+// (B refused), a port in the key (A's extra connection from a new port
+// accepted), a refusal that returns an error from Accept or leaves the
+// connection open, a slot never freed (A's later connection refused), a
+// double Close that frees two.
+func TestPerSenderListener(t *testing.T) {
+	const perSender = 3
+	inner := newFeedListener()
+	l := tailnode.PerSenderListener(inner, perSender)
+	defer l.Close()
+
+	push := func(src string) (client net.Conn) {
+		s, c := funnelConn(src)
+		inner.conns <- s
+		return c
+	}
+	for i := 0; i < perSender; i++ {
+		push(fmt.Sprintf("203.0.113.5:%d", 1000+i))
+	}
+	refused := push("203.0.113.5:2000") // a new port is still sender A
+	push("203.0.113.6:1000")            // sender B, through the same relay address
+
+	var heldA []net.Conn
+	for i := 0; i < perSender; i++ {
+		heldA = append(heldA, acceptOne(t, l))
+	}
+	b := acceptOne(t, l) // the refused connection is skipped, with no error
+	if tailnode.SenderKey(b) == tailnode.SenderKey(heldA[0]) {
+		t.Fatal("the connection accepted after the refusal is sender A's; want sender B's")
+	}
+	if !closedByPeer(refused) {
+		t.Error("the connection over the cap was not closed at accept")
+	}
+
+	// One closed connection frees one slot, however often it is closed.
+	heldA[0].Close()
+	heldA[0].Close()
+	push("203.0.113.5:3000")
+	refusedAgain := push("203.0.113.5:3001")
+	push("203.0.113.7:1000") // sender C marks the end of the queue
+	a5 := acceptOne(t, l)
+	if tailnode.SenderKey(a5) != tailnode.SenderKey(heldA[1]) {
+		t.Fatal("after a close, sender A's next connection was not accepted: its slot was never freed")
+	}
+	c := acceptOne(t, l)
+	if tailnode.SenderKey(c) == tailnode.SenderKey(heldA[1]) {
+		t.Fatal("sender A held more than the cap after a double Close")
+	}
+	if !closedByPeer(refusedAgain) {
+		t.Error("the connection over the cap was not closed at accept after a slot was freed")
+	}
+
+	// Accept ends only when the listener does.
+	inner.Close()
+	if _, err := l.Accept(); err == nil {
+		t.Error("Accept on a closed listener returned a connection")
+	}
+}
+
+// TestPublicHandlerClosesUnauthenticatedAnswers protects the public
+// listener from connections parked by strangers: every answer to a request
+// that is not authenticated (the 401s, the open paths / and status.json, the
+// pairing page, whatever its answer) is sent with the connection closed
+// after it, and an authenticated follower request keeps its connection. It
+// runs the real Nightscout handler behind PublicHandler on a real server and
+// reads the answers off a raw connection, so it sees the connection itself,
+// not a header guess. Breaks it fails: an unauthenticated answer left open
+// for keep-alive (the next read does not end), and an authenticated one
+// closed (the second request on its connection fails).
+func TestPublicHandlerClosesUnauthenticatedAnswers(t *testing.T) {
+	const token = "public-token"
+	ns, err := nightscout.New(noReadings{}, token, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// The pairing page lives in the status server's mux, outside Nightscout;
+	// stand in for it with one that answers a good code and a bad one.
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/connect/"); ok {
+			if rest == "good" {
+				io.WriteString(w, "pairing page")
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		ns.ServeHTTP(w, r)
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: tailnode.PublicHandler(next)}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	get := func(br *bufio.Reader, conn net.Conn, target string, hdr ...string) (*http.Response, error) {
+		raw := "GET " + target + " HTTP/1.1\r\nHost: " + host + "\r\n" + strings.Join(hdr, "") + "\r\n"
+		if _, err := io.WriteString(conn, raw); err != nil {
+			return nil, err
+		}
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			return nil, err
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp, nil
+	}
+	dial := func() (net.Conn, *bufio.Reader) {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c, bufio.NewReader(c)
+	}
+
+	unauth := []struct {
+		name, target string
+		hdr          []string
+		code         int
+	}{
+		{"no token", "/api/v1/entries.json", nil, 401},
+		{"wrong token query", "/api/v1/entries.json?token=wrong", nil, 401},
+		{"wrong api-secret", "/api/v1/entries.json", []string{"api-secret: wrong\r\n"}, 401},
+		{"no token on properties", "/api/v2/properties", nil, 401},
+		{"status with a wrong token", "/api/v1/status.json?token=wrong", nil, 401},
+		{"open root", "/", nil, 200},
+		{"open status", "/api/v1/status.json", nil, 200},
+		{"pairing page", "/connect/good", nil, 200},
+		{"pairing page, unknown code", "/connect/bad", nil, 404},
+	}
+	for _, c := range unauth {
+		t.Run("closes/"+c.name, func(t *testing.T) {
+			conn, br := dial()
+			resp, err := get(br, conn, c.target, c.hdr...)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			if resp.StatusCode != c.code {
+				t.Fatalf("status %d, want %d", resp.StatusCode, c.code)
+			}
+			if !resp.Close {
+				t.Fatal("the answer does not say the connection closes after it")
+			}
+			// The server ends the connection after the answer; waiting for
+			// that is the event, and the only limit is the hang ceiling.
+			conn.SetReadDeadline(time.Now().Add(2 * time.Minute)) // hang ceiling only
+			if _, err := br.Peek(1); !errors.Is(err, io.EOF) {
+				t.Errorf("after the answer the connection is still open (read: %v), want closed", err)
+			}
+		})
+	}
+
+	auth := []struct {
+		name, target string
+		hdr          []string
+	}{
+		{"token query", "/api/v1/entries.json?token=" + token, nil},
+		{"api-secret header", "/api/v1/entries.json", []string{"api-secret: " + token + "\r\n"}},
+		{"properties", "/api/v2/properties?token=" + token, nil},
+	}
+	for _, c := range auth {
+		t.Run("keeps/"+c.name, func(t *testing.T) {
+			conn, br := dial()
+			for i := 0; i < 2; i++ {
+				resp, err := get(br, conn, c.target, c.hdr...)
+				if err != nil {
+					t.Fatalf("request %d on one connection: %v; an authenticated request must keep its connection", i+1, err)
+				}
+				if resp.StatusCode != 200 || resp.Close {
+					t.Fatalf("request %d: status %d, close %v; want 200 and kept alive", i+1, resp.StatusCode, resp.Close)
+				}
+			}
+		})
 	}
 }

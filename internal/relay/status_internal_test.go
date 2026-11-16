@@ -467,6 +467,31 @@ func TestStartServerAppliesTimeouts(t *testing.T) {
 	}
 }
 
+// TestLocalAndPublicServerTimeValues guards the values the public-listener limits must not move:
+// the local Nightscout and status servers (startServer) keep a 60 s idle
+// timeout with 5 s header read and 10 s read and write, and the server the
+// built-in node is handed (newHTTPServer) keeps its 5 s header read and 10 s
+// read and write, which the public listener relies on; only the public
+// listener's idle timeout changes, and it changes inside the node. The break
+// it catches: shortening the idle timeout in newHTTPServer to get the public
+// 10 s, which would cut the local servers' keep-alive too.
+func TestLocalAndPublicServerTimeValues(t *testing.T) {
+	t.Parallel()
+	rs, err := startServer("127.0.0.1:0", http.NotFoundHandler())
+	if err != nil {
+		t.Fatalf("startServer: %v", err)
+	}
+	defer rs.shutdown()
+	for name, srv := range map[string]*http.Server{"local server": rs.srv, "server handed to the node": newHTTPServer(http.NotFoundHandler())} {
+		if srv.ReadHeaderTimeout != 5*time.Second || srv.ReadTimeout != 10*time.Second || srv.WriteTimeout != 10*time.Second {
+			t.Errorf("%s: header %v read %v write %v, want 5s 10s 10s", name, srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout)
+		}
+	}
+	if rs.srv.IdleTimeout != 60*time.Second {
+		t.Errorf("local server idle timeout = %v, want 60s", rs.srv.IdleTimeout)
+	}
+}
+
 // lockedBuilder is a strings.Builder safe to write from the server's
 // goroutines while the test reads it.
 type lockedBuilder struct {
