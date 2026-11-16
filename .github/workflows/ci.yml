@@ -51,6 +51,27 @@ jobs:
           - name: Go build
             run: bash .github/checks/go-build.sh
 
+  go-test-macos:
+    name: Go tests (macOS)
+    # The Go engine ships inside the Mac app, so its tests run on macOS as well as Linux.
+    runs-on: xcode-27
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: select Xcode
+        run: bash .github/checks/select-xcode.sh
+
+      - name: Go tests
+        run: bash .github/checks/go-test.sh
+
   swift-test:
     name: Swift tests
     # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
@@ -106,6 +127,7 @@ jobs:
     if: always()
     needs:
       - go-checks
+      - go-test-macos
       - swift-test
       - mac-app-build
     runs-on: ubuntu-latest
