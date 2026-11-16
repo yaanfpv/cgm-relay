@@ -690,6 +690,15 @@ struct SleepResetHelperProcessListTests {
         #expect(writes(whole) == 3)
     }
 
+    @Test("a copy that returns nothing after a positive count counts as the app running")
+    func failedCopyCountsAsRunning() {
+        let failed = SleepResetHelper.ProcessListing(
+            countHint: { 120 }, fill: { _ in 0 }, executableName: { _ in nil }, isGenuineApp: { _ in false }
+        )
+        #expect(SleepResetHelper.appIsRunning(using: failed) == true)
+        #expect(writes(failed) == 0)
+    }
+
     @Test("a list that cannot be read at all counts as the app running")
     func unreadableListCountsAsRunning() {
         let none = SleepResetHelper.ProcessListing(
