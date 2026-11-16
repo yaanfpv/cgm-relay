@@ -709,6 +709,9 @@ final class AppModel: ObservableObject {
                 await applyChoice()
             }
         }
+        // A leave that did not reach Tailscale is tried again now, not only at
+        // the next launch.
+        Task { await retryPendingLeave() }
     }
 
     /// retryPendingLeave tries again to remove this Mac from the person's
@@ -718,20 +721,25 @@ final class AppModel: ObservableObject {
     /// chosen the built-in route since has nothing to leave.
     private func retryPendingLeave() async {
         guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale, !isRetryingLeave else { return }
+        switch engineState {
+        case .starting, .running, .waitingToRestart: break
+        case .stopped, .failed: return
+        }
         isRetryingLeave = true
-        defer { isRetryingLeave = false }
+        // The engine takes the kept folder only inside this window, so no
+        // ordinary restart brings the node back up.
+        await restartEngineIfRunning()
         for _ in 0..<6 {
-            guard engineState == .running || engineState == .starting else { return }
+            guard engineState == .running || engineState == .starting else { break }
             try? await Task.sleep(for: .seconds(5))
-            guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale else { return }
+            guard LeaveTailnetOutcome.shouldRetryLeave(settings: settings), !settings.useBuiltInTailscale else { break }
             let outcome = await routeLeaver.leave()
             LeaveTailnetOutcome.record(outcome, into: &settings)
             persistSettings()
-            if outcome == .removed {
-                await restartEngineIfRunning()
-                return
-            }
+            if outcome == .removed { break }
         }
+        isRetryingLeave = false
+        await restartEngineIfRunning()
     }
 
     /// openBuiltInStep opens the page the current step asks for, in the
@@ -1408,7 +1416,7 @@ final class AppModel: ObservableObject {
         // A leave that did not reach Tailscale needs the node up on the kept
         // folder to try again; nothing is created for it.
         var keptStateDirectory: String?
-        if !settings.useBuiltInTailscale, LeaveTailnetOutcome.shouldRetryLeave(settings: settings) {
+        if LeaveTailnetOutcome.attachesKeptFolder(settings: settings, retryRunning: isRetryingLeave) {
             let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
             if FileManager.default.fileExists(atPath: kept.path) { keptStateDirectory = kept.path }
         }

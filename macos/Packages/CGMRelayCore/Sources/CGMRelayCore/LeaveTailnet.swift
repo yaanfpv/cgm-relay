@@ -53,4 +53,12 @@ public enum LeaveTailnetOutcome: Sendable, Equatable {
     public static func shouldRetryLeave(settings: AppSettings) -> Bool {
         settings.pendingLeaveRetry
     }
+
+    /// attachesKeptFolder is whether the engine is given the folder a failed
+    /// leave kept, so its node can log out again. Only while a retry is running
+    /// and the built-in route is off: any other start, restart included, runs
+    /// without the node, so the public address does not come back.
+    public static func attachesKeptFolder(settings: AppSettings, retryRunning: Bool) -> Bool {
+        retryRunning && settings.pendingLeaveRetry && !settings.useBuiltInTailscale
+    }
 }

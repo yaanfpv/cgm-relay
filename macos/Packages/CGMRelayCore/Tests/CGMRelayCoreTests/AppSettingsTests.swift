@@ -811,4 +811,19 @@ struct UpdateStepsTests {
         }
         #expect(LeaveTailnetSequence.steps(for: .signOut, builtInOn: true).contains(.stopEngine), "Sign Out stops the engine")
     }
+
+    @Test("the kept folder goes to the engine only while a leave retry runs, so no ordinary restart brings the node back")
+    func keptFolderIsAttachedOnlyDuringARetry() {
+        var pending = AppSettings.default
+        pending.pendingLeaveRetry = true
+        #expect(LeaveTailnetOutcome.attachesKeptFolder(settings: pending, retryRunning: true))
+        #expect(!LeaveTailnetOutcome.attachesKeptFolder(settings: pending, retryRunning: false), "a restart with a leave pending must not start the node")
+
+        var using = pending
+        using.useBuiltInTailscale = true
+        #expect(!LeaveTailnetOutcome.attachesKeptFolder(settings: using, retryRunning: true), "a person using the route has nothing to leave")
+
+        let nothingPending = AppSettings.default
+        #expect(!LeaveTailnetOutcome.attachesKeptFolder(settings: nothingPending, retryRunning: true))
+    }
 }
