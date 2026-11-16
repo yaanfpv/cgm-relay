@@ -7,11 +7,16 @@
 package tailnode
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yaanfpv/cgm-relay/internal/nightscout"
+	"tailscale.com/ipn"
 )
 
 // The states Status.State takes.
@@ -80,6 +85,13 @@ const ReadyFreshness = 6 * time.Minute
 // MaxPublicConns caps the connections open at once on the public listener. A
 // follower phone holds one or two, so the cap only ever bites a flood.
 const MaxPublicConns = 128
+
+// MaxConnsPerSender caps the public connections one sender holds open at once.
+const MaxConnsPerSender = 8
+
+// PublicIdleTimeout is how long an idle keep-alive connection stays open on
+// the public listener.
+const PublicIdleTimeout = 10 * time.Second
 
 // approveURLBase is the admin console's machine pages; the page of one
 // machine is this plus its tailnet address.
@@ -276,16 +288,48 @@ const propertiesPath = "/api/v2/properties"
 
 // PublicHandler wraps next for the public listener: only the paths a
 // follower app or a pairing page uses reach next, and every other path
-// answers 404 without reaching it.
+// answers 404 without reaching it. An answer to a request that did not prove
+// itself closes its connection: the 404, the 401, the open paths and the
+// pairing page. A request that passed authentication keeps its connection.
 func PublicHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !publicPath(r.URL.Path) {
+			w.Header().Set("Connection", "close")
 			http.NotFound(w, r)
 			return
+		}
+		if strings.HasPrefix(r.URL.Path, connectPrefix) || !nightscout.RequiresCredential(r) {
+			w.Header().Set("Connection", "close")
+		} else {
+			w = &closeOn401{ResponseWriter: w}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
+
+// closeOn401 asks for the connection to close when the answer is a 401. It
+// sets the header before the first byte of the answer goes out.
+type closeOn401 struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *closeOn401) WriteHeader(code int) {
+	if !w.wrote {
+		w.wrote = true
+		if code == http.StatusUnauthorized {
+			w.Header().Set("Connection", "close")
+		}
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *closeOn401) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *closeOn401) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func publicPath(p string) bool {
 	if allowedExact[p] {
@@ -346,3 +390,110 @@ func (c *limitConn) Close() error {
 	c.once.Do(c.release)
 	return err
 }
+
+// NetConn is the connection this one wraps.
+func (c *limitConn) NetConn() net.Conn { return c.Conn }
+
+// SenderKey names the sender of c: the address of the client behind it, with
+// no port, and for IPv6 its /64. A wrapper that exposes NetConn, a *tls.Conn
+// and a Funnel connection are looked through, since a Funnel connection's own
+// RemoteAddr is the relay's; a connection with no Funnel client behind it
+// uses its RemoteAddr.
+func SenderKey(c net.Conn) string {
+	a, ok := senderAddr(c)
+	if !ok {
+		return c.RemoteAddr().String()
+	}
+	if a.Is6() && !a.Is4In6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
+}
+
+// senderAddr is the client's IP address behind c, when there is one.
+func senderAddr(c net.Conn) (netip.Addr, bool) {
+	for range 16 {
+		switch v := c.(type) {
+		case *ipn.FunnelConn:
+			return v.Src.Addr().Unmap(), v.Src.IsValid()
+		case *tls.Conn:
+			c = v.NetConn()
+			continue
+		case interface{ NetConn() net.Conn }:
+			c = v.NetConn()
+			continue
+		}
+		break
+	}
+	if c == nil {
+		return netip.Addr{}, false
+	}
+	if ap, err := netip.ParseAddrPort(c.RemoteAddr().String()); err == nil {
+		return ap.Addr().Unmap(), true
+	}
+	return netip.Addr{}, false
+}
+
+// SenderInTailnet reports whether the sender of c is inside the tailnet
+// address range, which a Funnel client never is, whatever relay it came by.
+func SenderInTailnet(c net.Conn) bool {
+	a, ok := senderAddr(c)
+	return ok && IsTailnetAddress(a)
+}
+
+// PerSenderListener returns a listener that holds at most perSender accepted
+// connections open for one sender (see SenderKey). A connection over the cap
+// is closed unserved inside Accept, which goes on to the next one and never
+// returns an error for it. A closed connection frees its place, once.
+func PerSenderListener(l net.Listener, perSender int) net.Listener {
+	return &senderListener{Listener: l, max: perSender, held: map[string]int{}}
+}
+
+type senderListener struct {
+	net.Listener
+	max  int
+	mu   sync.Mutex
+	held map[string]int
+}
+
+func (l *senderListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		key := SenderKey(c)
+		l.mu.Lock()
+		over := l.held[key] >= l.max
+		if !over {
+			l.held[key]++
+		}
+		l.mu.Unlock()
+		if over {
+			_ = c.Close()
+			continue
+		}
+		return &senderConn{Conn: c, release: func() {
+			l.mu.Lock()
+			if l.held[key]--; l.held[key] <= 0 {
+				delete(l.held, key)
+			}
+			l.mu.Unlock()
+		}}, nil
+	}
+}
+
+type senderConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *senderConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+// NetConn is the connection this one wraps.
+func (c *senderConn) NetConn() net.Conn { return c.Conn }

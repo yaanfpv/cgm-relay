@@ -801,10 +801,11 @@ func (n *Node) open(ctx context.Context, api nodeAPI) (*openListener, bool) {
 	// A request that fails on the public listener comes from the internet;
 	// its error text carries the sender's address, so none of it is kept.
 	srv.ErrorLog = log.New(io.Discard, "", 0)
+	srv.IdleTimeout = PublicIdleTimeout
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		_ = srv.Serve(LimitListener(ln, MaxPublicConns))
+		_ = srv.Serve(&senderCounter{Listener: PerSenderListener(LimitListener(ln, MaxPublicConns), MaxConnsPerSender), mon: n.mon})
 	}()
 	answered := n.mon.Answered()
 	now := n.now()
@@ -817,6 +818,21 @@ func (n *Node) open(ctx context.Context, api nodeAPI) (*openListener, bool) {
 		}
 	})
 	return &openListener{api: api, srv: srv, served: served}, true
+}
+
+// senderCounter counts each connection the public listener accepts by
+// whether its sender is inside the tailnet address range.
+type senderCounter struct {
+	net.Listener
+	mon *Monitor
+}
+
+func (l *senderCounter) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.mon.ObserveSender(SenderInTailnet(c))
+	}
+	return c, err
 }
 
 func (l *openListener) stop() {

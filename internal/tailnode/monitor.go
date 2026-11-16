@@ -478,6 +478,27 @@ func (m *Monitor) countsLocked() map[string]int {
 	return out
 }
 
+// Count names of the public connections by where their sender is: inside the
+// tailnet address range, or outside it. Only the two counts are kept.
+const (
+	countSenderTailnet = "sender_tailnet"
+	countSenderOutside = "sender_outside"
+)
+
+// ObserveSender counts one public connection by whether its sender is inside
+// the tailnet address range. Nothing of the address is kept.
+func (m *Monitor) ObserveSender(inTailnet bool) {
+	key := countSenderOutside
+	if inTailnet {
+		key = countSenderTailnet
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.counts[key] < MaxCount {
+		m.counts[key]++
+	}
+}
+
 // ObserveLog counts a Tailscale log line when it is one of the two kinds
 // kept. Nothing of the line is kept, since it can name an address or a peer.
 func (m *Monitor) ObserveLog(line string) {
