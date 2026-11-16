@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/store"
+	"golang.org/x/sys/unix"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -1826,4 +1828,38 @@ func (tn *fakeTailnet) requireOneFolder() {
 			tn.t.Errorf("a server was started on %s, want the folder %s every time", s.dir, tn.dir)
 		}
 	}
+}
+
+// TestPrepareStateDirExcludesTheFolderFromBackups protects the node key from
+// ending up in a Time Machine backup: whenever the folder is created, the
+// extended attribute that excludes it is set, and a folder created again after
+// a leave gets it again. Both sides of the app create this folder, so the
+// engine's own creation is checked here.
+func TestPrepareStateDirExcludesTheFolderFromBackups(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("backup exclusion by extended attribute is a macOS feature")
+	}
+	const attr = "com.apple.metadata:com_apple_backup_excludeItem"
+	dir := filepath.Join(t.TempDir(), "ts")
+	excluded := func(when string) {
+		t.Helper()
+		sz, err := unix.Getxattr(dir, attr, nil)
+		if err != nil || sz <= 0 {
+			t.Errorf("%s: the backup exclusion attribute is not set on the folder (%d, %v)", when, sz, err)
+		}
+	}
+	if err := prepareStateDir(dir); err != nil {
+		t.Fatalf("prepareStateDir: %v", err)
+	}
+	excluded("a fresh folder")
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("state folder %v, %v; want mode 0700", fi, err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStateDir(dir); err != nil {
+		t.Fatalf("prepareStateDir again: %v", err)
+	}
+	excluded("a folder created again after being removed")
 }

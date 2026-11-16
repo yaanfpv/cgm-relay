@@ -769,4 +769,46 @@ struct UpdateStepsTests {
         #expect(garbled.port == 4242)
         #expect(garbled.pendingLeaveRetry == false)
     }
+
+    @Test("recording a leave outcome sets or clears the retry flag and touches nothing else")
+    func recordingALeaveOutcome() {
+        var settings = AppSettings.default
+        settings.port = 4242
+        settings.useBuiltInTailscale = false
+        let before = settings
+
+        LeaveTailnetOutcome.record(.notYetRemoved, into: &settings)
+        #expect(settings.pendingLeaveRetry == true)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: settings) == true)
+        var onlyFlag = before
+        onlyFlag.pendingLeaveRetry = true
+        #expect(settings == onlyFlag)
+
+        LeaveTailnetOutcome.record(.removed, into: &settings)
+        #expect(settings.pendingLeaveRetry == false)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: settings) == false)
+        #expect(settings == before)
+
+        // A removal that follows a failed leave clears it; one with nothing pending changes nothing.
+        LeaveTailnetOutcome.record(.removed, into: &settings)
+        #expect(settings == before)
+    }
+
+    @Test("every way out of the built-in route leaves first, and the engine stops only after the leave")
+    func leaveSequenceOrder() {
+        let triggers: [LeaveTrigger] = [.chooseOwnTailscale, .chooseThisMacOnly, .signOut]
+        for trigger in triggers {
+            let on = LeaveTailnetSequence.steps(for: trigger, builtInOn: true)
+            #expect(on.first == .leave, "\(trigger): the leave must come first")
+            #expect(on.filter { $0 == .leave }.count == 1, "\(trigger): leave exactly once")
+            #expect(on.contains(.applyChoice), "\(trigger): the choice is still applied")
+            if let stop = on.firstIndex(of: .stopEngine), let leave = on.firstIndex(of: .leave) {
+                #expect(leave < stop, "\(trigger): the engine must not stop before the leave")
+            }
+            let off = LeaveTailnetSequence.steps(for: trigger, builtInOn: false)
+            #expect(!off.contains(.leave), "\(trigger): nothing to leave when the built-in route is off")
+            #expect(off.contains(.applyChoice), "\(trigger): the choice is still applied")
+        }
+        #expect(LeaveTailnetSequence.steps(for: .signOut, builtInOn: true).contains(.stopEngine), "Sign Out stops the engine")
+    }
 }
