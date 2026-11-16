@@ -142,12 +142,11 @@ public enum SleepRuleOutcome: Equatable, Sendable {
     case failed
 }
 
-/// SleepRuleManaging installs and removes the permission, and says whether
-/// it is there.
+/// SleepRuleManaging installs the permission, and says whether it is there.
+/// Nothing removes it: it stays once granted.
 public protocol SleepRuleManaging: Sendable {
     func isInstalled() async -> Bool
     func install() async -> SleepRuleOutcome
-    func remove() async -> SleepRuleOutcome
 }
 
 /// SleepRuleAdministrator runs SleepRuleInstaller's scripts as root through
@@ -180,10 +179,6 @@ public struct SleepRuleAdministrator: SleepRuleManaging {
     public func install() async -> SleepRuleOutcome {
         guard SleepRuleInstaller.isSafeUserName(userName) else { return .failed }
         return await runAsAdministrator(SleepRuleInstaller.installScript(user: userName))
-    }
-
-    public func remove() async -> SleepRuleOutcome {
-        await runAsAdministrator(SleepRuleInstaller.removeScript())
     }
 
     private func runAsAdministrator(_ script: String) async -> SleepRuleOutcome {

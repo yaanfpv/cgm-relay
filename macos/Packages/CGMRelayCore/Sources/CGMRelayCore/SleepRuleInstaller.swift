@@ -63,16 +63,6 @@ public enum SleepRuleInstaller {
         """
     }
 
-    /// removeScript puts the setting back first, then removes both files.
-    public static func removeScript() -> String {
-        """
-        set -e
-        \(sleepOff)
-        /bin/rm -f \(shellQuoted(sudoersPath))
-        /bin/rm -f \(shellQuoted(bootResetPlistPath))
-        """
-    }
-
     /// isSafeUserName is whether name can go into the rule as it is: the
     /// letters, digits and dot, dash and underscore of an ordinary account
     /// name, never starting with a dash.

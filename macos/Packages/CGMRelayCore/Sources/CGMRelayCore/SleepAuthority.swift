@@ -56,5 +56,4 @@ public struct UnavailableSleepRules: SleepRuleManaging {
     public init() {}
     public func isInstalled() async -> Bool { false }
     public func install() async -> SleepRuleOutcome { .failed }
-    public func remove() async -> SleepRuleOutcome { .done }
 }

@@ -15,4 +15,8 @@ public enum StayAwakeCopy {
     /// permissionNote is what Settings says about the permission once it
     /// has been given.
     public static let permissionNote = "The permission to change the sleep setting stays on this Mac once it is granted, so turning this off and on again never asks for it again."
+
+    /// approvalNeeded says why the helper still needs the person's approval.
+    public static let approvalNeeded = "The Mac can sleep again after a crash only once CGM Relay is allowed under System Settings > General > Login Items."
+    public static let openLoginItems = "Open Login Items"
 }

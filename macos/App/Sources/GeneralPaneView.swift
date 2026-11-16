@@ -74,7 +74,13 @@ struct GeneralPaneView: View {
                 Text("Sleep")
             } footer: {
                 if model.isLaptop {
-                    Text(StayAwakeCopy.explanation(isLaptop: true) + " " + StayAwakeCopy.permissionNote)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(StayAwakeCopy.explanation(isLaptop: true) + " " + StayAwakeCopy.permissionNote)
+                        if model.stayAwakeChoice == .on && model.sleepHelperStatus == .requiresApproval {
+                            Text(StayAwakeCopy.approvalNeeded)
+                            Button(StayAwakeCopy.openLoginItems) { SleepHelperSettings.openLoginItems() }
+                        }
+                    }
                 } else {
                     Text(StayAwakeCopy.explanation(isLaptop: false))
                 }
@@ -116,6 +122,7 @@ struct GeneralPaneView: View {
         .frame(maxWidth: .infinity, alignment: .top)
         .onAppear {
             model.refreshLoginItemStatus()
+            model.refreshSleepHelperStatus()
             retentionText = String(model.settings.retentionDays)
             retentionErrorMessage = model.retentionNotice
             model.retentionNotice = nil

@@ -238,11 +238,14 @@ public final class StayAwakeController: @unchecked Sendable {
     }
 
     /// registerHelperIfNeeded registers the sleep reset helper when the
-    /// choice is on and the system has none. A helper that is registered and
+    /// choice is on, this Mac is a laptop (a desktop never changes the sleep
+    /// setting) and the system has none. A helper that is registered and
     /// waiting for approval is left alone, so the person is asked once.
     /// Nothing here ever unregisters it.
     private func registerHelperIfNeeded() {
         guard choice == .on else { return }
+        snapshot = power.snapshot()
+        guard snapshot.isLaptop else { return }
         switch helper.status {
         case .notRegistered, .notFound:
             do { try helper.register() } catch { report(.helperNotRegistered) }

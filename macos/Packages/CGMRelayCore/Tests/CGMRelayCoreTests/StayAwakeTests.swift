@@ -105,6 +105,15 @@ struct StayAwakeControllerTests {
         }
     }
 
+    @Test("a Mac with no battery is never asked to approve a helper")
+    func noRegistrationOnADesktop() {
+        let rig = Rig(choice: nil, power: desktopOnAC, helperStatus: .notRegistered)
+        rig.controller.choiceChanged(.on)
+        rig.controller.launched()
+        rig.controller.relayStarted()
+        #expect(rig.helper.registerCount == 0)
+    }
+
     @Test("no registration unless the choice is on")
     func noRegistrationWhenNotOn() {
         for choice in [StayAwakeChoice?.none, .off] {
@@ -400,16 +409,6 @@ struct SleepRuleInstallerTests {
         #expect(script.contains("644"))
         #expect(script.components(separatedBy: "root:wheel").count - 1 >= 2)
         #expect(script.contains(SleepRuleInstaller.bootResetPlistPath))
-    }
-
-    @Test("remove script resets sleep before removing either path")
-    func removeOrder() throws {
-        let script = SleepRuleInstaller.removeScript()
-        let reset = try #require(script.range(of: "pmset -a disablesleep 0"))
-        let rule = try #require(script.range(of: SleepRuleInstaller.sudoersPath))
-        let plist = try #require(script.range(of: SleepRuleInstaller.bootResetPlistPath))
-        #expect(reset.lowerBound < rule.lowerBound)
-        #expect(reset.lowerBound < plist.lowerBound)
     }
 }
 

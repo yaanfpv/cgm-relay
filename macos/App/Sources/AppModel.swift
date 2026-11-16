@@ -142,6 +142,7 @@ final class AppModel: ObservableObject {
     private let stayAwake: StayAwakeController
     private let powerSource: any PowerSourceReading
     private let sleepRules: any SleepRuleManaging
+    private let sleepHelper: any SleepHelperRegistering
     private var powerWatcher: PowerSourceWatcher?
     /// stopRequested is whether the person (or quitting) stopped the relay
     /// since it was last started, so a state report that was still on its
@@ -265,6 +266,8 @@ final class AppModel: ObservableObject {
         self.tailscaleAppInstalled = tailscaleAppInstalled
         self.powerSource = powerSource
         self.sleepRules = sleepRules
+        self.sleepHelper = sleepHelper
+        sleepHelperStatus = sleepHelper.status
         self.tailscale = tailscale
         self.portBinder = portBinder
         self.credentialStore = credentialStore
@@ -1257,6 +1260,14 @@ final class AppModel: ObservableObject {
     /// keeping it awake is described and done.
     var isLaptop: Bool { powerSource.snapshot().isLaptop }
 
+    /// sleepHelperStatus is where the sleep reset helper stands with the
+    /// system, read when Settings opens and after the choice changes.
+    @Published private(set) var sleepHelperStatus: SleepHelperStatus
+
+    func refreshSleepHelperStatus() {
+        sleepHelperStatus = sleepHelper.status
+    }
+
     /// stayAwakeChoice is the saved answer, nil until the person is asked.
     var stayAwakeChoice: StayAwakeChoice? { settings.stayAwake }
 
@@ -1298,6 +1309,7 @@ final class AppModel: ObservableObject {
         settings.stayAwake = choice
         persistSettings()
         stayAwake.choiceChanged(choice)
+        refreshSleepHelperStatus()
     }
 
     // MARK: - Menu bar

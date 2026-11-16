@@ -43,6 +43,13 @@ public struct SMAppServiceSleepHelper: SleepHelperRegistering {
     }
 }
 
+/// SleepHelperSettings opens the place where the person approves the helper.
+public enum SleepHelperSettings {
+    public static func openLoginItems() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+}
+
 /// InertSleepHelper is the helper in a run on throwaway data: nothing is
 /// registered, and asking to register reaches nothing.
 public struct InertSleepHelper: SleepHelperRegistering {
