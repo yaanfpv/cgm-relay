@@ -58,6 +58,13 @@ struct SyntheticAccountSeederTests {
             #expect(rules == ObjectIdentifier(c.real ? SleepRuleAdministrator.self : UnavailableSleepRules.self), "\(c.name): rules")
             #expect(setting == ObjectIdentifier(c.real ? PrivilegedSleepSettingWriter.self : IgnoredSleepSetting.self), "\(c.name): setting")
             #expect(assertion == ObjectIdentifier(c.real ? SystemIdleSleepAssertion.self : IgnoredIdleSleepAssertion.self), "\(c.name): assertion")
+            let helper = ObjectIdentifier(type(of: authority.helperRegistration as Any))
+            #expect(helper == ObjectIdentifier(c.real ? SMAppServiceSleepHelper.self : InertSleepHelper.self), "\(c.name): helper registration")
+            if !c.real {
+                #expect(authority.helperRegistration.status == .notRegistered, "\(c.name): inert helper reads not registered")
+                try? authority.helperRegistration.register()
+                #expect(authority.helperRegistration.status == .notRegistered, "\(c.name): register reaches nothing")
+            }
         }
     }
 

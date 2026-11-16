@@ -54,15 +54,83 @@ struct StayAwakeControllerTests {
         let power: FakePowerSource
         let idle: FakeIdleSleepAsserter
         let sleep: FakeSleepSettingWriter
+        let helper: FakeSleepHelperRegistration
+        let rules = FakeSleepRules()
         let controller: StayAwakeController
 
-        init(choice: StayAwakeChoice?, power snapshot: PowerSnapshot) {
+        init(choice: StayAwakeChoice?, power snapshot: PowerSnapshot, helperStatus: SleepHelperStatus = .enabled) {
             let log = self.log
             power = FakePowerSource(snapshot)
             idle = FakeIdleSleepAsserter(log: log)
             sleep = FakeSleepSettingWriter(log: log)
-            controller = StayAwakeController(choice: choice, power: power, assertion: idle, sleepSetting: sleep)
+            helper = FakeSleepHelperRegistration(status: helperStatus)
+            controller = StayAwakeController(
+                choice: choice, power: power, assertion: idle, sleepSetting: sleep, rules: rules, helper: helper
+            )
         }
+    }
+
+    @Test("turning keep-awake on from a helper that is not registered registers it once")
+    func registersOnTurnOn() {
+        for start in [SleepHelperStatus.notRegistered, .notFound] {
+            let rig = Rig(choice: nil, power: laptopOnAC, helperStatus: start)
+            rig.controller.choiceChanged(.on)
+            #expect(rig.helper.registerCount == 1, "\(start)")
+            rig.controller.choiceChanged(.on)
+            rig.controller.relayStarted()
+            rig.controller.launched()
+            #expect(rig.helper.registerCount == 1, "\(start): approval is asked once")
+        }
+    }
+
+    @Test("a launch with the choice already on registers a helper that is missing")
+    func registersOnLaunchWhenOn() {
+        for start in [SleepHelperStatus.notRegistered, .notFound] {
+            let rig = Rig(choice: .on, power: laptopOnAC, helperStatus: start)
+            rig.controller.launched()
+            #expect(rig.helper.registerCount == 1, "\(start)")
+        }
+    }
+
+    @Test("an enabled helper, or one waiting for approval, is never registered again")
+    func noSecondRegistration() {
+        for start in [SleepHelperStatus.enabled, .requiresApproval] {
+            let rig = Rig(choice: .on, power: laptopOnAC, helperStatus: start)
+            rig.controller.launched()
+            rig.controller.choiceChanged(.on)
+            rig.controller.choiceChanged(.off)
+            rig.controller.choiceChanged(.on)
+            rig.controller.relayStarted()
+            #expect(rig.helper.registerCount == 0, "\(start)")
+        }
+    }
+
+    @Test("no registration unless the choice is on")
+    func noRegistrationWhenNotOn() {
+        for choice in [StayAwakeChoice?.none, .off] {
+            let rig = Rig(choice: choice, power: laptopOnAC, helperStatus: .notRegistered)
+            rig.controller.launched()
+            rig.controller.relayStarted()
+            rig.controller.choiceChanged(choice)
+            #expect(rig.helper.registerCount == 0, "\(String(describing: choice))")
+        }
+    }
+
+    @Test("turning off, quitting and willQuit only ever leave the helper registered, and never touch the permission")
+    func turnOffRemovesNothing() async {
+        let rig = Rig(choice: nil, power: laptopOnAC, helperStatus: .notRegistered)
+        for _ in 0..<3 {
+            rig.controller.choiceChanged(.on)
+            rig.controller.relayStarted()
+            rig.controller.choiceChanged(.off)
+            rig.controller.relayStopped()
+        }
+        rig.controller.choiceChanged(.on)
+        rig.controller.willQuit()
+        await rig.controller.willQuitInBackground()
+        #expect(rig.helper.calls == ["register"], "the helper saw one register and nothing else")
+        #expect(rig.rules.calls.isEmpty, "the sleep permission is never removed, or touched at all")
+        #expect(rig.helper.status != .notRegistered)
     }
 
     private func sorted(_ events: [String]) -> [String] { events.sorted() }
@@ -549,5 +617,18 @@ struct SleepResetHelperTests {
             PropertyListSerialization.propertyList(from: SleepRuleInstaller.bootResetPlist(), format: nil) as? [String: Any]
         )
         #expect(plist["ProgramArguments"] as? [String] == SleepResetHelper.command)
+    }
+}
+
+@Suite("StayAwakeCopy")
+struct StayAwakeCopyTests {
+    @Test("the permission note says it stays once granted and offers no way to remove it")
+    func permissionNote() {
+        let note = StayAwakeCopy.permissionNote.lowercased()
+        #expect(note.contains("stays"))
+        #expect(note.contains("granted"))
+        #expect(!note.contains("remove"))
+        #expect(!note.contains("revoke"))
+        #expect(!note.contains("take that permission away"))
     }
 }
