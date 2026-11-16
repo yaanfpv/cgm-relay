@@ -1555,7 +1555,9 @@ func TestPublicListenerThroughTheNode(t *testing.T) {
 	ninth := feed.funnelFrom("203.0.113.5:50000")
 	if _, err := answer(ninth, bufio.NewReader(ninth), "/"); err == nil {
 		t.Error("a ninth connection from one sender was served")
-	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.ErrClosedPipe) {
+		// http.ReadResponse reports a connection closed before the status line
+		// as io.ErrUnexpectedEOF, so that is what a refused connection reads as.
 		t.Errorf("ninth connection: %v, want it closed", err)
 	}
 
