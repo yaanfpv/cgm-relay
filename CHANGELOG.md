@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Keep this Mac awake now lets the Mac sleep again whenever CGM Relay is not running, however it ended, including a crash or a force quit. Turning it on registers a small helper that you approve once in System Settings under Login Items. The sleep permission stays once granted: turning keep-awake off no longer offers to remove it, and the Remove Permission button is gone.
+
 ## [1.1.0] - 2026-11-16
 
 ### Added

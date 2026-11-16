@@ -49,7 +49,8 @@ struct CGMRelayApp: App {
             powerSource: CGMRelayApp.powerSource(),
             sleepRules: sleepAuthority.rules,
             sleepSetting: sleepAuthority.setting,
-            idleSleepAssertion: sleepAuthority.assertion
+            idleSleepAssertion: sleepAuthority.assertion,
+            sleepHelper: sleepAuthority.helperRegistration
         )
         let updates = UpdatesModel(feedURLOverride: CGMRelayApp.updateFeedURL(explicitKeychainServiceOverride: explicitKeychainServiceOverride))
         _model = StateObject(wrappedValue: model)

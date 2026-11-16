@@ -31,6 +31,11 @@ targets:
     sources:
       - path: App/Sources
       - path: App/Resources
+      - path: Helper/com.yaanfpv.cgmrelay.sleep-helper.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
     settings:
       base:
         PRODUCT_NAME: "CGM Relay"
@@ -50,6 +55,11 @@ targets:
     dependencies:
       - package: CGMRelayCore
       - package: Sparkle
+      - target: cgm-relay-sleep-helper
+        embed: true
+        codeSign: false
+        copy:
+          destination: executables
     postCompileScripts:
       - name: "Embed CGM Relay Engine"
         script: |
@@ -67,6 +77,21 @@ targets:
           - $(PROJECT_DIR)/.build/engine/cgm-relay
         outputFiles:
           - $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/cgm-relay
+
+  cgm-relay-sleep-helper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Helper
+        excludes:
+          - "*.plist"
+    settings:
+      base:
+        PRODUCT_NAME: cgm-relay-sleep-helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.yaanfpv.cgmrelay.sleep-helper
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: CGMRelayCore
 
 schemes:
   CGMRelay:

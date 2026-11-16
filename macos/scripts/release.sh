@@ -215,6 +215,7 @@ sign() {
 }
 VERSION_DIR="$FRAMEWORK/Versions/$(readlink "$FRAMEWORK/Versions/Current")"
 sign "$APP/Contents/Resources/cgm-relay"
+sign "$APP/Contents/MacOS/cgm-relay-sleep-helper"
 sign "$VERSION_DIR/Autoupdate"
 sign "$VERSION_DIR/Updater.app"
 sign "$FRAMEWORK"
@@ -222,7 +223,7 @@ sign --preserve-metadata=entitlements "$APP"
 
 step "Checking the signed app"
 codesign --verify --deep --strict "$APP" || die "codesign --verify --deep --strict failed" "read the message above; nothing was notarized"
-for item in "$APP" "$APP/Contents/Resources/cgm-relay" "$VERSION_DIR/Autoupdate" "$VERSION_DIR/Updater.app" "$FRAMEWORK"; do
+for item in "$APP" "$APP/Contents/Resources/cgm-relay" "$APP/Contents/MacOS/cgm-relay-sleep-helper" "$VERSION_DIR/Autoupdate" "$VERSION_DIR/Updater.app" "$FRAMEWORK"; do
   details="$(codesign -dvv "$item" 2>&1)"
   grep -q 'flags=0x[0-9a-f]*(.*runtime' <<<"$details" || die "${item#"$APP"/} lacks the hardened runtime flag" "sign it with --options runtime"
   grep -q '^Timestamp=' <<<"$details" || die "${item#"$APP"/} has no secure timestamp" "check the network and sign again"
@@ -240,7 +241,7 @@ plist_value() { plutil -extract "$1" raw -o - "$INFO" 2>/dev/null || true; }
 [ "$(plist_value CFBundleShortVersionString)" = "$VERSION" ] || die "the app reports version $(plist_value CFBundleShortVersionString), expected ${VERSION}" "rebuild"
 [ "$(plist_value CFBundleVersion)" = "$BUILD" ] || die "the app reports build $(plist_value CFBundleVersion), expected ${BUILD}" "rebuild"
 [ "$(plist_value CFBundleIdentifier)" = "$BUNDLE_ID" ] || die "the app's bundle identifier is $(plist_value CFBundleIdentifier), expected ${BUNDLE_ID}" "rebuild"
-for f in "$APP/Contents/MacOS/CGM Relay" "$APP/Contents/Resources/cgm-relay"; do
+for f in "$APP/Contents/MacOS/CGM Relay" "$APP/Contents/Resources/cgm-relay" "$APP/Contents/MacOS/cgm-relay-sleep-helper"; do
   ARCHS_FOUND="$(lipo -archs "$f")"
   case " $ARCHS_FOUND " in *" arm64 "*) ;; *) die "${f##*/} has no arm64 slice (${ARCHS_FOUND})" "rebuild" ;; esac
   case " $ARCHS_FOUND " in *" x86_64 "*) ;; *) die "${f##*/} has no x86_64 slice (${ARCHS_FOUND})" "rebuild" ;; esac

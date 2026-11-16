@@ -11,7 +11,6 @@ struct GeneralPaneView: View {
     @State private var retentionErrorMessage: String?
     @State private var pendingRetentionValue: Int?
     @State private var isConfirmingLowerRetention = false
-    @State private var isOfferingPermissionRemoval = false
     @State private var retentionSettler = RetentionChangeSettler()
     @FocusState private var retentionFocus: RetentionFocus?
 
@@ -74,7 +73,11 @@ struct GeneralPaneView: View {
             } header: {
                 Text("Sleep")
             } footer: {
-                Text(StayAwakeCopy.explanation(isLaptop: model.isLaptop))
+                if model.isLaptop {
+                    Text(StayAwakeCopy.explanation(isLaptop: true) + " " + StayAwakeCopy.permissionNote)
+                } else {
+                    Text(StayAwakeCopy.explanation(isLaptop: false))
+                }
             }
 
             Section {
@@ -143,21 +146,6 @@ struct GeneralPaneView: View {
             }
         }
         .confirmationDialog(
-            StayAwakeCopy.removeDialogTitle,
-            isPresented: $isOfferingPermissionRemoval,
-            titleVisibility: .visible
-        ) {
-            Button("Remove Permission") {
-                Task { await model.turnOffStayAwake(removePermission: true) }
-            }
-            Button("Turn Off and Keep Permission") {
-                Task { await model.turnOffStayAwake() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(StayAwakeCopy.removeDialogMessage)
-        }
-        .confirmationDialog(
             "Delete Older Readings?",
             isPresented: $isConfirmingLowerRetention,
             titleVisibility: .visible
@@ -181,8 +169,7 @@ struct GeneralPaneView: View {
     }
 
     /// stayAwakeBinding turns it on at once (which may ask for the Mac's
-    /// password) and, turning it off, first offers to remove the permission
-    /// when one is installed.
+    /// password) and off at once; the permission stays either way.
     private var stayAwakeBinding: Binding<Bool> {
         Binding(
             get: { model.stayAwakeChoice == .on },
@@ -190,13 +177,7 @@ struct GeneralPaneView: View {
                 if on {
                     Task { await model.turnOnStayAwake() }
                 } else {
-                    Task {
-                        if await model.stayAwakePermissionIsInstalled() {
-                            isOfferingPermissionRemoval = true
-                        } else {
-                            await model.turnOffStayAwake()
-                        }
-                    }
+                    Task { await model.turnOffStayAwake() }
                 }
             }
         )

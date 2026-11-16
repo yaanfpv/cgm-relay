@@ -259,6 +259,7 @@ final class AppModel: ObservableObject {
         sleepRules: any SleepRuleManaging,
         sleepSetting: any SleepSettingWriting,
         idleSleepAssertion: any IdleSleepAsserting,
+        sleepHelper: any SleepHelperRegistering,
         tailscaleAppInstalled: Bool = AppModel.detectTailscaleApp()
     ) {
         self.tailscaleAppInstalled = tailscaleAppInstalled
@@ -291,7 +292,9 @@ final class AppModel: ObservableObject {
             choice: loaded.stayAwake,
             power: powerSource,
             assertion: idleSleepAssertion,
-            sleepSetting: sleepSetting
+            sleepSetting: sleepSetting,
+            rules: sleepRules,
+            helper: sleepHelper
         )
         portIsPersonChosen = loaded.setupFinished || loaded.port != AppSettings.defaultPort
         accountSignIn = AccountSignIn(checker: RealAccountChecker(engineURL: engineURL), store: credentialStore)
@@ -1283,24 +1286,12 @@ final class AppModel: ObservableObject {
     }
 
     /// turnOffStayAwake saves the answer and puts the Mac back to sleeping
-    /// as usual; removePermission also takes the permission away, which
-    /// asks for the Mac's password again.
-    func turnOffStayAwake(removePermission: Bool = false) async {
+    /// as usual. The permission to change the sleep setting stays, so
+    /// turning keep-awake on again never asks for it again.
+    func turnOffStayAwake() async {
         guard !isChangingStayAwake else { return }
         stayAwakeNotice = nil
         saveStayAwake(.off)
-        guard removePermission, isLaptop else { return }
-        isChangingStayAwake = true
-        defer { isChangingStayAwake = false }
-        if await sleepRules.remove() == .failed {
-            stayAwakeNotice = "CGM Relay couldn't remove its permission to change the sleep setting."
-        }
-    }
-
-    /// stayAwakePermissionIsInstalled is whether turning the choice off can
-    /// also offer to remove the permission.
-    func stayAwakePermissionIsInstalled() async -> Bool {
-        isLaptop ? await sleepRules.isInstalled() : false
     }
 
     private func saveStayAwake(_ choice: StayAwakeChoice) {

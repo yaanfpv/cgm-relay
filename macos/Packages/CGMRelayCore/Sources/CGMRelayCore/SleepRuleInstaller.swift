@@ -27,7 +27,7 @@ public enum SleepRuleInstaller {
     public static func bootResetPlist() -> Data {
         let plist: [String: Any] = [
             "Label": bootResetLabel,
-            "ProgramArguments": ["/usr/bin/pmset", "-a", "disablesleep", "0"],
+            "ProgramArguments": SleepResetHelper.command,
             "RunAtLoad": true,
         ]
         // Serializing a fixed dictionary of strings and a boolean cannot fail.
