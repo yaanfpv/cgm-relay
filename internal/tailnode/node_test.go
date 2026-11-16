@@ -1884,6 +1884,12 @@ type leaveRig struct {
 	logins   []key.NodePublic // node keys registered without an expiry
 	logouts  []key.NodePublic // node keys registered with an expiry already past
 	contacts int              // register requests of any kind
+
+	holding         bool             // the next sign-in register request is held at the server
+	held            chan struct{}    // receives once a sign-in register request is being held
+	release         chan struct{}    // closed to let a held sign-in register request be answered
+	unanswered      bool             // a held sign-in request has not been answered yet
+	logoutsInFlight []key.NodePublic // logouts that arrived while a sign-in request was unanswered
 }
 
 func newLeaveRig(t *testing.T) *leaveRig {
@@ -1922,13 +1928,87 @@ func (r *leaveRig) observe(req *http.Request) {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.contacts++
 	if !rr.Expiry.IsZero() && rr.Expiry.Before(time.Now()) {
 		r.logouts = append(r.logouts, rr.NodeKey)
-	} else if !slices.Contains(r.logins, rr.NodeKey) {
+		if r.unanswered {
+			r.logoutsInFlight = append(r.logoutsInFlight, rr.NodeKey)
+		}
+		r.mu.Unlock()
+		return
+	}
+	if !slices.Contains(r.logins, rr.NodeKey) {
 		r.logins = append(r.logins, rr.NodeKey)
 	}
+	if !r.holding {
+		r.mu.Unlock()
+		return
+	}
+	// Hold this sign-in request: the control server does not answer it until
+	// the test releases it (or the request's connection ends).
+	r.holding = false
+	r.unanswered = true
+	release, held := r.release, r.held
+	r.mu.Unlock()
+	held <- struct{}{}
+	select {
+	case <-release:
+	case <-req.Context().Done():
+	}
+	r.mu.Lock()
+	r.unanswered = false
+	r.mu.Unlock()
+}
+
+// holdSignIn makes the control server hold the next sign-in register request
+// it receives (a register request that is not a logout) unanswered, so a
+// sign-in is in flight until releaseSignIn. The hold is always released when
+// the test ends.
+func (r *leaveRig) holdSignIn() {
+	r.t.Helper()
+	r.mu.Lock()
+	r.holding = true
+	r.held = make(chan struct{}, 1)
+	r.release = make(chan struct{})
+	r.logoutsInFlight = nil
+	r.mu.Unlock()
+	r.t.Cleanup(r.releaseSignIn)
+}
+
+// releaseSignIn lets the held sign-in request be answered. It is safe to call
+// more than once and when nothing is held.
+func (r *leaveRig) releaseSignIn() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.release != nil {
+		select {
+		case <-r.release:
+		default:
+			close(r.release)
+		}
+	}
+	r.holding = false
+}
+
+// waitHeld returns once a sign-in request is being held at the server.
+func (r *leaveRig) waitHeld() {
+	r.t.Helper()
+	r.mu.Lock()
+	held := r.held
+	r.mu.Unlock()
+	select {
+	case <-held:
+	case <-time.After(hangCeiling):
+		r.t.Fatalf("the node never sent a sign-in request to the control server")
+	}
+}
+
+// loggedOutWhileSignInUnanswered lists the logouts that reached the control
+// server while a held sign-in request had not been answered.
+func (r *leaveRig) loggedOutWhileSignInUnanswered() []key.NodePublic {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.logoutsInFlight)
 }
 
 // up starts serving the control server, on the address it first had when it
@@ -2226,4 +2306,121 @@ func TestLeaveKeptFolderOnAFolderThatNeverSignedInStartsNoSignIn(t *testing.T) {
 	if out := r.loggedOut(); len(out) != 0 {
 		t.Errorf("logouts recorded for a node that never signed in: %v", out)
 	}
+}
+
+// TestLeaveKeptFolderLogsOutOnlyAfterTheSignInIsAnswered protects the
+// control server from a logout that runs alongside the node's own sign-in:
+// while the sign-in request is held unanswered no logout may reach the
+// server, and once the server answers it the logout goes out and the folder
+// is removed. A logout that arrives while the sign-in request is still
+// unanswered fails it.
+func TestLeaveKeptFolderLogsOutOnlyAfterTheSignInIsAnswered(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := r.loginNode(dir)
+	r.holdSignIn()
+
+	// While the sign-in request is held the leave ends by its own deadline.
+	// Nothing observable marks when a logout would have been sent, so the
+	// deadline bounds the window in which one must not arrive.
+	leaveWithin(t, 5*time.Second, dir)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Fatalf("a logout was sent before the sign-in was answered: %v", out)
+	}
+
+	// Once the server answers the sign-in, the logout goes out.
+	r.releaseSignIn()
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("LeaveKeptFolder = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if out := r.loggedOut(); !slices.Equal(out, []key.NodePublic{nodeKey}) {
+		t.Errorf("the control server saw logouts for %v, want exactly one, for %v", out, nodeKey)
+	}
+}
+
+// TestLeaveKeptFolderWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder
+// protects the key when the sign-in does not settle before the leave's
+// deadline: no logout is sent, the result is KeptForRetry and the folder with
+// its node key stays for the next attempt. A logout sent anyway, a removed
+// folder or LeftAndRemoved fails it.
+func TestLeaveKeptFolderWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	r.loginNode(dir)
+	r.holdSignIn()
+
+	res, _ := leaveWithin(t, 5*time.Second, dir)
+	r.waitHeld()
+	if res != KeptForRetry {
+		t.Errorf("a leave whose sign-in never settled answered %v, want KeptForRetry", res)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Errorf("a logout was sent while the sign-in was unanswered: %v", out)
+	}
+	requireKeyKept(t, dir, "after a leave whose sign-in never settled")
+}
+
+// startNodeOnKeptFolder starts the engine's node on dir against the fake
+// control server and returns it once its server is up.
+func startNodeOnKeptFolder(t *testing.T, r *leaveRig, dir string) *Node {
+	t.Helper()
+	n := Start(Options{
+		StateDir:   dir,
+		Hostname:   "relay-test",
+		Handler:    http.NotFoundHandler(),
+		NewServer:  func(h http.Handler) *http.Server { return &http.Server{Handler: h} },
+		controlURL: r.url(),
+		Logf:       func(string, ...any) {},
+	})
+	t.Cleanup(n.Close)
+	for {
+		n.mu.Lock()
+		up, next := n.api != nil, n.nextUp
+		n.mu.Unlock()
+		if up {
+			return n
+		}
+		select {
+		case <-next:
+		case <-n.done:
+			t.Fatalf("the node ended before its server started")
+		case <-time.After(hangCeiling):
+			t.Fatalf("the node's server never started")
+		}
+	}
+}
+
+// TestNodeLeaveTailnetWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder is
+// the engine's leave, called right after its node starts, when the sign-in
+// does not settle before the caller's context ends: no logout reaches the
+// control server while the sign-in request is unanswered, the result is
+// KeptForRetry, and the folder and key are kept.
+func TestNodeLeaveTailnetWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder(t *testing.T) {
+	r := newLeaveRig(t)
+	dir := filepath.Join(t.TempDir(), "ts")
+	r.loginNode(dir)
+	r.holdSignIn()
+	n := startNodeOnKeptFolder(t, r, dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, _ := n.LeaveTailnet(ctx)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if res != KeptForRetry {
+		t.Errorf("a leave whose sign-in never settled answered %v, want KeptForRetry", res)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Errorf("a logout was sent while the sign-in was unanswered: %v", out)
+	}
+	requireKeyKept(t, dir, "after a leave whose sign-in never settled")
 }
