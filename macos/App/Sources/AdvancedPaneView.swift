@@ -64,10 +64,26 @@ struct AdvancedPaneView: View {
 
             if model.tailscaleAppInstalled {
                 TailscaleChoiceView(model: model)
+            } else if !model.settings.useBuiltInTailscale {
+                UseBuiltInTailscaleSection(model: model)
             }
 
             if model.settings.useBuiltInTailscale {
                 BuiltInRouteView(model: model)
+                Section {
+                    ChoiceRow(
+                        title: "Your public address",
+                        description: "Anyone with your token, from anywhere.",
+                        selected: true
+                    ) {}
+                    ChoiceRow(
+                        title: "This Mac only",
+                        description: "Only apps on this Mac can connect. This Mac is logged out of your Tailscale account.",
+                        selected: false
+                    ) { model.chooseWay(.thisMacOnly) }
+                } header: {
+                    Text("Who can reach it")
+                }
             } else {
                 if model.settings.tailscaleHTTPSEnabled || isTailscaleRunning {
                     Section {

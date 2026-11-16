@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
-	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail"
@@ -109,6 +108,10 @@ type nodeAPI interface {
 	// WarmCertificate has the node fetch or issue the certificate for host.
 	WarmCertificate(ctx context.Context, host string)
 	StartLogin(ctx context.Context) error
+	// Logout tells the control server to expire this machine's node key; the
+	// machine stays listed in the account, expired, until the person removes
+	// it. It does not touch the state folder.
+	Logout(ctx context.Context) error
 	Watch(ctx context.Context) (ipnWatcher, error)
 	Close() error
 }
@@ -141,6 +144,7 @@ type Node struct {
 	prevDone chan struct{} // the previous serving cycle's end
 	restart  context.CancelFunc
 	nextUp   chan struct{} // closed when the next server has started
+	settled  chan struct{} // closed when the current server's own sign-in has settled
 	cur      *openListener
 	read     *ipnstate.Status // the status the last test read, and its error
 	readErr  error
@@ -367,6 +371,45 @@ func (n *Node) Close() {
 	}
 }
 
+// LeaveResult is how far LeaveTailnet got.
+type LeaveResult int
+
+const (
+	// LeftAndRemoved means the control server was told, the node has stopped
+	// and the state folder is gone.
+	LeftAndRemoved LeaveResult = iota
+	// KeptForRetry means the machine's key may still be working: the node and
+	// its folder, with the key, are kept so a later launch can leave again.
+	KeptForRetry
+)
+
+// LeaveTailnet logs the node out of the person's account, then stops it and
+// removes its state folder. The node is stopped only after the logout has
+// answered, and the folder is removed only after that. A logout that fails or
+// is cut short by ctx keeps the folder and the key and answers KeptForRetry.
+// The logout is sent only after the node's own sign-in attempt has settled;
+// when ctx ends first, nothing is sent and the result is the same.
+// Nothing else logs out: Close and every restart keep the key.
+func (n *Node) LeaveTailnet(ctx context.Context) (LeaveResult, error) {
+	n.mu.Lock()
+	api, settled := n.api, n.settled
+	n.mu.Unlock()
+	if api == nil {
+		return KeptForRetry, ErrNotServing
+	}
+	if err := awaitSettled(ctx, settled); err != nil {
+		return KeptForRetry, err
+	}
+	if err := api.Logout(ctx); err != nil {
+		return KeptForRetry, err
+	}
+	n.Close()
+	if err := os.RemoveAll(n.opts.StateDir); err != nil {
+		return KeptForRetry, err
+	}
+	return LeftAndRemoved, nil
+}
+
 // update applies f to the observation and restarts the clock when the state
 // it leads to changes.
 func (n *Node) update(f func(*Observation)) {
@@ -404,10 +447,6 @@ func (n *Node) run(ctx context.Context) {
 	}
 	// The node's own logs stay on this Mac: logtail would otherwise upload them to Tailscale's log service.
 	logtail.Disable()
-	// Port mapping probes the local network for a router (SSDP and the
-	// gateway), which makes macOS ask the person to allow local network
-	// access. Funnel and the public listener do not use it.
-	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
 	for first := true; ctx.Err() == nil; first = false {
 		// A server that is restarted keeps the folder, and with it the key.
 		gctx, gcancel := context.WithCancel(ctx)
@@ -422,6 +461,7 @@ func (n *Node) run(ctx context.Context) {
 			if rn, ok := api.(*realNode); ok {
 				n.srv = rn.s
 			}
+			n.settled = make(chan struct{})
 			close(n.nextUp)
 			n.nextUp = make(chan struct{})
 			n.mu.Unlock()
@@ -467,6 +507,7 @@ type realNode struct {
 // set.
 func realStart(controlURL string) func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
 	return func(dir, hostname string, logf func(string, ...any)) (nodeAPI, error) {
+		prepareNodeEnv()
 		s := &tsnet.Server{Dir: dir, Hostname: hostname, ControlURL: controlURL, Logf: logf, UserLogf: logf}
 		if err := s.Start(); err != nil {
 			_ = s.Close()
@@ -490,6 +531,8 @@ func (r *realNode) QueryFunnel(ctx context.Context) (*tailcfg.QueryFeatureRespon
 }
 
 func (r *realNode) StartLogin(ctx context.Context) error { return r.lc.StartLoginInteractive(ctx) }
+
+func (r *realNode) Logout(ctx context.Context) error { return r.lc.Logout(ctx) }
 
 func (r *realNode) Close() error { return r.s.Close() }
 
@@ -602,12 +645,15 @@ func (n *Node) logLine(format string, args ...any) {
 }
 
 // prepareStateDir creates dir, or tightens it, to mode 0700 regardless of
-// the process umask: it holds the node's key.
+// the process umask, and keeps it out of backups: it holds the node's key.
 func prepareStateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, 0o700)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	return excludeFromBackup(dir)
 }
 
 // watch follows the node's own state notifications until ctx is done,
@@ -628,6 +674,7 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 		}
 	}()
 	backoff := retryFirst
+	var receipt signInReceipt
 	for ctx.Err() == nil {
 		w, err := api.Watch(ctx)
 		if err != nil {
@@ -646,6 +693,9 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 			}
 			if note.BrowseToURL != nil {
 				n.setLoginURL(*note.BrowseToURL)
+			}
+			if receipt.observe(note) {
+				n.markSettled()
 			}
 			if note.State == nil {
 				continue
@@ -680,6 +730,18 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 			}
 			n.update(func(o *Observation) { o.Listening, o.FunnelAllowed, o.PublicAnswered = false, false, false })
 		}
+	}
+}
+
+// markSettled records that the current server's own sign-in attempt has
+// settled.
+func (n *Node) markSettled() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	select {
+	case <-n.settled:
+	default:
+		close(n.settled)
 	}
 }
 

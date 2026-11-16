@@ -51,3 +51,42 @@ public struct URLSessionBuiltInSignInStarter: BuiltInSignInStarting {
         try await poster.tryAgain()
     }
 }
+
+/// BuiltInRouteLeaving asks the running engine to log the built-in node out of
+/// the person's Tailscale account and remove its state folder, and waits for
+/// the answer.
+public protocol BuiltInRouteLeaving: Sendable {
+    func leave() async -> LeaveTailnetOutcome
+}
+
+/// URLSessionBuiltInRouteLeaver posts to the engine's local status endpoint
+/// with the app's LocalStatusSecret. Anything but the engine's answer that the
+/// node left (an engine that is not running, a refusal, no answer within its
+/// own time) reads as not yet logged out, so the folder and key are kept.
+public struct URLSessionBuiltInRouteLeaver: BuiltInRouteLeaving {
+    /// timeout is longer than the engine's own limit on a logout, so the engine
+    /// is the one that gives up.
+    public static let timeout: TimeInterval = 30
+
+    private let url: URL
+    private let secret: LocalStatusSecret
+    private let session: URLSession
+
+    public init(url: URL, secret: LocalStatusSecret, session: URLSession? = nil) {
+        self.url = url
+        self.secret = secret
+        self.session = session ?? LoopbackURLSession.make()
+    }
+
+    public func leave() async -> LeaveTailnetOutcome {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = Self.timeout
+        guard secret.authorize(&request) else { return .notYetRemoved }
+        guard let (_, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 204 else {
+            return .notYetRemoved
+        }
+        return .removed
+    }
+}

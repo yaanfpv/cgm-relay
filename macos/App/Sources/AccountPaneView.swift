@@ -181,6 +181,7 @@ struct AccountPaneView: View {
             Text(signOutMessage)
                 .foregroundStyle(.red)
         }
+        LeavePendingNotice(model: model)
     }
 
     /// confirmSignOut is the Sign Out confirmation's own destructive

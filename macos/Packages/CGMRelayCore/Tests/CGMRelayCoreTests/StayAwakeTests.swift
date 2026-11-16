@@ -54,15 +54,92 @@ struct StayAwakeControllerTests {
         let power: FakePowerSource
         let idle: FakeIdleSleepAsserter
         let sleep: FakeSleepSettingWriter
+        let helper: FakeSleepHelperRegistration
+        let rules = FakeSleepRules()
         let controller: StayAwakeController
 
-        init(choice: StayAwakeChoice?, power snapshot: PowerSnapshot) {
+        init(choice: StayAwakeChoice?, power snapshot: PowerSnapshot, helperStatus: SleepHelperStatus = .enabled) {
             let log = self.log
             power = FakePowerSource(snapshot)
             idle = FakeIdleSleepAsserter(log: log)
             sleep = FakeSleepSettingWriter(log: log)
-            controller = StayAwakeController(choice: choice, power: power, assertion: idle, sleepSetting: sleep)
+            helper = FakeSleepHelperRegistration(status: helperStatus)
+            controller = StayAwakeController(
+                choice: choice, power: power, assertion: idle, sleepSetting: sleep, rules: rules, helper: helper
+            )
         }
+    }
+
+    @Test("turning keep-awake on from a helper that is not registered registers it once")
+    func registersOnTurnOn() {
+        for start in [SleepHelperStatus.notRegistered, .notFound] {
+            let rig = Rig(choice: nil, power: laptopOnAC, helperStatus: start)
+            rig.controller.choiceChanged(.on)
+            #expect(rig.helper.registerCount == 1, "\(start)")
+            rig.controller.choiceChanged(.on)
+            rig.controller.relayStarted()
+            rig.controller.launched()
+            #expect(rig.helper.registerCount == 1, "\(start): approval is asked once")
+        }
+    }
+
+    @Test("a launch with the choice already on registers a helper that is missing")
+    func registersOnLaunchWhenOn() {
+        for start in [SleepHelperStatus.notRegistered, .notFound] {
+            let rig = Rig(choice: .on, power: laptopOnAC, helperStatus: start)
+            rig.controller.launched()
+            #expect(rig.helper.registerCount == 1, "\(start)")
+        }
+    }
+
+    @Test("an enabled helper, or one waiting for approval, is never registered again")
+    func noSecondRegistration() {
+        for start in [SleepHelperStatus.enabled, .requiresApproval] {
+            let rig = Rig(choice: .on, power: laptopOnAC, helperStatus: start)
+            rig.controller.launched()
+            rig.controller.choiceChanged(.on)
+            rig.controller.choiceChanged(.off)
+            rig.controller.choiceChanged(.on)
+            rig.controller.relayStarted()
+            #expect(rig.helper.registerCount == 0, "\(start)")
+        }
+    }
+
+    @Test("a Mac with no battery is never asked to approve a helper")
+    func noRegistrationOnADesktop() {
+        let rig = Rig(choice: nil, power: desktopOnAC, helperStatus: .notRegistered)
+        rig.controller.choiceChanged(.on)
+        rig.controller.launched()
+        rig.controller.relayStarted()
+        #expect(rig.helper.registerCount == 0)
+    }
+
+    @Test("no registration unless the choice is on")
+    func noRegistrationWhenNotOn() {
+        for choice in [StayAwakeChoice?.none, .off] {
+            let rig = Rig(choice: choice, power: laptopOnAC, helperStatus: .notRegistered)
+            rig.controller.launched()
+            rig.controller.relayStarted()
+            rig.controller.choiceChanged(choice)
+            #expect(rig.helper.registerCount == 0, "\(String(describing: choice))")
+        }
+    }
+
+    @Test("turning off, quitting and willQuit only ever leave the helper registered, and never touch the permission")
+    func turnOffRemovesNothing() async {
+        let rig = Rig(choice: nil, power: laptopOnAC, helperStatus: .notRegistered)
+        for _ in 0..<3 {
+            rig.controller.choiceChanged(.on)
+            rig.controller.relayStarted()
+            rig.controller.choiceChanged(.off)
+            rig.controller.relayStopped()
+        }
+        rig.controller.choiceChanged(.on)
+        rig.controller.willQuit()
+        await rig.controller.willQuitInBackground()
+        #expect(rig.helper.calls == ["register"], "the helper saw one register and nothing else")
+        #expect(rig.rules.calls.isEmpty, "the sleep permission is never removed, or touched at all")
+        #expect(rig.helper.status != .notRegistered)
     }
 
     private func sorted(_ events: [String]) -> [String] { events.sorted() }
@@ -333,16 +410,6 @@ struct SleepRuleInstallerTests {
         #expect(script.components(separatedBy: "root:wheel").count - 1 >= 2)
         #expect(script.contains(SleepRuleInstaller.bootResetPlistPath))
     }
-
-    @Test("remove script resets sleep before removing either path")
-    func removeOrder() throws {
-        let script = SleepRuleInstaller.removeScript()
-        let reset = try #require(script.range(of: "pmset -a disablesleep 0"))
-        let rule = try #require(script.range(of: SleepRuleInstaller.sudoersPath))
-        let plist = try #require(script.range(of: SleepRuleInstaller.bootResetPlistPath))
-        #expect(reset.lowerBound < rule.lowerBound)
-        #expect(reset.lowerBound < plist.lowerBound)
-    }
 }
 
 // MARK: - Privileged writer
@@ -487,5 +554,170 @@ struct PrivilegedSleepSettingWriterTests {
             .init(executableURL: sudo, arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"], standardInputData: Data(), timeout: .seconds(7)),
             .init(executableURL: sudo, arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"], standardInputData: Data(), timeout: .seconds(7)),
         ])
+    }
+}
+
+// MARK: - Sleep reset helper
+
+@Suite("SleepResetPolicy")
+struct SleepResetPolicyTests {
+    private let settings: [Bool?] = [true, false, nil]
+
+    @Test("with the app not running, the setting on or unknown is written off, on power or on battery")
+    func notRunningClearsAStuckSetting() {
+        for onBattery in [false, true] {
+            for disabled in [true, nil] as [Bool?] {
+                #expect(
+                    SleepResetPolicy.decide(appRunning: false, onBattery: onBattery, sleepDisabled: disabled) == .writeOff,
+                    "app not running, onBattery \(onBattery), sleepDisabled \(String(describing: disabled))"
+                )
+            }
+        }
+    }
+
+    @Test("with the app not running and the setting already off, nothing is written")
+    func notRunningAndAlreadyOff() {
+        for onBattery in [false, true] {
+            #expect(
+                SleepResetPolicy.decide(appRunning: false, onBattery: onBattery, sleepDisabled: false) == .leaveAlone,
+                "onBattery \(onBattery)"
+            )
+        }
+    }
+
+    @Test("while the app runs the helper never writes, whatever the power source or the setting")
+    func runningIsNeverOverridden() {
+        for onBattery in [false, true] {
+            for disabled in settings {
+                #expect(
+                    SleepResetPolicy.decide(appRunning: true, onBattery: onBattery, sleepDisabled: disabled) == .leaveAlone,
+                    "app running, onBattery \(onBattery), sleepDisabled \(String(describing: disabled))"
+                )
+            }
+        }
+    }
+}
+
+@Suite("SleepResetHelper")
+struct SleepResetHelperTests {
+    @Test("the one command the helper may run is pmset -a disablesleep 0")
+    func commandIsFixed() {
+        #expect(SleepResetHelper.command == ["/usr/bin/pmset", "-a", "disablesleep", "0"])
+    }
+
+    @Test("the helper reads only the process list and the power source")
+    func inputsAreTwo() {
+        #expect(SleepResetHelper.inputs == [.processList, .powerSource])
+    }
+
+    @Test("the boot job runs the same single command as the helper")
+    func bootJobMatchesHelper() throws {
+        let plist = try #require(
+            PropertyListSerialization.propertyList(from: SleepRuleInstaller.bootResetPlist(), format: nil) as? [String: Any]
+        )
+        #expect(plist["ProgramArguments"] as? [String] == SleepResetHelper.command)
+    }
+}
+
+@Suite("SleepResetHelper process list")
+struct SleepResetHelperProcessListTests {
+    private static let appName = SleepResetHelper.appExecutableName
+    private static let appPid: pid_t = 250
+
+    /// listing builds a fake process list. fill mirrors proc_listallpids: it
+    /// copies at most buffer.count pids, but never more than `cap`.
+    private static func listing(
+        population: Int, hint: Int32? = nil, cap: Int = .max, appPid: pid_t?, genuine: Bool = true
+    ) -> SleepResetHelper.ProcessListing {
+        let pids: [pid_t] = (1...Int32(population)).map { $0 }
+        return SleepResetHelper.ProcessListing(
+            countHint: { hint ?? Int32(population) },
+            fill: { buffer in
+                let n = min(buffer.count, cap, pids.count)
+                for i in 0..<n { buffer[i] = pids[i] }
+                return Int32(n)
+            },
+            executableName: { $0 == appPid ? appName : "other" },
+            isGenuineApp: { $0 == appPid && genuine }
+        )
+    }
+
+    /// writes feeds one listing through the helper's look three times (first
+    /// look, interval, power change), the sleep setting on and the Mac on battery.
+    private func writes(_ listing: SleepResetHelper.ProcessListing) -> Int {
+        var look = SleepResetHelper.Look()
+        var count = 0
+        for _ in 0..<3 {
+            look.run(
+                appRunning: SleepResetHelper.appIsRunning(using: listing),
+                onBattery: true, sleepDisabled: true, runCommand: { count += 1; return true }
+            )
+        }
+        return count
+    }
+
+    @Test("a list cut short, with the genuine app beyond the copied part, writes nothing on any look")
+    func truncatedListWritesNothing() {
+        let cut = Self.listing(population: 300, hint: 120, cap: 184, appPid: Self.appPid)
+        #expect(SleepResetHelper.appIsRunning(using: cut) == true)
+        #expect(writes(cut) == 0)
+    }
+
+    @Test("a list that grew past an honest fill still never writes while the app is beyond the copied part")
+    func grownListWritesNothing() {
+        let grown = Self.listing(population: 300, hint: 120, appPid: Self.appPid)
+        #expect(writes(grown) == 0)
+    }
+
+    @Test("a list read whole with the genuine app writes nothing")
+    func wholeListWithAppWritesNothing() {
+        let whole = Self.listing(population: 120, appPid: 100)
+        #expect(SleepResetHelper.appIsRunning(using: whole) == true)
+        #expect(writes(whole) == 0)
+    }
+
+    @Test("a list read whole with no app allows the write on every look")
+    func wholeListWithoutAppWrites() {
+        let whole = Self.listing(population: 120, appPid: nil)
+        #expect(SleepResetHelper.appIsRunning(using: whole) == false)
+        #expect(writes(whole) == 3)
+    }
+
+    @Test("a list read whole with a same-named process that fails the signature check allows the write")
+    func wholeListWithImpostorWrites() {
+        let whole = Self.listing(population: 120, appPid: 100, genuine: false)
+        #expect(SleepResetHelper.appIsRunning(using: whole) == false)
+        #expect(writes(whole) == 3)
+    }
+
+    @Test("a copy that returns nothing after a positive count counts as the app running")
+    func failedCopyCountsAsRunning() {
+        let failed = SleepResetHelper.ProcessListing(
+            countHint: { 120 }, fill: { _ in 0 }, executableName: { _ in nil }, isGenuineApp: { _ in false }
+        )
+        #expect(SleepResetHelper.appIsRunning(using: failed) == true)
+        #expect(writes(failed) == 0)
+    }
+
+    @Test("a list that cannot be read at all counts as the app running")
+    func unreadableListCountsAsRunning() {
+        let none = SleepResetHelper.ProcessListing(
+            countHint: { 0 }, fill: { _ in 0 }, executableName: { _ in nil }, isGenuineApp: { _ in false }
+        )
+        #expect(SleepResetHelper.appIsRunning(using: none) == true)
+        #expect(writes(none) == 0)
+    }
+}
+
+@Suite("StayAwakeCopy")
+struct StayAwakeCopyTests {
+    @Test("the permission note says it stays once granted and offers no way to remove it")
+    func permissionNote() {
+        let note = StayAwakeCopy.permissionNote.lowercased()
+        #expect(note.contains("stays"))
+        #expect(note.contains("granted"))
+        #expect(!note.contains("remove"))
+        #expect(!note.contains("revoke"))
+        #expect(!note.contains("take that permission away"))
     }
 }

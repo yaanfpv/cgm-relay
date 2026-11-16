@@ -130,6 +130,15 @@ final class AppModel: ObservableObject {
     private let pairingMinter: any PairingCodeMinting
     private let addressRetrier: any BuiltInAddressRetrying
     private let signInStarter: any BuiltInSignInStarting
+    private let routeLeaver: any BuiltInRouteLeaving
+    /// isLeavingRoute is whether a way out of the built-in route is waiting on
+    /// the engine's logout, so a second press does not start another.
+    private var isLeavingRoute = false
+    /// isRunningLeaveChild is whether a leave child is running, so a second
+    /// one never starts beside it.
+    @Published private(set) var isRunningLeaveChild = false
+    private let engineURL: URL
+    private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
     private let librelinkupBaseURL: String?
     private let tailscale: any TailscaleControlling
@@ -137,6 +146,7 @@ final class AppModel: ObservableObject {
     private let stayAwake: StayAwakeController
     private let powerSource: any PowerSourceReading
     private let sleepRules: any SleepRuleManaging
+    private let sleepHelper: any SleepHelperRegistering
     private var powerWatcher: PowerSourceWatcher?
     /// stopRequested is whether the person (or quitting) stopped the relay
     /// since it was last started, so a state report that was still on its
@@ -188,6 +198,13 @@ final class AppModel: ObservableObject {
     }
 
     var isPortLocked: Bool { portLockNote != nil }
+
+    /// builtInChoiceBlockedReason is why Use Built-In Tailscale cannot be
+    /// chosen right now, nil when it can. Every control that chooses the
+    /// built-in route reads it for both its disabled state and its caption.
+    var builtInChoiceBlockedReason: String? {
+        LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: isRunningLeaveChild)
+    }
 
     var canStart: Bool { credentialsConfigured && engineState == .stopped }
 
@@ -248,18 +265,24 @@ final class AppModel: ObservableObject {
         databasePath: String,
         librelinkupBaseURL: String? = nil,
         tailscale: any TailscaleControlling = RealTailscaleController(executableURL: nil),
+        leaveRunner: any BoundedProcessRunning = RealBoundedProcessRunner(),
         loginItemManager: any LoginItemManaging = SystemLoginItemManager(),
         portBinder: any PortBinding = SystemPortBinder(),
         powerSource: any PowerSourceReading = SystemPowerSource(),
         sleepRules: any SleepRuleManaging,
         sleepSetting: any SleepSettingWriting,
         idleSleepAssertion: any IdleSleepAsserting,
+        sleepHelper: any SleepHelperRegistering,
         tailscaleAppInstalled: Bool = AppModel.detectTailscaleApp()
     ) {
         self.tailscaleAppInstalled = tailscaleAppInstalled
         self.powerSource = powerSource
         self.sleepRules = sleepRules
+        self.sleepHelper = sleepHelper
+        sleepHelperStatus = sleepHelper.status
         self.tailscale = tailscale
+        self.engineURL = engineURL
+        self.leaveRunner = leaveRunner
         self.portBinder = portBinder
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
@@ -277,6 +300,7 @@ final class AppModel: ObservableObject {
         pairingMinter = URLSessionPairingCodeMinter(pairingURL: AppModel.pairingURL(for: statusAddr), secret: statusSecret)
         addressRetrier = URLSessionBuiltInAddressRetrier(url: AppModel.engineURL(for: statusAddr, path: "tailscale/try-again"), secret: statusSecret)
         signInStarter = URLSessionBuiltInSignInStarter(url: AppModel.engineURL(for: statusAddr, path: "tailscale/sign-in"), secret: statusSecret)
+        routeLeaver = URLSessionBuiltInRouteLeaver(url: AppModel.engineURL(for: statusAddr, path: "tailscale/leave"), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
         let loaded = settingsStore.load()
@@ -285,7 +309,9 @@ final class AppModel: ObservableObject {
             choice: loaded.stayAwake,
             power: powerSource,
             assertion: idleSleepAssertion,
-            sleepSetting: sleepSetting
+            sleepSetting: sleepSetting,
+            rules: sleepRules,
+            helper: sleepHelper
         )
         portIsPersonChosen = loaded.setupFinished || loaded.port != AppSettings.defaultPort
         accountSignIn = AccountSignIn(checker: RealAccountChecker(engineURL: engineURL), store: credentialStore)
@@ -346,6 +372,9 @@ final class AppModel: ObservableObject {
         }
         await alertEngine.setNoReadingAlert(enabled: settings.noReadingAlertEnabled, minutes: settings.noReadingAlertMinutes)
         await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
+        // A leave that did not reach Tailscale is tried again here whether or
+        // not the engine can start: the child needs no LibreLinkUp sign-in.
+        Task { await runPendingLeaveChild() }
         async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
         async let tailscaleRead: Void = refreshTailscale()
@@ -623,19 +652,15 @@ final class AppModel: ObservableObject {
         if installed != tailscaleAppInstalled { tailscaleAppInstalled = installed }
     }
 
-    /// chooseBuiltInTailscaleWithoutTailscaleApp takes the person straight
-    /// into the built-in route when Tailscale's Mac app is not installed and
-    /// no way has been chosen yet.
-    func chooseBuiltInTailscaleWithoutTailscaleApp() {
-        guard !tailscaleAppInstalled, settings.chosenWay == .thisMacOnly else { return }
-        chooseBuiltInTailscale()
-    }
-
     /// chooseBuiltInTailscale moves the choice to the Tailscale built into
-    /// CGM Relay and restarts the engine with its state folder.
+    /// CGM Relay and restarts the engine with its state folder. It runs only
+    /// from a button the person pressed, and not while a leave child is using
+    /// the kept folder. A leave still waiting for a retry is over: the folder
+    /// it kept is the one in use again.
     func chooseBuiltInTailscale() {
-        guard !settings.useBuiltInTailscale else { return }
+        guard !settings.useBuiltInTailscale, !isLeavingRoute, !isRunningLeaveChild else { return }
         settings.useBuiltInTailscale = true
+        settings.pendingLeaveRetry = false
         settings.tailscaleHTTPSEnabled = false
         persistSettings()
         refreshBuiltInRoute()
@@ -645,15 +670,108 @@ final class AppModel: ObservableObject {
     }
 
     /// chooseOwnTailscale moves the choice back to the person's own
-    /// Tailscale and restarts the engine without the built-in node.
+    /// Tailscale. The built-in node logs out of their Tailscale account first, then
+    /// the engine restarts without it.
     func chooseOwnTailscale() {
-        guard settings.useBuiltInTailscale else { return }
-        settings.useBuiltInTailscale = false
+        guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        Task {
+            await leaveBuiltInRoute(for: .chooseOwnTailscale) {
+                self.settings.useBuiltInTailscale = false
+                self.persistSettings()
+                self.refreshBuiltInRoute()
+                self.recomputeMenuState()
+                self.refreshNetworkAddresses()
+                await self.restartEngineIfRunning()
+            }
+        }
+    }
+
+    /// chooseThisMacOnlyLeavingBuiltIn moves the choice to This Mac only from
+    /// the built-in route, logging out of the person's Tailscale account first.
+    private func chooseThisMacOnlyLeavingBuiltIn() {
+        guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        Task {
+            await leaveBuiltInRoute(for: .chooseThisMacOnly) {
+                self.settings.useBuiltInTailscale = false
+                self.settings = self.settings.choosing(.thisMacOnly)
+                self.persistSettings()
+                self.refreshBuiltInRoute()
+                self.recomputeMenuState()
+                self.refreshNetworkAddresses()
+                await self.restartEngineIfRunning()
+            }
+        }
+    }
+
+    /// leaveBuiltInRoute runs the steps LeaveTailnetSequence gives for a way
+    /// out of the built-in route. The leave is awaited, with its own timeout,
+    /// before the engine stops, since the node that logs out lives in the
+    /// engine. What the leave answered is saved, so a launch retries it when
+    /// the Mac was not yet logged out.
+    private func leaveBuiltInRoute(
+        for trigger: LeaveTrigger,
+        applyChoice: () async -> Void
+    ) async {
+        isLeavingRoute = true
+        defer { isLeavingRoute = false }
+        for step in LeaveTailnetSequence.steps(for: trigger, builtInOn: settings.useBuiltInTailscale) {
+            switch step {
+            case .leave:
+                builtInSession.cancel()
+                let outcome = await routeLeaver.leave()
+                LeaveTailnetOutcome.record(outcome, into: &settings)
+                persistSettings()
+            case .applyChoice:
+                await applyChoice()
+            }
+        }
+        // A leave that did not reach Tailscale is tried again now, once the
+        // route change's engine restart has released the folder, not only at
+        // the next launch.
+        Task { await runPendingLeaveChild() }
+    }
+
+    /// engineHoldsFolder is whether an engine is running with the built-in
+    /// route on, the only time the engine uses the kept Tailscale folder.
+    private var engineHoldsFolder: Bool {
+        guard settings.useBuiltInTailscale else { return false }
+        switch engineState {
+        case .starting, .running, .waitingToRestart: return true
+        case .stopped, .failed: return false
+        }
+    }
+
+    /// runPendingLeaveChild tries again to log this Mac out of the person's
+    /// Tailscale account after a leave that did not reach it, by running
+    /// `cgm-relay leave-tailnet --config-stdin` on the kept folder. It runs
+    /// in a process of its own, with no engine and no LibreLinkUp sign-in,
+    /// and one at a time. The exit code is recorded with
+    /// LeaveTailnetOutcome.fromLeaveChild.
+    private func runPendingLeaveChild() async {
+        guard !isRunningLeaveChild,
+              LeaveTailnetOutcome.shouldRunLeaveChild(settings: settings, engineHoldsFolder: engineHoldsFolder)
+        else { return }
+        isRunningLeaveChild = true
+        defer { isRunningLeaveChild = false }
+        let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
+        let request = ["tailscale_state_dir": kept.path, "tailscale_hostname": SettingsEngineConfigurationBuilder.builtInHostname]
+        guard let input = try? JSONSerialization.data(withJSONObject: request) else { return }
+        let result = await leaveRunner.run(
+            executableURL: engineURL,
+            arguments: ["leave-tailnet", "--config-stdin"],
+            standardInputData: input,
+            timeout: .seconds(30)
+        )
+        let outcome: LeaveTailnetOutcome
+        if case .exited(let code) = result {
+            outcome = LeaveTailnetOutcome.fromLeaveChild(exitCode: code)
+        } else {
+            outcome = .notYetRemoved
+        }
+        LeaveTailnetOutcome.record(outcome, into: &settings)
         persistSettings()
         refreshBuiltInRoute()
         recomputeMenuState()
-        refreshNetworkAddresses()
-        Task { await restartEngineIfRunning() }
     }
 
     /// openBuiltInStep opens the page the current step asks for, in the
@@ -748,13 +866,13 @@ final class AppModel: ObservableObject {
     }
 
     /// builtInStateDirectory is where the built-in node keeps its state,
-    /// beside the database, readable only by this user. nil if it cannot be
-    /// made, which keeps the engine from starting without one.
+    /// beside the database, readable only by this user and left out of
+    /// backups. nil if it cannot be made, which keeps the engine from
+    /// starting without one.
     private func builtInStateDirectory() -> String? {
         let directory = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try StateDirectoryPolicy.prepare(at: directory)
             return directory.path
         } catch {
             recoveryLogger.error("could not make the Tailscale state folder: \(error, privacy: .public)")
@@ -807,6 +925,10 @@ final class AppModel: ObservableObject {
     /// HTTPS is chosen only while its handler is serving; turning it on is the
     /// button's own command.
     func chooseWay(_ way: ReachWay) {
+        if way == .thisMacOnly, settings.useBuiltInTailscale {
+            chooseThisMacOnlyLeavingBuiltIn()
+            return
+        }
         guard settings.chosenWay != way else { return }
         guard way.pickability(https: httpsState, tailnetAvailable: tailnetAvailable) == .pickable else { return }
         settings = settings.choosing(way)
@@ -1164,6 +1286,14 @@ final class AppModel: ObservableObject {
     /// keeping it awake is described and done.
     var isLaptop: Bool { powerSource.snapshot().isLaptop }
 
+    /// sleepHelperStatus is where the sleep reset helper stands with the
+    /// system, read when Settings opens and after the choice changes.
+    @Published private(set) var sleepHelperStatus: SleepHelperStatus
+
+    func refreshSleepHelperStatus() {
+        sleepHelperStatus = sleepHelper.status
+    }
+
     /// stayAwakeChoice is the saved answer, nil until the person is asked.
     var stayAwakeChoice: StayAwakeChoice? { settings.stayAwake }
 
@@ -1193,30 +1323,19 @@ final class AppModel: ObservableObject {
     }
 
     /// turnOffStayAwake saves the answer and puts the Mac back to sleeping
-    /// as usual; removePermission also takes the permission away, which
-    /// asks for the Mac's password again.
-    func turnOffStayAwake(removePermission: Bool = false) async {
+    /// as usual. The permission to change the sleep setting stays, so
+    /// turning keep-awake on again never asks for it again.
+    func turnOffStayAwake() async {
         guard !isChangingStayAwake else { return }
         stayAwakeNotice = nil
         saveStayAwake(.off)
-        guard removePermission, isLaptop else { return }
-        isChangingStayAwake = true
-        defer { isChangingStayAwake = false }
-        if await sleepRules.remove() == .failed {
-            stayAwakeNotice = "CGM Relay couldn't remove its permission to change the sleep setting."
-        }
-    }
-
-    /// stayAwakePermissionIsInstalled is whether turning the choice off can
-    /// also offer to remove the permission.
-    func stayAwakePermissionIsInstalled() async -> Bool {
-        isLaptop ? await sleepRules.isInstalled() : false
     }
 
     private func saveStayAwake(_ choice: StayAwakeChoice) {
         settings.stayAwake = choice
         persistSettings()
         stayAwake.choiceChanged(choice)
+        refreshSleepHelperStatus()
     }
 
     // MARK: - Menu bar

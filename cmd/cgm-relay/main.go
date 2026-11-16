@@ -19,6 +19,7 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/librelinkup"
 	"github.com/yaanfpv/cgm-relay/internal/relay"
 	"github.com/yaanfpv/cgm-relay/internal/store"
+	"github.com/yaanfpv/cgm-relay/internal/tailnode"
 )
 
 // exitCodeGenericFailure is returned for every serve failure this file does
@@ -103,6 +104,8 @@ func main() {
 		runServe(os.Args[2:])
 	case "check-account":
 		runCheckAccount(os.Args[2:])
+	case "leave-tailnet":
+		leaveTailnetCommand(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "cgm-relay: unknown command %q\n", os.Args[1])
 		printUsage()
@@ -131,6 +134,11 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "                 librelinkup_password, and optionally librelinkup_base_url)")
 	fmt.Fprintln(w, "                 and confirm the account signs in and follows someone,")
 	fmt.Fprintln(w, "                 without saving or serving anything")
+	fmt.Fprintln(w, "  leave-tailnet  --config-stdin: read one JSON object on stdin")
+	fmt.Fprintln(w, "                 (tailscale_state_dir and tailscale_hostname), log the")
+	fmt.Fprintln(w, "                 built-in Tailscale node kept in that folder out and remove")
+	fmt.Fprintln(w, "                 the folder; exit 0 when done, 3 when kept for a retry,")
+	fmt.Fprintln(w, "                 2 for a bad request")
 }
 
 // runSetup implements the setup command.
@@ -317,4 +325,49 @@ func watchStdinForShutdown(r io.Reader, logw io.Writer, stop func()) {
 		fmt.Fprintln(logw, "cgm-relay: serve: stdin closed, shutting down")
 		stop()
 	}()
+}
+
+// exitCodeLeaveBadConfig is returned by leave-tailnet when its request is
+// missing, malformed or names no state folder, before anything starts.
+const exitCodeLeaveBadConfig = 2
+
+// exitCodeLeaveKept is returned by leave-tailnet when the logout did not
+// reach Tailscale and the folder was kept for a retry. The macOS menu bar
+// app's LeaveTailnetOutcome.fromLeaveChild reads every code but 0 as kept.
+const exitCodeLeaveKept = 3
+
+// leaveTailnetTimeout bounds the whole logout.
+const leaveTailnetTimeout = 20 * time.Second
+
+// leaveTailnetCommand implements the leave-tailnet command: it logs out the
+// Tailscale node a failed leave kept in a state folder and removes the
+// folder, with no engine and no LibreLinkUp, token or store-key
+// configuration.
+func leaveTailnetCommand(args []string) {
+	fs := flag.NewFlagSet("leave-tailnet", flag.ExitOnError)
+	configStdin := fs.Bool("config-stdin", false, "read the request as one JSON object from stdin")
+	fs.Parse(args)
+	if !*configStdin {
+		fmt.Fprintln(os.Stderr, "cgm-relay: leave-tailnet: --config-stdin is required")
+		os.Exit(exitCodeLeaveBadConfig)
+	}
+	dec := json.NewDecoder(os.Stdin)
+	dec.DisallowUnknownFields()
+	var req struct {
+		StateDir string `json:"tailscale_state_dir"`
+		Hostname string `json:"tailscale_hostname"`
+	}
+	if err := dec.Decode(&req); err != nil || req.StateDir == "" {
+		fmt.Fprintln(os.Stderr, "cgm-relay: leave-tailnet: needs one JSON object with tailscale_state_dir and tailscale_hostname")
+		os.Exit(exitCodeLeaveBadConfig)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), leaveTailnetTimeout)
+	defer cancel()
+	res, err := tailnode.LeaveKeptFolder(ctx, req.StateDir, req.Hostname)
+	if err != nil || res != tailnode.LeftAndRemoved {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cgm-relay: leave-tailnet: %v\n", err)
+		}
+		os.Exit(exitCodeLeaveKept)
+	}
 }

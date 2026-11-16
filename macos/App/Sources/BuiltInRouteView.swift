@@ -130,39 +130,105 @@ enum BuiltInRouteCopy {
     static let disclosure = "This gives your Mac a public https address that only your token opens. Its name appears in public certificate logs. A Tailscale account is free, and your phone needs nothing installed."
 }
 
+/// BuiltInRouteCopy's companion notice: shown wherever the route is chosen
+/// once a leave did not reach Tailscale.
+struct LeavePendingNotice: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if let reason = model.builtInChoiceBlockedReason {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if LeaveTailnetOutcome.shouldRetryLeave(settings: model.settings) {
+            Text("This Mac is not yet logged out of your Tailscale account. CGM Relay will try again the next time it opens.")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// UseBuiltInTailscaleSection is the one button that chooses the built-in
+/// route on a Mac without Tailscale's app, so nothing signs this Mac in to
+/// Tailscale until it is pressed. It belongs inside a Form.
+struct UseBuiltInTailscaleSection: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Section {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Give this Mac its own public address. Your phone needs no Tailscale.")
+                    Text("Choosing it signs this Mac in to Tailscale.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                AccessibleButton("Use Built-In Tailscale", style: .primary) { model.chooseBuiltInTailscale() }
+                    .disabled(model.builtInChoiceBlockedReason != nil)
+                    .fixedSize()
+            }
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                LeavePendingNotice(model: model)
+                Text(BuiltInRouteCopy.disclosure)
+            }
+        }
+    }
+}
+
 /// TailscaleChoiceView asks "Use your Tailscale?" where Tailscale's Mac app
 /// is installed: use it (the Tailscale HTTPS and My tailnet ways) or the one
 /// built into CGM Relay. It is shown only when the app is installed; without
-/// it the built-in route is the only one. It belongs inside a Form.
+/// it the built-in route is the only Tailscale one. It belongs inside a Form.
 struct TailscaleChoiceView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
         Section {
-            choiceRow(
+            ChoiceRow(
                 title: "Use My Tailscale",
                 description: "Reach this Mac over your own Tailscale, on a private address.",
                 selected: !model.settings.useBuiltInTailscale
             ) { model.chooseOwnTailscale() }
-            choiceRow(
+            ChoiceRow(
                 title: "Use Built-In Tailscale",
                 description: "Give this Mac its own public address. Your phone needs no Tailscale.",
-                selected: model.settings.useBuiltInTailscale
+                selected: model.settings.useBuiltInTailscale,
+                disabled: model.builtInChoiceBlockedReason != nil
             ) { model.chooseBuiltInTailscale() }
         } header: {
             Text("Use your Tailscale?")
+        } footer: {
+            LeavePendingNotice(model: model)
         }
     }
+}
 
-    private func choiceRow(title: String, description: String, selected: Bool, action: @escaping () -> Void) -> some View {
+/// ChoiceRow is one radio-style option with a title and a description, a
+/// button with an accessible radio name. It calls action whether or not it
+/// is selected. A disabled row is dimmed and cannot be picked; the reason is
+/// shown by the view that disables it.
+struct ChoiceRow: View {
+    let title: String
+    let description: String
+    let selected: Bool
+    var disabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(disabled ? AnyShapeStyle(.tertiary) : (selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary)))
                     .imageScale(.large)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
+                        .foregroundStyle(disabled ? .secondary : .primary)
                     Text(description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -174,5 +240,6 @@ struct TailscaleChoiceView: View {
         .buttonStyle(.plain)
         .padding(.vertical, 4)
         .accessibleRadioName(title, isSelected: selected, action: action)
+        .disabled(disabled)
     }
 }

@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +25,13 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/librelinkup/llufake"
 	"github.com/yaanfpv/cgm-relay/internal/relay"
 	"github.com/yaanfpv/cgm-relay/internal/store"
+	"tailscale.com/ipn"
+	"tailscale.com/net/netns"
+	"tailscale.com/tailcfg"
+	"tailscale.com/tsnet"
+	"tailscale.com/tstest/integration/testcontrol"
+	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 )
 
 // TestUsageListsConfigStdinFlag checks that the usage summary printed
@@ -597,5 +608,292 @@ func TestExitCodeForServeErrorKeepsGenericFailuresAtOne(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), original.Error()) {
 		t.Errorf("stderr = %q, want it to contain %q", out.String(), original.Error())
+	}
+}
+
+// leaveHangCeiling only ends a leave-tailnet test that waits for something
+// that never comes.
+const leaveHangCeiling = 2 * time.Minute
+
+// leaveControl is Tailscale's own fake control server (testcontrol) on
+// loopback, with a hook that records the register requests a node makes: a
+// register request whose expiry is already past is a logout.
+type leaveControl struct {
+	t    *testing.T
+	ctrl *testcontrol.Server
+	addr string
+
+	mu       sync.Mutex
+	hs       *httptest.Server
+	contacts int
+	logins   []key.NodePublic
+	logouts  []key.NodePublic
+}
+
+func newLeaveControl(t *testing.T) *leaveControl {
+	t.Helper()
+	netns.SetEnabled(false)
+	t.Cleanup(func() { netns.SetEnabled(true) })
+	c := &leaveControl{t: t}
+	c.ctrl = &testcontrol.Server{
+		DNSConfig:      &tailcfg.DNSConfig{Proxied: true},
+		MagicDNSDomain: "tail-scale.ts.net",
+		MaybeRejectRequest: func(req *http.Request) (int, string, string) {
+			if req.URL.Path != "/machine/register" || req.Body == nil {
+				return 0, "", ""
+			}
+			body, err := io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			var rr tailcfg.RegisterRequest
+			if err != nil || json.Unmarshal(body, &rr) != nil {
+				return 0, "", ""
+			}
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			c.contacts++
+			if !rr.Expiry.IsZero() && rr.Expiry.Before(time.Now()) {
+				c.logouts = append(c.logouts, rr.NodeKey)
+			} else if !slices.Contains(c.logins, rr.NodeKey) {
+				c.logins = append(c.logins, rr.NodeKey)
+			}
+			return 0, "", ""
+		},
+	}
+	c.up()
+	t.Cleanup(c.down)
+	return c
+}
+
+func (c *leaveControl) up() {
+	c.t.Helper()
+	listen := "127.0.0.1:0"
+	if c.addr != "" {
+		listen = c.addr
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		c.t.Fatalf("control server cannot listen on %s: %v", listen, err)
+	}
+	hs := httptest.NewUnstartedServer(c.ctrl)
+	hs.Listener.Close()
+	hs.Listener = ln
+	hs.Start()
+	c.ctrl.HTTPTestServer = hs
+	c.mu.Lock()
+	c.hs = hs
+	c.addr = ln.Addr().String()
+	c.mu.Unlock()
+}
+
+func (c *leaveControl) down() {
+	c.mu.Lock()
+	hs := c.hs
+	c.hs = nil
+	c.mu.Unlock()
+	if hs != nil {
+		hs.CloseClientConnections()
+		hs.Close()
+	}
+}
+
+func (c *leaveControl) url() string { return "http://" + c.addr }
+
+func (c *leaveControl) counts() (contacts int, logins, logouts []key.NodePublic) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.contacts, slices.Clone(c.logins), slices.Clone(c.logouts)
+}
+
+// loginNode signs a real tsnet node in to the fake control server on dir and
+// closes it, leaving the folder a built-in route leaves behind.
+func (c *leaveControl) loginNode(dir string) key.NodePublic {
+	c.t.Helper()
+	s := &tsnet.Server{Dir: dir, Hostname: "relay-test", ControlURL: c.url(), Logf: logger.Discard, UserLogf: logger.Discard}
+	ctx, cancel := context.WithTimeout(context.Background(), leaveHangCeiling)
+	defer cancel()
+	if err := waitSignedIn(ctx, s); err != nil {
+		_ = s.Close()
+		c.t.Fatalf("the node never signed in to the fake control server: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		c.t.Fatalf("closing the signed-in node: %v", err)
+	}
+	_, logins, _ := c.counts()
+	if len(logins) != 1 {
+		c.t.Fatalf("the control server registered %d node keys, want 1", len(logins))
+	}
+	return logins[0]
+}
+
+// waitSignedIn returns once the node has been accepted by the control server
+// and has its first network map. The fake control server has no relay, so the
+// node never reaches Running; Starting is as far as it goes.
+func waitSignedIn(ctx context.Context, s *tsnet.Server) error {
+	lc, err := s.LocalClient()
+	if err != nil {
+		return err
+	}
+	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	for {
+		n, err := w.Next()
+		if err != nil {
+			return err
+		}
+		if st := n.State; st != nil && (*st == ipn.Starting || *st == ipn.Running) {
+			return nil
+		}
+	}
+}
+
+var (
+	leaveBinOnce sync.Once
+	leaveBinPath string
+	leaveBinErr  error
+)
+
+// leaveBinary builds the real cgm-relay command once for the package's tests.
+func leaveBinary(t *testing.T) string {
+	t.Helper()
+	leaveBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "cgm-relay-leave-bin")
+		if err != nil {
+			leaveBinErr = err
+			return
+		}
+		leaveBinPath = filepath.Join(dir, "cgm-relay")
+		ctx, cancel := context.WithTimeout(context.Background(), leaveHangCeiling)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "go", "build", "-o", leaveBinPath, ".").CombinedOutput()
+		if err != nil {
+			leaveBinErr = fmt.Errorf("go build: %v\n%s", err, out)
+		}
+	})
+	if leaveBinErr != nil {
+		t.Fatalf("cannot build the command: %v", leaveBinErr)
+	}
+	return leaveBinPath
+}
+
+// runLeaveTailnet runs `cgm-relay leave-tailnet --config-stdin` with stdin as
+// given. Its whole environment is the control server address and a scratch
+// HOME: no LibreLinkUp, token, store key or config file is present.
+func runLeaveTailnet(t *testing.T, stdin, controlURL string) (exit int, stderr string) {
+	t.Helper()
+	bin := leaveBinary(t)
+	ctx, cancel := context.WithTimeout(context.Background(), leaveHangCeiling)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "leave-tailnet", "--config-stdin")
+	cmd.Dir = t.TempDir()
+	cmd.Env = []string{"HOME=" + t.TempDir(), "TS_CONTROL_URL=" + controlURL}
+	cmd.Stdin = strings.NewReader(stdin)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	cmd.WaitDelay = 10 * time.Second
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("leave-tailnet did not exit; stderr: %s", errb.String())
+	}
+	if err == nil {
+		return 0, errb.String()
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("leave-tailnet did not run: %v", err)
+	}
+	return ee.ExitCode(), errb.String()
+}
+
+func leaveStdin(dir string) string {
+	b, _ := json.Marshal(map[string]string{"tailscale_state_dir": dir, "tailscale_hostname": "relay-test"})
+	return string(b)
+}
+
+// TestLeaveTailnetCommandLogsOutAndRemovesTheFolder protects the person's
+// Tailscale account when the engine cannot start: the subcommand the menu bar
+// app runs for a pending leave logs the folder's node key out, removes the
+// folder and exits 0, with nothing about LibreLinkUp in its environment.
+func TestLeaveTailnetCommandLogsOutAndRemovesTheFolder(t *testing.T) {
+	ctrl := newLeaveControl(t)
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := ctrl.loginNode(dir)
+
+	exit, stderr := runLeaveTailnet(t, leaveStdin(dir), ctrl.url())
+	if exit != 0 {
+		t.Fatalf("exit %d, want 0 (logged out and removed); stderr: %s", exit, stderr)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after exit 0: %v", err)
+	}
+	if _, _, out := ctrl.counts(); !slices.Equal(out, []key.NodePublic{nodeKey}) {
+		t.Errorf("the control server saw logouts for %v, want one, for %v", out, nodeKey)
+	}
+}
+
+// TestLeaveTailnetCommandExitsThreeAndKeepsTheFolderWhenControlIsAway is the
+// offline Mac: the logout cannot reach Tailscale, so the command exits 3 and
+// the folder with its key is untouched for the next launch to retry.
+func TestLeaveTailnetCommandExitsThreeAndKeepsTheFolderWhenControlIsAway(t *testing.T) {
+	ctrl := newLeaveControl(t)
+	dir := filepath.Join(t.TempDir(), "ts")
+	ctrl.loginNode(dir)
+	before, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil || len(before) == 0 {
+		t.Fatalf("the signed-in folder has no state file: %v", err)
+	}
+	ctrl.down()
+
+	exit, stderr := runLeaveTailnet(t, leaveStdin(dir), ctrl.url())
+	if exit != 3 {
+		t.Fatalf("exit %d, want 3 (kept for retry); stderr: %s", exit, stderr)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil || len(after) == 0 {
+		t.Errorf("the key file is gone or empty after a failed logout: %v", err)
+	}
+}
+
+// TestLeaveTailnetCommandRefusesBadConfigBeforeAnythingStarts protects the
+// folder from a request that names no folder, or names one with more than the
+// two fields: each exits 2, the control server is never contacted and a real
+// folder named beside the bad field is untouched.
+func TestLeaveTailnetCommandRefusesBadConfigBeforeAnythingStarts(t *testing.T) {
+	ctrl := newLeaveControl(t)
+	dir := filepath.Join(t.TempDir(), "ts")
+	ctrl.loginNode(dir)
+	contactsBefore, _, _ := ctrl.counts()
+	state := func() string {
+		b, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+		if err != nil {
+			t.Fatalf("the signed-in folder lost its state file: %v", err)
+		}
+		return string(b)
+	}
+	folderBefore := state()
+
+	cases := map[string]string{
+		"missing state dir": `{"tailscale_hostname":"relay-test"}`,
+		"empty state dir":   `{"tailscale_state_dir":"","tailscale_hostname":"relay-test"}`,
+		"unknown field":     fmt.Sprintf(`{"tailscale_state_dir":%q,"tailscale_hostname":"relay-test","librelinkup_email":"person@example.test"}`, dir),
+		"not json":          `leave please`,
+		"empty stdin":       ``,
+		"empty object":      `{}`,
+	}
+	for name, stdin := range cases {
+		t.Run(name, func(t *testing.T) {
+			exit, stderr := runLeaveTailnet(t, stdin, ctrl.url())
+			if exit != 2 {
+				t.Errorf("exit %d, want 2 (bad or missing config); stderr: %s", exit, stderr)
+			}
+		})
+	}
+	if contactsAfter, _, out := ctrl.counts(); contactsAfter != contactsBefore || len(out) != 0 {
+		t.Errorf("a refused request reached the control server: %d register requests before, %d after, logouts %v", contactsBefore, contactsAfter, out)
+	}
+	if state() != folderBefore {
+		t.Errorf("a refused request changed the node's state file")
 	}
 }

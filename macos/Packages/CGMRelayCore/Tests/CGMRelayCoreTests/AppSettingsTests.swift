@@ -739,4 +739,123 @@ struct UpdateStepsTests {
             #expect(SetupPlan.make(settings: decoded, tailscaleInstalled: installed) == .updateSteps([.movedToBuiltIn, .stayAwake]))
         }
     }
+
+    @Test("a leave that did not reach Tailscale is remembered across launches, and nothing else asks for a retry")
+    func pendingLeaveRetryPersistsAndDrivesTheRetry() throws {
+        #expect(AppSettings.default.pendingLeaveRetry == false)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: AppSettings.default) == false)
+
+        var pending = AppSettings.default
+        pending.pendingLeaveRetry = true
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(pending))
+        #expect(decoded.pendingLeaveRetry == true, "the retry must survive a quit")
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: decoded) == true)
+
+        // The person who left the built-in route has useBuiltInTailscale off by now; the retry still runs.
+        #expect(decoded.useBuiltInTailscale == false)
+
+        // A launch that still uses the built-in route, with nothing pending, must never leave.
+        var using = AppSettings.default
+        using.useBuiltInTailscale = true
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: using) == false)
+
+        // Settings saved before this existed have nothing pending.
+        let older = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4000, "useBuiltInTailscale": true}"#.utf8))
+        #expect(older.pendingLeaveRetry == false)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: older) == false)
+
+        // A stored value of the wrong kind falls back instead of resetting the rest.
+        let garbled = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"port": 4242, "pendingLeaveRetry": "yes"}"#.utf8))
+        #expect(garbled.port == 4242)
+        #expect(garbled.pendingLeaveRetry == false)
+    }
+
+    @Test("recording a leave outcome sets or clears the retry flag and touches nothing else")
+    func recordingALeaveOutcome() {
+        var settings = AppSettings.default
+        settings.port = 4242
+        settings.useBuiltInTailscale = false
+        let before = settings
+
+        LeaveTailnetOutcome.record(.notYetRemoved, into: &settings)
+        #expect(settings.pendingLeaveRetry == true)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: settings) == true)
+        var onlyFlag = before
+        onlyFlag.pendingLeaveRetry = true
+        #expect(settings == onlyFlag)
+
+        LeaveTailnetOutcome.record(.removed, into: &settings)
+        #expect(settings.pendingLeaveRetry == false)
+        #expect(LeaveTailnetOutcome.shouldRetryLeave(settings: settings) == false)
+        #expect(settings == before)
+
+        // A removal that follows a failed leave clears it; one with nothing pending changes nothing.
+        LeaveTailnetOutcome.record(.removed, into: &settings)
+        #expect(settings == before)
+    }
+
+    @Test("every way out of the built-in route leaves first, and the engine stops only after the leave")
+    func leaveSequenceOrder() {
+        let triggers: [LeaveTrigger] = [.chooseOwnTailscale, .chooseThisMacOnly]
+        for trigger in triggers {
+            let on = LeaveTailnetSequence.steps(for: trigger, builtInOn: true)
+            #expect(on.first == .leave, "\(trigger): the leave must come first")
+            #expect(on.filter { $0 == .leave }.count == 1, "\(trigger): leave exactly once")
+            #expect(on.contains(.applyChoice), "\(trigger): the choice is still applied")
+            let off = LeaveTailnetSequence.steps(for: trigger, builtInOn: false)
+            #expect(!off.contains(.leave), "\(trigger): nothing to leave when the built-in route is off")
+            #expect(off.contains(.applyChoice), "\(trigger): the choice is still applied")
+        }
+    }
+
+    @Test("Sign Out is not a way out of the built-in route: the only triggers are the two opt-outs")
+    func signOutIsNotALeaveTrigger() {
+        // An exhaustive switch over two cases compiles only while LeaveTrigger has exactly
+        // those two, so a signOut case (and a leave entered for it) cannot exist.
+        func isOptOut(_ trigger: LeaveTrigger) -> Bool {
+            switch trigger {
+            case .chooseOwnTailscale, .chooseThisMacOnly: return true
+            }
+        }
+        #expect(isOptOut(.chooseOwnTailscale) && isOptOut(.chooseThisMacOnly))
+        for trigger in [LeaveTrigger.chooseOwnTailscale, .chooseThisMacOnly] {
+            let steps = LeaveTailnetSequence.steps(for: trigger, builtInOn: true)
+            #expect(steps == [.leave, .applyChoice], "\(trigger): leave first, then the choice, no engine stop of its own")
+        }
+    }
+
+    @Test("a leave child's exit code maps to removed only for 0; a failed logout, a signal death or a timeout all stay not yet removed")
+    func leaveChildExitCodeMapsToAnOutcome() {
+        #expect(LeaveTailnetOutcome.fromLeaveChild(exitCode: 0) == .removed)
+        // 3 is the child's "kept for retry", 2 a bad config, 1 a crash: none of them removed the folder.
+        for code: Int32 in [3, 1, 2, -1, 9, 15, 137, 255] {
+            #expect(LeaveTailnetOutcome.fromLeaveChild(exitCode: code) == .notYetRemoved, "exit code \(code) must not read as removed")
+        }
+    }
+
+    @Test("the leave child runs only for a pending leave with the route off and the engine not holding the folder, and needs no LibreLinkUp credentials (AppSettings carries none)")
+    func leaveChildRunsOnlyForAPendingLeaveWithTheFolderFree() {
+        var pending = AppSettings.default
+        pending.pendingLeaveRetry = true
+        pending.useBuiltInTailscale = false
+        #expect(LeaveTailnetOutcome.shouldRunLeaveChild(settings: pending, engineHoldsFolder: false))
+
+        var notPending = pending
+        notPending.pendingLeaveRetry = false
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: notPending, engineHoldsFolder: false), "nothing pending, nothing to leave")
+
+        var using = pending
+        using.useBuiltInTailscale = true
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: using, engineHoldsFolder: false), "a person using the route has nothing to leave")
+
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: pending, engineHoldsFolder: true), "the engine holds the folder, so a second node on it must not start")
+
+        #expect(!LeaveTailnetOutcome.shouldRunLeaveChild(settings: AppSettings.default, engineHoldsFolder: false), "defaults have nothing pending")
+    }
+
+    @Test func builtInChoiceIsBlockedWithTheReasonWhileALeaveChildRuns() {
+        #expect(LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: true) == LeaveTailnetOutcome.loggingOutNotice)
+        #expect(LeaveTailnetOutcome.loggingOutNotice == "Logging this Mac out of Tailscale\u{2026}")
+        #expect(LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: false) == nil)
+    }
 }

@@ -27,7 +27,7 @@ public enum SleepRuleInstaller {
     public static func bootResetPlist() -> Data {
         let plist: [String: Any] = [
             "Label": bootResetLabel,
-            "ProgramArguments": ["/usr/bin/pmset", "-a", "disablesleep", "0"],
+            "ProgramArguments": SleepResetHelper.command,
             "RunAtLoad": true,
         ]
         // Serializing a fixed dictionary of strings and a boolean cannot fail.
@@ -60,16 +60,6 @@ public enum SleepRuleInstaller {
         /bin/chmod 644 "$STAGED_PLIST"
         /bin/mv "$STAGED_RULE" \(shellQuoted(sudoersPath))
         /bin/mv "$STAGED_PLIST" \(shellQuoted(bootResetPlistPath))
-        """
-    }
-
-    /// removeScript puts the setting back first, then removes both files.
-    public static func removeScript() -> String {
-        """
-        set -e
-        \(sleepOff)
-        /bin/rm -f \(shellQuoted(sudoersPath))
-        /bin/rm -f \(shellQuoted(bootResetPlistPath))
         """
     }
 

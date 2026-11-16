@@ -768,3 +768,57 @@ func TestSignInAgainRoute(t *testing.T) {
 		t.Errorf("a node that started it: %d, want 204", got)
 	}
 }
+
+// TestLeaveRoute checks what POST /tailscale/leave decides, the route behind
+// leaving the built-in Tailscale route and Sign Out: it does not exist without
+// the status secret, needs the secret when there is one, refuses a request
+// whose Host is not loopback, does nothing for any other method, and tells the
+// two results of the node apart (204 when the node left and its folder is gone,
+// 409 when the logout failed and the folder is kept for a retry). A route that
+// skipped a check, or answered success for a kept folder, fails it.
+func TestLeaveRoute(t *testing.T) {
+	const secret = "test-secret-value"
+	called := 0
+	send := func(secret, sent, method, host string, leave func(context.Context) (tailnode.LeaveResult, error)) int {
+		h := newStatusHandler(fakePollerStatus{}, newClientTracker(), pairing.NewStore(nil), secret, withTailnodeLeave(leave))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, "/tailscale/leave", nil)
+		req.Host = host
+		if sent != "" {
+			req.Header.Set(config.StatusSecretHeader, sent)
+		}
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	removes := func(context.Context) (tailnode.LeaveResult, error) { called++; return tailnode.LeftAndRemoved, nil }
+	keeps := func(context.Context) (tailnode.LeaveResult, error) { called++; return tailnode.KeptForRetry, nil }
+	const loopback = "127.0.0.1:1338"
+
+	if got := send("", "", http.MethodPost, loopback, removes); got != http.StatusNotFound || called != 0 {
+		t.Errorf("without a status secret: %d, %d calls; want 404 and none", got, called)
+	}
+	if got := send(secret, "", http.MethodPost, loopback, removes); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("without the secret header: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := send(secret, "wrong", http.MethodPost, loopback, removes); got != http.StatusUnauthorized || called != 0 {
+		t.Errorf("with a wrong secret: %d, %d calls; want 401 and none", got, called)
+	}
+	if got := send(secret, secret, http.MethodPost, "rebound.example.test:1338", removes); got != http.StatusForbidden || called != 0 {
+		t.Errorf("from a non-loopback Host: %d, %d calls; want 403 and none", got, called)
+	}
+	if got := send(secret, secret, http.MethodGet, loopback, removes); got == http.StatusOK || got == http.StatusNoContent || called != 0 {
+		t.Errorf("a GET: %d, %d calls; want a refusal and none", got, called)
+	}
+	if got := send(secret, secret, http.MethodPost, loopback, removes); got != http.StatusNoContent || called != 1 {
+		t.Errorf("the node left: %d, %d calls; want 204 and one", got, called)
+	}
+	if got := send(secret, secret, http.MethodPost, loopback, keeps); got != http.StatusConflict {
+		t.Errorf("the folder was kept for a retry: %d, want 409", got)
+	}
+	failing := func(context.Context) (tailnode.LeaveResult, error) {
+		return tailnode.KeptForRetry, errors.New("could not log out")
+	}
+	if got := send(secret, secret, http.MethodPost, loopback, failing); got != http.StatusConflict {
+		t.Errorf("a leave that failed with an error: %d, want 409", got)
+	}
+}

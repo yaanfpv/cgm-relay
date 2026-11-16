@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -23,13 +24,18 @@ import (
 	"github.com/yaanfpv/cgm-relay/internal/cgm"
 	"github.com/yaanfpv/cgm-relay/internal/nightscout"
 	"github.com/yaanfpv/cgm-relay/internal/store"
+	"golang.org/x/sys/unix"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/net/netmon"
+	"tailscale.com/net/netns"
 	"tailscale.com/net/portmapper"
 	"tailscale.com/tailcfg"
+	"tailscale.com/tsnet"
 	"tailscale.com/tstest/integration/testcontrol"
+	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 	"tailscale.com/util/eventbus"
 )
 
@@ -285,6 +291,8 @@ type fakeTailnet struct {
 	nodeLogf    func(string, ...any)            // the log hook the node handed the running server
 	funnelOn    bool                            // whether the server's serve config allows Funnel
 	offTimes    []time.Time                     // when Funnel was switched off
+	logoutErr   error                           // what the fake's Logout answers
+	logoutHangs bool                            // Logout waits for its context to end
 
 	probes   atomic.Int64
 	stateCh  chan string
@@ -590,6 +598,22 @@ func (f *fakeNode) StartLogin(context.Context) error {
 	u := "https://login.tailscale.com/a/abc123"
 	f.notes <- ipn.Notify{BrowseToURL: &u}
 	return nil
+}
+
+// Logout is the node telling its control server to expire this machine's key.
+// It is logged when it starts and again when it returns, so a test can order
+// it against the node's Close.
+func (f *fakeNode) Logout(ctx context.Context) error {
+	f.tn.event(fmt.Sprintf("logout#%d", f.gen))
+	f.tn.mu.Lock()
+	err, hangs := f.tn.logoutErr, f.tn.logoutHangs
+	f.tn.mu.Unlock()
+	if hangs {
+		<-ctx.Done()
+		err = ctx.Err()
+	}
+	f.tn.event(fmt.Sprintf("logout-done#%d", f.gen))
+	return err
 }
 
 func (f *fakeNode) Close() error {
@@ -1587,4 +1611,1042 @@ func TestPublicListenerThroughTheNode(t *testing.T) {
 	if !freed {
 		t.Error("after one of sender A's connections closed, no new connection from A was ever served: its slot was never freed")
 	}
+}
+
+// plantKey puts a file standing for the node key into the state folder and
+// returns its path.
+func (tn *fakeTailnet) plantKey() string {
+	tn.t.Helper()
+	p := filepath.Join(tn.dir, "tailscaled.state")
+	if err := os.WriteFile(p, []byte("node-key"), 0o600); err != nil {
+		tn.t.Fatalf("plant the key: %v", err)
+	}
+	return p
+}
+
+func (tn *fakeTailnet) failLogout(err error) {
+	tn.mu.Lock()
+	tn.logoutErr = err
+	tn.mu.Unlock()
+}
+
+// requireKeptState fails unless the state folder and the key file in it are
+// as plantKey left them.
+func requireKeptState(t *testing.T, tn *fakeTailnet, key, when string) {
+	t.Helper()
+	if got, err := os.ReadFile(key); err != nil || string(got) != "node-key" {
+		t.Errorf("%s: the key file is %q, %v; want it kept unchanged", when, got, err)
+	}
+	if fi, err := os.Stat(tn.dir); err != nil || !fi.IsDir() {
+		t.Errorf("%s: the state folder is gone: %v", when, err)
+	}
+}
+
+// TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder protects the
+// person's Tailscale account from a machine that still holds a working key:
+// leaving the built-in route tells the control server first, and only then
+// lets the node stop, and once that has succeeded the folder that held the
+// node key is gone. A node that stopped before logging out, never logged out,
+// or left the folder behind fails it.
+func TestLeaveTailnetLogsOutBeforeTheNodeStopsAndRemovesTheFolder(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	key := tn.plantKey()
+
+	res, err := n.LeaveTailnet(context.Background())
+	if err != nil || res != LeftAndRemoved {
+		t.Fatalf("LeaveTailnet = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	evs := tn.log()
+	if tn.count("logout#") != 1 {
+		t.Fatalf("the node logged out %d times, want once: %v", tn.count("logout#"), evs)
+	}
+	done := slices.Index(evs, "logout-done#1")
+	if done < 0 {
+		t.Fatalf("logout never returned before LeaveTailnet did: %v", evs)
+	}
+	if cl := slices.Index(evs, "close#1"); cl >= 0 && cl < done {
+		t.Errorf("the node was closed before the logout finished: %v", evs)
+	}
+	if _, err := os.Stat(key); !os.IsNotExist(err) {
+		t.Errorf("the key file is still there after a successful logout: %v", err)
+	}
+	if _, err := os.Stat(tn.dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after a successful logout: %v", err)
+	}
+	if tn.startCount() != 1 {
+		t.Errorf("leaving started a node again: %v", evs)
+	}
+}
+
+// TestLeaveTailnetThatFailsKeepsTheFolderAndTheKey protects the only way to
+// log the machine out later: a logout that did not reach the control server
+// (the Mac is offline) must leave the key where it is, and say so, so the
+// next launch can try again. A folder deleted anyway, or a failure reported as
+// a success, fails it.
+func TestLeaveTailnetThatFailsKeepsTheFolderAndTheKey(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	key := tn.plantKey()
+	tn.failLogout(errors.New("control server unreachable"))
+
+	res, _ := n.LeaveTailnet(context.Background())
+	if res != KeptForRetry {
+		t.Errorf("a failed logout answered %v, want KeptForRetry", res)
+	}
+	if tn.count("logout#") != 1 {
+		t.Errorf("the node tried to log out %d times, want once: %v", tn.count("logout#"), tn.log())
+	}
+	requireKeptState(t, tn, key, "after a failed logout")
+}
+
+// TestLeaveTailnetThatNeverAnswersKeepsTheFolderAndTheKey is the offline Mac
+// whose logout hangs: when the call ends without an answer (here, the caller's
+// context ends once the node is waiting on the control server) the result is
+// the same as a failure, and nothing is deleted.
+func TestLeaveTailnetThatNeverAnswersKeepsTheFolderAndTheKey(t *testing.T) {
+	tn := newFakeTailnet(t)
+	n := tn.runReady()
+	key := tn.plantKey()
+	tn.mu.Lock()
+	tn.logoutHangs = true
+	tn.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan LeaveResult, 1)
+	go func() {
+		res, _ := n.LeaveTailnet(ctx)
+		got <- res
+	}()
+	tn.waitForEvent("logout#")
+	cancel()
+	select {
+	case res := <-got:
+		if res != KeptForRetry {
+			t.Errorf("a logout that never answered gave %v, want KeptForRetry", res)
+		}
+	case <-time.After(hangCeiling):
+		t.Fatalf("LeaveTailnet never returned after its context ended; events %v", tn.log())
+	}
+	requireKeptState(t, tn, key, "after a logout that never answered")
+}
+
+// TestFailedLeaveIsRetriedOnTheNextLaunch protects the retry: after a failed
+// logout and a quit, a new node started on the kept folder can leave, and then
+// the folder is gone. The first node's end never logs out on its own.
+func TestFailedLeaveIsRetriedOnTheNextLaunch(t *testing.T) {
+	first := newFakeTailnet(t)
+	n := first.runReady()
+	key := first.plantKey()
+	first.failLogout(errors.New("control server unreachable"))
+	if res, _ := n.LeaveTailnet(context.Background()); res != KeptForRetry {
+		t.Fatalf("the first leave answered %v, so the check cannot tell", res)
+	}
+	n.Close()
+	requireKeptState(t, first, key, "after the quit that followed the failed leave")
+	if first.count("logout#") != 1 {
+		t.Errorf("the quit logged out again: %v", first.log())
+	}
+
+	second := newFakeTailnet(t)
+	second.dir = first.dir
+	n2 := second.runReady()
+	res, err := n2.LeaveTailnet(context.Background())
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("the retry = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if _, err := os.Stat(first.dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after the retry succeeded: %v", err)
+	}
+}
+
+// TestNoRestartPathLogsOut protects the node key and the public address from
+// every restart the engine makes: a restart, the repair ladder's restarts and
+// the end of the node all keep the folder and its key, hand the same folder to
+// the next server, and never log out. Only LeaveTailnet logs out.
+func TestNoRestartPathLogsOut(t *testing.T) {
+	t.Run("Restart", func(t *testing.T) {
+		tn := newFakeTailnet(t)
+		n := tn.runReady()
+		key := tn.plantKey()
+		if err := n.Restart(context.Background()); err != nil {
+			t.Fatalf("Restart: %v", err)
+		}
+		tn.settle(time.Hour)
+		if tn.startCount() != 2 {
+			t.Fatalf("starts = %d, want 2, so the check cannot tell: %v", tn.startCount(), tn.log())
+		}
+		if tn.count("logout") != 0 {
+			t.Errorf("a restart logged out: %v", tn.log())
+		}
+		requireKeptState(t, tn, key, "after a restart")
+		tn.requireOneFolder()
+	})
+	t.Run("repair ladder", func(t *testing.T) {
+		tn := newFakeTailnet(t)
+		tn.runReady()
+		key := tn.plantKey()
+		for i := 0; i < 2; i++ {
+			tn.clock.advance(5 * time.Minute)
+			tn.settle(time.Hour)
+		}
+		tn.setResult(ProbeRouteDropped)
+		for i := 0; i < 40 && tn.startCount() < 3; i++ {
+			tn.clock.advance(time.Minute)
+			tn.settle(time.Hour)
+		}
+		if tn.startCount() < 2 {
+			t.Fatalf("the ladder never restarted the node, so the check cannot tell: %v", tn.log())
+		}
+		if tn.count("logout") != 0 {
+			t.Errorf("a repair restart logged out: %v", tn.log())
+		}
+		requireKeptState(t, tn, key, "after the repair restarts")
+		tn.requireOneFolder()
+	})
+	t.Run("Close", func(t *testing.T) {
+		tn := newFakeTailnet(t)
+		n := tn.runReady()
+		key := tn.plantKey()
+		n.Close()
+		if tn.count("close#") == 0 {
+			t.Fatalf("Close never closed the node, so the check cannot tell: %v", tn.log())
+		}
+		if tn.count("logout") != 0 {
+			t.Errorf("Close logged out: %v", tn.log())
+		}
+		requireKeptState(t, tn, key, "after Close")
+	})
+}
+
+// requireOneFolder fails unless every start of the node was on the one state
+// folder of the test.
+func (tn *fakeTailnet) requireOneFolder() {
+	tn.t.Helper()
+	tn.mu.Lock()
+	starts := slices.Clone(tn.starts)
+	tn.mu.Unlock()
+	for _, s := range starts {
+		if s.dir != tn.dir {
+			tn.t.Errorf("a server was started on %s, want the folder %s every time", s.dir, tn.dir)
+		}
+	}
+}
+
+// TestPrepareStateDirExcludesTheFolderFromBackups protects the node key from
+// ending up in a Time Machine backup: whenever the folder is created, the
+// extended attribute that excludes it is set, and a folder created again after
+// a leave gets it again. Both sides of the app create this folder, so the
+// engine's own creation is checked here.
+func TestPrepareStateDirExcludesTheFolderFromBackups(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("backup exclusion by extended attribute is a macOS feature")
+	}
+	const attr = "com.apple.metadata:com_apple_backup_excludeItem"
+	dir := filepath.Join(t.TempDir(), "ts")
+	excluded := func(when string) {
+		t.Helper()
+		sz, err := unix.Getxattr(dir, attr, nil)
+		if err != nil || sz <= 0 {
+			t.Errorf("%s: the backup exclusion attribute is not set on the folder (%d, %v)", when, sz, err)
+		}
+	}
+	if err := prepareStateDir(dir); err != nil {
+		t.Fatalf("prepareStateDir: %v", err)
+	}
+	excluded("a fresh folder")
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("state folder %v, %v; want mode 0700", fi, err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStateDir(dir); err != nil {
+		t.Fatalf("prepareStateDir again: %v", err)
+	}
+	excluded("a folder created again after being removed")
+}
+
+// leaveRig is Tailscale's own fake control server (testcontrol) with a local
+// DERP relay, a hook that records every register request the way a logout
+// shows itself to a control server (a register request for a node key whose
+// expiry is already past), and a switch that takes the control server away
+// and brings it back on the same address. Nothing leaves loopback.
+type leaveRig struct {
+	t    *testing.T
+	ctrl *testcontrol.Server
+	addr string
+
+	mu       sync.Mutex
+	hs       *httptest.Server
+	requests int              // every machine request the control server saw
+	logins   []key.NodePublic // node keys registered without an expiry
+	logouts  []key.NodePublic // node keys registered with an expiry already past
+	contacts int              // register requests of any kind
+
+	refuseLogouts   bool             // logout register requests are answered with an error
+	holding         bool             // the next sign-in register request is held at the server
+	held            chan struct{}    // receives once a sign-in register request is being held
+	release         chan struct{}    // closed to let a held sign-in register request be answered
+	unanswered      bool             // a held sign-in request has not been answered yet
+	logoutsInFlight []key.NodePublic // logouts that arrived while a sign-in request was unanswered
+}
+
+func newLeaveRig(t *testing.T) *leaveRig {
+	t.Helper()
+	netns.SetEnabled(false)
+	t.Cleanup(func() { netns.SetEnabled(true) })
+	r := &leaveRig{t: t}
+	r.ctrl = &testcontrol.Server{
+		DNSConfig:      &tailcfg.DNSConfig{Proxied: true},
+		MagicDNSDomain: "tail-scale.ts.net",
+		RequireAuth:    false,
+		MaybeRejectRequest: func(req *http.Request) (int, string, string) {
+			if r.observe(req) && r.rejectsLogouts() {
+				return http.StatusInternalServerError, "logout refused", ""
+			}
+			return 0, "", ""
+		},
+	}
+	r.up()
+	t.Cleanup(r.down)
+	return r
+}
+
+func (r *leaveRig) observe(req *http.Request) (isLogout bool) {
+	r.mu.Lock()
+	r.requests++
+	r.mu.Unlock()
+	if req.URL.Path != "/machine/register" || req.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(req.Body)
+	req.Body = io.NopCloser(strings.NewReader(string(body)))
+	if err != nil {
+		return false
+	}
+	var rr tailcfg.RegisterRequest
+	if json.Unmarshal(body, &rr) != nil {
+		return
+	}
+	r.mu.Lock()
+	r.contacts++
+	if !rr.Expiry.IsZero() && rr.Expiry.Before(time.Now()) {
+		r.logouts = append(r.logouts, rr.NodeKey)
+		if r.unanswered {
+			r.logoutsInFlight = append(r.logoutsInFlight, rr.NodeKey)
+		}
+		r.mu.Unlock()
+		return true
+	}
+	if !slices.Contains(r.logins, rr.NodeKey) {
+		r.logins = append(r.logins, rr.NodeKey)
+	}
+	if !r.holding {
+		r.mu.Unlock()
+		return false
+	}
+	// Hold this sign-in request: the control server does not answer it until
+	// the test releases it (or the request's connection ends).
+	r.holding = false
+	r.unanswered = true
+	release, held := r.release, r.held
+	r.mu.Unlock()
+	held <- struct{}{}
+	select {
+	case <-release:
+	case <-req.Context().Done():
+	}
+	r.mu.Lock()
+	r.unanswered = false
+	r.mu.Unlock()
+	return false
+}
+
+// rejectsLogouts reports whether the control server is refusing logouts.
+func (r *leaveRig) rejectsLogouts() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.refuseLogouts
+}
+
+// refuseLogoutsFromNowOn makes the control server answer every logout with an
+// error, as a server that cannot be reached for the logout would.
+func (r *leaveRig) refuseLogoutsFromNowOn(refuse bool) {
+	r.mu.Lock()
+	r.refuseLogouts = refuse
+	r.mu.Unlock()
+}
+
+// holdSignIn makes the control server hold the next sign-in register request
+// it receives (a register request that is not a logout) unanswered, so a
+// sign-in is in flight until releaseSignIn. The hold is always released when
+// the test ends.
+func (r *leaveRig) holdSignIn() {
+	r.t.Helper()
+	r.mu.Lock()
+	r.holding = true
+	r.held = make(chan struct{}, 1)
+	r.release = make(chan struct{})
+	r.logoutsInFlight = nil
+	r.mu.Unlock()
+	r.t.Cleanup(r.releaseSignIn)
+}
+
+// releaseSignIn lets the held sign-in request be answered. It is safe to call
+// more than once and when nothing is held.
+func (r *leaveRig) releaseSignIn() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.release != nil {
+		select {
+		case <-r.release:
+		default:
+			close(r.release)
+		}
+	}
+	r.holding = false
+}
+
+// waitHeld returns once a sign-in request is being held at the server.
+func (r *leaveRig) waitHeld() {
+	r.t.Helper()
+	r.mu.Lock()
+	held := r.held
+	r.mu.Unlock()
+	select {
+	case <-held:
+	case <-time.After(hangCeiling):
+		r.t.Fatalf("the node never sent a sign-in request to the control server")
+	}
+}
+
+// loggedOutWhileSignInUnanswered lists the logouts that reached the control
+// server while a held sign-in request had not been answered.
+func (r *leaveRig) loggedOutWhileSignInUnanswered() []key.NodePublic {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.logoutsInFlight)
+}
+
+// up starts serving the control server, on the address it first had when it
+// has been up before.
+func (r *leaveRig) up() {
+	r.t.Helper()
+	listen := "127.0.0.1:0"
+	if r.addr != "" {
+		listen = r.addr
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		r.t.Fatalf("control server cannot listen on %s: %v", listen, err)
+	}
+	hs := httptest.NewUnstartedServer(r.ctrl)
+	hs.Listener.Close()
+	hs.Listener = ln
+	hs.Start()
+	r.ctrl.HTTPTestServer = hs
+	r.mu.Lock()
+	r.hs = hs
+	r.addr = ln.Addr().String()
+	r.mu.Unlock()
+}
+
+// down takes the control server away: connections are refused until up.
+func (r *leaveRig) down() {
+	r.mu.Lock()
+	hs := r.hs
+	r.hs = nil
+	r.mu.Unlock()
+	if hs != nil {
+		hs.CloseClientConnections()
+		hs.Close()
+	}
+}
+
+func (r *leaveRig) url() string { return "http://" + r.addr }
+
+func (r *leaveRig) loggedOut() []key.NodePublic {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.logouts)
+}
+
+func (r *leaveRig) registered() []key.NodePublic {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.logins)
+}
+
+func (r *leaveRig) registerRequests() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.contacts
+}
+
+// loginNode brings a real tsnet node up, signed in to the fake control server
+// on dir, then closes it: what is left is the folder a built-in route leaves
+// behind. It returns the node key the control server registered.
+func (r *leaveRig) loginNode(dir string) key.NodePublic {
+	r.t.Helper()
+	before := len(r.registered())
+	s := &tsnet.Server{Dir: dir, Hostname: "relay-test", ControlURL: r.url(), Logf: logger.Discard, UserLogf: logger.Discard}
+	ctx, cancel := context.WithTimeout(context.Background(), hangCeiling)
+	defer cancel()
+	if err := waitSignedIn(ctx, s); err != nil {
+		_ = s.Close()
+		r.t.Fatalf("the node never signed in to the fake control server: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		r.t.Fatalf("closing the signed-in node: %v", err)
+	}
+	logins := r.registered()
+	if len(logins) != before+1 {
+		r.t.Fatalf("the control server registered %d node keys for the sign-in, want 1", len(logins)-before)
+	}
+	return logins[len(logins)-1]
+}
+
+// waitSignedIn returns once the node has been accepted by the control server
+// and has its first network map, the point from which it holds a working node
+// key. The fake control server has no relay, so the node never reaches
+// Running; Starting is as far as it goes.
+func waitSignedIn(ctx context.Context, s *tsnet.Server) error {
+	lc, err := s.LocalClient()
+	if err != nil {
+		return err
+	}
+	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	for {
+		n, err := w.Next()
+		if err != nil {
+			return err
+		}
+		if st := n.State; st != nil && (*st == ipn.Starting || *st == ipn.Running) {
+			return nil
+		}
+	}
+}
+
+// leaveWithin runs LeaveKeptFolder under a context that ends after limit and
+// fails the test if it has not returned long after that, the hang ceiling.
+func leaveWithin(t *testing.T, limit time.Duration, dir string) (LeaveResult, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	type answer struct {
+		res LeaveResult
+		err error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		res, err := LeaveKeptFolder(ctx, dir, "relay-test")
+		got <- answer{res, err}
+	}()
+	select {
+	case a := <-got:
+		return a.res, a.err
+	case <-time.After(hangCeiling):
+		t.Fatalf("LeaveKeptFolder did not return, and its context ended after %v", limit)
+		return KeptForRetry, nil
+	}
+}
+
+// requireKeyKept fails unless dir and a non-empty node state file are still there.
+func requireKeyKept(t *testing.T, dir, when string) {
+	t.Helper()
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("%s: the state folder is gone: %v", when, err)
+	}
+	state, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil || len(state) == 0 {
+		t.Errorf("%s: the node's state file (with its key) is missing or empty: %v", when, err)
+	}
+}
+
+// TestLeaveKeptFolderLogsOutAndRemovesTheFolder protects the person's
+// Tailscale account when the engine cannot run (no LibreLinkUp sign-in) but a
+// failed leave left a folder with a working node key: leaving it starts a node
+// on that folder only to log it out, the control server is told for that very
+// key, and the folder is gone. A folder removed without telling the control
+// server, a logout for another key, or a folder left behind fails it.
+func TestLeaveKeptFolderLogsOutAndRemovesTheFolder(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := r.loginNode(dir)
+	requireKeyKept(t, dir, "after the sign-in")
+
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Fatalf("LeaveKeptFolder = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after the logout answered: %v", err)
+	}
+	if out := r.loggedOut(); !slices.Equal(out, []key.NodePublic{nodeKey}) {
+		t.Errorf("the control server saw logouts for %v, want exactly one, for the node key it registered (%v)", out, nodeKey)
+	}
+}
+
+// TestLeaveKeptFolderThatCannotReachControlKeepsTheFolderAndKey protects the
+// only way to log the machine out later: a logout that cannot reach Tailscale
+// (the Mac is offline, or the control server takes the connection and never
+// answers) ends by the caller's deadline with KeptForRetry, the folder and key
+// untouched. A folder deleted anyway, a success reported, or a call that
+// outlives its context fails it.
+func TestLeaveKeptFolderThatCannotReachControlKeepsTheFolderAndKey(t *testing.T) {
+	t.Run("connection refused", func(t *testing.T) {
+		r := newLeaveRig(t)
+		t.Setenv("TS_CONTROL_URL", r.url())
+		dir := filepath.Join(t.TempDir(), "ts")
+		r.loginNode(dir)
+		before, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+		if err != nil {
+			t.Fatalf("the signed-in folder has no state file: %v", err)
+		}
+		r.down()
+
+		res, _ := leaveWithin(t, 20*time.Second, dir)
+		if res != KeptForRetry {
+			t.Errorf("a logout that could not reach control answered %v, want KeptForRetry", res)
+		}
+		requireKeyKept(t, dir, "after a logout that could not connect")
+		if got, _ := os.ReadFile(filepath.Join(dir, "tailscaled.state")); len(got) == 0 || len(before) == 0 {
+			t.Errorf("the node state file was emptied")
+		}
+	})
+	t.Run("connection taken and never answered", func(t *testing.T) {
+		r := newLeaveRig(t)
+		t.Setenv("TS_CONTROL_URL", r.url())
+		dir := filepath.Join(t.TempDir(), "ts")
+		r.loginNode(dir)
+		r.down()
+
+		// A listener that accepts and says nothing, in the control server's place.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var held []net.Conn
+		var heldMu sync.Mutex
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				heldMu.Lock()
+				held = append(held, c)
+				heldMu.Unlock()
+			}
+		}()
+		t.Cleanup(func() {
+			ln.Close()
+			heldMu.Lock()
+			for _, c := range held {
+				c.Close()
+			}
+			heldMu.Unlock()
+		})
+		t.Setenv("TS_CONTROL_URL", "http://"+ln.Addr().String())
+
+		res, _ := leaveWithin(t, 5*time.Second, dir)
+		if res != KeptForRetry {
+			t.Errorf("a logout that never answered gave %v, want KeptForRetry", res)
+		}
+		requireKeyKept(t, dir, "after a logout that never answered")
+	})
+}
+
+// TestLeaveKeptFolderRetriesOnTheSameKeyOnceControlIsBack protects the retry:
+// after a failed logout the same folder still holds the same node key, so the
+// next attempt, with the control server reachable again, logs that very key
+// out and removes the folder.
+func TestLeaveKeptFolderRetriesOnTheSameKeyOnceControlIsBack(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := r.loginNode(dir)
+	r.down()
+
+	if res, _ := leaveWithin(t, 20*time.Second, dir); res != KeptForRetry {
+		t.Fatalf("the first leave answered %v with control away, so the retry cannot be told", res)
+	}
+	requireKeyKept(t, dir, "after the failed leave")
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Fatalf("a logout reached the control server while it was away: %v", out)
+	}
+
+	r.up()
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Fatalf("the retry = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the state folder is still there after the retry succeeded: %v", err)
+	}
+	if out := r.loggedOut(); !slices.Equal(out, []key.NodePublic{nodeKey}) {
+		t.Errorf("the retry logged out %v, want the node key the folder held from the start (%v)", out, nodeKey)
+	}
+}
+
+// TestLeaveKeptFolderOnAFolderThatNeverSignedInStartsNoSignIn protects the
+// person from a sign-in page they never asked for: leaving a folder whose node
+// is not logged in (no node key in its saved state) must not ask the control
+// server for a sign-in address, must not hang, and answers LeftAndRemoved with
+// the folder gone, since there is no key to log out and a kept folder would
+// leave the retry pending forever. The control server here requires a
+// sign-in, so any start of one shows as a register request.
+func TestLeaveKeptFolderOnAFolderThatNeverSignedInStartsNoSignIn(t *testing.T) {
+	r := newLeaveRig(t)
+	r.ctrl.RequireAuth = true
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("LeaveKeptFolder = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("the state folder is still there: %v", statErr)
+	}
+	if n := r.registerRequests(); n != 0 {
+		t.Errorf("the control server saw %d register requests for a node that was never signed in, want none (no sign-in started)", n)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Errorf("logouts recorded for a node that never signed in: %v", out)
+	}
+}
+
+// TestLeaveKeptFolderLogsOutOnlyAfterTheSignInIsAnswered protects the
+// control server from a logout that runs alongside the node's own sign-in:
+// while the sign-in request is held unanswered no logout may reach the
+// server, and once the server answers it the logout goes out and the folder
+// is removed. A logout that arrives while the sign-in request is still
+// unanswered fails it.
+func TestLeaveKeptFolderLogsOutOnlyAfterTheSignInIsAnswered(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := r.loginNode(dir)
+	r.holdSignIn()
+
+	// While the sign-in request is held the leave ends by its own deadline.
+	// Nothing observable marks when a logout would have been sent, so the
+	// deadline bounds the window in which one must not arrive.
+	leaveWithin(t, 5*time.Second, dir)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Fatalf("a logout was sent before the sign-in was answered: %v", out)
+	}
+
+	// Once the server answers the sign-in, the logout goes out.
+	r.releaseSignIn()
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("LeaveKeptFolder = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if out := r.loggedOut(); !slices.Equal(out, []key.NodePublic{nodeKey}) {
+		t.Errorf("the control server saw logouts for %v, want exactly one, for %v", out, nodeKey)
+	}
+}
+
+// TestLeaveKeptFolderWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder
+// protects the key when the sign-in does not settle before the leave's
+// deadline: no logout is sent, the result is KeptForRetry and the folder with
+// its node key stays for the next attempt. A logout sent anyway, a removed
+// folder or LeftAndRemoved fails it.
+func TestLeaveKeptFolderWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	r.loginNode(dir)
+	r.holdSignIn()
+
+	res, _ := leaveWithin(t, 5*time.Second, dir)
+	r.waitHeld()
+	if res != KeptForRetry {
+		t.Errorf("a leave whose sign-in never settled answered %v, want KeptForRetry", res)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Errorf("a logout was sent while the sign-in was unanswered: %v", out)
+	}
+	requireKeyKept(t, dir, "after a leave whose sign-in never settled")
+}
+
+// startNodeOnKeptFolder starts the engine's node on dir against the fake
+// control server and returns it once its server is up.
+func startNodeOnKeptFolder(t *testing.T, r *leaveRig, dir string) *Node {
+	t.Helper()
+	n := Start(Options{
+		StateDir:   dir,
+		Hostname:   "relay-test",
+		Handler:    http.NotFoundHandler(),
+		NewServer:  func(h http.Handler) *http.Server { return &http.Server{Handler: h} },
+		controlURL: r.url(),
+		Logf:       func(string, ...any) {},
+	})
+	t.Cleanup(n.Close)
+	for {
+		n.mu.Lock()
+		up, next := n.api != nil, n.nextUp
+		n.mu.Unlock()
+		if up {
+			return n
+		}
+		select {
+		case <-next:
+		case <-n.done:
+			t.Fatalf("the node ended before its server started")
+		case <-time.After(hangCeiling):
+			t.Fatalf("the node's server never started")
+		}
+	}
+}
+
+// TestNodeLeaveTailnetWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder is
+// the engine's leave, called right after its node starts, when the sign-in
+// does not settle before the caller's context ends: no logout reaches the
+// control server while the sign-in request is unanswered, the result is
+// KeptForRetry, and the folder and key are kept.
+func TestNodeLeaveTailnetWhoseSignInNeverSettlesSendsNoLogoutAndKeepsTheFolder(t *testing.T) {
+	r := newLeaveRig(t)
+	dir := filepath.Join(t.TempDir(), "ts")
+	r.loginNode(dir)
+	r.holdSignIn()
+	n := startNodeOnKeptFolder(t, r, dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, _ := n.LeaveTailnet(ctx)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if res != KeptForRetry {
+		t.Errorf("a leave whose sign-in never settled answered %v, want KeptForRetry", res)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Errorf("a logout was sent while the sign-in was unanswered: %v", out)
+	}
+	requireKeyKept(t, dir, "after a leave whose sign-in never settled")
+}
+
+// grantNetmapCaching makes the fake control server grant every node the
+// capability to cache its network map in its state folder, and lets the
+// test's own setup node write that cache: an earlier node started by the
+// product switches the cache off for the whole process, and the setup must
+// leave the cache the product's leave then runs on top of.
+func (r *leaveRig) grantNetmapCaching() {
+	prev := os.Getenv("TS_USE_CACHED_NETMAP")
+	envknob.Setenv("TS_USE_CACHED_NETMAP", "true")
+	r.t.Cleanup(func() { envknob.Setenv("TS_USE_CACHED_NETMAP", prev) })
+	caps := tailcfg.NodeCapMap{
+		tailcfg.NodeAttrCacheNetworkMaps: []tailcfg.RawMessage{},
+	}
+	r.ctrl.DefaultNodeCapabilities = &caps
+}
+
+// requireNetmapCacheIn fails the setup unless the node left a cached network
+// map somewhere in dir.
+func requireNetmapCacheIn(t *testing.T, dir string) {
+	t.Helper()
+	found := false
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.Contains(p, "netmap-cache") {
+			found = true
+		}
+		return nil
+	})
+	if !found {
+		t.Fatalf("the signed-in folder holds no cached network map, so the check cannot tell")
+	}
+}
+
+// TestLeaveKeptFolderWithACachedNetworkMapLogsOutOnlyAfterTheSignInIsAnswered
+// protects the control server from a logout sent because a cached network map
+// made the node look up before its sign-in was answered: the folder holds a
+// cached map, the new sign-in request is held, and no logout may arrive while
+// it is held. After the server answers, a fresh leave logs out and removes
+// the folder.
+func TestLeaveKeptFolderWithACachedNetworkMapLogsOutOnlyAfterTheSignInIsAnswered(t *testing.T) {
+	r := newLeaveRig(t)
+	r.grantNetmapCaching()
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := r.loginNode(dir)
+	requireNetmapCacheIn(t, dir)
+	r.holdSignIn()
+
+	// Nothing observable marks when a logout would have been sent, so the
+	// deadline bounds the window in which one must not arrive.
+	leaveWithin(t, 5*time.Second, dir)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Fatalf("a logout was sent before the sign-in was answered: %v", out)
+	}
+
+	r.releaseSignIn()
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("LeaveKeptFolder = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if out := r.loggedOut(); !slices.Equal(out, []key.NodePublic{nodeKey}) {
+		t.Errorf("the control server saw logouts for %v, want exactly one, for %v", out, nodeKey)
+	}
+}
+
+// TestNodeLeaveTailnetWithACachedNetworkMapSendsNoLogoutBeforeTheSignInIsAnswered
+// is the engine's leave on a folder holding a cached network map: with the
+// node's sign-in request held through the call's deadline, no logout reaches
+// the control server, the result is KeptForRetry, and the folder and key stay.
+func TestNodeLeaveTailnetWithACachedNetworkMapSendsNoLogoutBeforeTheSignInIsAnswered(t *testing.T) {
+	r := newLeaveRig(t)
+	r.grantNetmapCaching()
+	dir := filepath.Join(t.TempDir(), "ts")
+	r.loginNode(dir)
+	requireNetmapCacheIn(t, dir)
+	r.holdSignIn()
+	n := startNodeOnKeptFolder(t, r, dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, _ := n.LeaveTailnet(ctx)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if res != KeptForRetry {
+		t.Errorf("a leave whose sign-in never settled answered %v, want KeptForRetry", res)
+	}
+	if out := r.loggedOut(); len(out) != 0 {
+		t.Errorf("a logout was sent while the sign-in was unanswered: %v", out)
+	}
+	requireKeyKept(t, dir, "after a leave whose sign-in never settled")
+}
+
+// TestLeaveKeptFolderSavedAsLoggedOutLogsOutOnlyAfterTheSignInIsAnswered
+// protects the control server from a logout sent because a folder saved as
+// logged out (by a logout that could not reach control) reports that it needs
+// a login at once, with no answer from the server: the new sign-in request is
+// held, and no logout may arrive while it is held. After the server answers,
+// a fresh leave logs out and removes the folder.
+func TestLeaveKeptFolderSavedAsLoggedOutLogsOutOnlyAfterTheSignInIsAnswered(t *testing.T) {
+	r := newLeaveRig(t)
+	t.Setenv("TS_CONTROL_URL", r.url())
+	dir := filepath.Join(t.TempDir(), "ts")
+	nodeKey := r.loginNode(dir)
+	// A logout that fails at the control server leaves the folder saved as
+	// logged out with its key kept. A node that has just signed in can still
+	// receive a map update after that logout starts, which marks it logged
+	// in again, so a failed leave does not reliably produce this folder. The
+	// folder is saved that way directly instead.
+	saveStateAsLoggedOut(t, dir)
+	requireKeyKept(t, dir, "after saving the folder as logged out")
+	if !stateSavedAsLoggedOut(t, dir) {
+		t.Fatalf("the folder's saved state is not logged out, so the check cannot tell")
+	}
+	refused := len(r.loggedOut())
+	r.holdSignIn()
+
+	// Nothing observable marks when a logout would have been sent, so the
+	// deadline bounds the window in which one must not arrive.
+	leaveWithin(t, 5*time.Second, dir)
+	r.waitHeld()
+	if out := r.loggedOutWhileSignInUnanswered(); len(out) != 0 {
+		t.Errorf("a logout reached the control server while the node's sign-in request was unanswered: %v", out)
+	}
+	if out := r.loggedOut(); len(out) != refused {
+		t.Fatalf("a logout was sent before the sign-in was answered: %v", out)
+	}
+
+	r.releaseSignIn()
+	res, err := leaveWithin(t, hangCeiling, dir)
+	if err != nil || res != LeftAndRemoved {
+		t.Errorf("LeaveKeptFolder = %v, %v; want LeftAndRemoved and no error", res, err)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("the state folder is still there after the logout answered: %v", statErr)
+	}
+	if out := r.loggedOut(); len(out) != refused+1 || out[len(out)-1] != nodeKey {
+		t.Errorf("the control server saw logouts for %v, want one more after the refused one, for %v", out, nodeKey)
+	}
+}
+
+// saveStateAsLoggedOut marks every saved profile in dir that holds a node key
+// as logged out and not wanting to run, as a logout that failed at the
+// control server leaves it, and keeps the key.
+func saveStateAsLoggedOut(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "tailscaled.state")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the node state: %v", err)
+	}
+	var entries map[string][]byte
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("parsing the node state: %v", err)
+	}
+	changed := false
+	for k, v := range entries {
+		var p ipn.Prefs
+		if json.Unmarshal(v, &p) != nil || p.Persist == nil || p.Persist.PrivateNodeKey.IsZero() {
+			continue
+		}
+		p.LoggedOut, p.WantRunning = true, false
+		if entries[k], err = json.Marshal(&p); err != nil {
+			t.Fatalf("encoding the saved profile: %v", err)
+		}
+		changed = true
+	}
+	if !changed {
+		t.Fatalf("the folder's saved state holds no profile with a node key, so the check cannot tell")
+	}
+	out, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encoding the node state: %v", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		t.Fatalf("writing the node state: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("replacing the node state: %v", err)
+	}
+}
+
+// stateSavedAsLoggedOut reports whether the node state in dir holds a saved
+// profile marked logged out.
+func stateSavedAsLoggedOut(t *testing.T, dir string) bool {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil {
+		t.Fatalf("reading the node state: %v", err)
+	}
+	var entries map[string][]byte
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("parsing the node state: %v", err)
+	}
+	for _, v := range entries {
+		var p ipn.Prefs
+		if json.Unmarshal(v, &p) == nil && p.LoggedOut {
+			return true
+		}
+	}
+	return false
 }

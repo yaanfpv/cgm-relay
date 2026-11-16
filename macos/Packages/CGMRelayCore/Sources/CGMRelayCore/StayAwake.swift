@@ -67,6 +67,9 @@ public enum StayAwakeFailure: Error, Equatable, Sendable {
     case permissionNotInstalled
     /// The idle sleep assertion could not be taken.
     case assertionNotHeld
+    /// The helper that lets the Mac sleep again after CGM Relay ends could
+    /// not be registered.
+    case helperNotRegistered
 
     public var message: String {
         switch self {
@@ -76,6 +79,8 @@ public enum StayAwakeFailure: Error, Equatable, Sendable {
             "CGM Relay doesn't have permission to change the sleep setting, so the Mac may sleep with its lid closed. Turn Keep this Mac awake off and on again to allow it."
         case .assertionNotHeld:
             "The Mac couldn't be kept awake right now. CGM Relay tries again whenever something changes."
+        case .helperNotRegistered:
+            "CGM Relay couldn't set up the helper that lets this Mac sleep again if CGM Relay ends unexpectedly. Turn Keep this Mac awake off and on again to retry."
         }
     }
 }
@@ -90,6 +95,11 @@ public enum StayAwakeFailure: Error, Equatable, Sendable {
 /// between mains and battery power, never on a power notification that
 /// leaves that unchanged, so a command that keeps failing does not run on
 /// every battery level step.
+///
+/// It also registers the sleep reset helper once, when the choice is on and
+/// the system has none, and leaves it registered ever after. The sleep
+/// permission (rules) is never touched: turning keep-awake off or quitting
+/// removes nothing.
 ///
 /// It is told what happened (the relay started or stopped, the power source
 /// changed, the person changed the choice, the app launched or is quitting)
@@ -107,6 +117,7 @@ public final class StayAwakeController: @unchecked Sendable {
     private let power: any PowerSourceReading
     private let assertion: any IdleSleepAsserting
     private let sleepSetting: any SleepSettingWriting
+    private let helper: any SleepHelperRegistering
 
     private var holding = false
     /// appliedDisableSleep is the last value written successfully, nil
@@ -126,12 +137,15 @@ public final class StayAwakeController: @unchecked Sendable {
         choice: StayAwakeChoice?,
         power: any PowerSourceReading,
         assertion: any IdleSleepAsserting,
-        sleepSetting: any SleepSettingWriting
+        sleepSetting: any SleepSettingWriting,
+        rules: any SleepRuleManaging,
+        helper: any SleepHelperRegistering
     ) {
         self.choice = choice
         self.power = power
         self.assertion = assertion
         self.sleepSetting = sleepSetting
+        self.helper = helper
         snapshot = power.snapshot()
     }
 
@@ -162,6 +176,7 @@ public final class StayAwakeController: @unchecked Sendable {
     public func choiceChanged(_ choice: StayAwakeChoice?) {
         lock.lock(); defer { lock.unlock() }
         self.choice = choice
+        registerHelperIfNeeded()
         apply(refreshingPower: true)
     }
 
@@ -170,6 +185,7 @@ public final class StayAwakeController: @unchecked Sendable {
     /// otherwise it makes sure the setting is off.
     public func launched() {
         lock.lock(); defer { lock.unlock() }
+        registerHelperIfNeeded()
         apply(refreshingPower: true)
     }
 
@@ -219,6 +235,23 @@ public final class StayAwakeController: @unchecked Sendable {
         guard knownDisableSleep != target.disableSleep else { return }
         if lastWriteThrew && !retryingUnknown { return }
         write(target.disableSleep)
+    }
+
+    /// registerHelperIfNeeded registers the sleep reset helper when the
+    /// choice is on, this Mac is a laptop (a desktop never changes the sleep
+    /// setting) and the system has none. A helper that is registered and
+    /// waiting for approval is left alone, so the person is asked once.
+    /// Nothing here ever unregisters it.
+    private func registerHelperIfNeeded() {
+        guard choice == .on else { return }
+        snapshot = power.snapshot()
+        guard snapshot.isLaptop else { return }
+        switch helper.status {
+        case .notRegistered, .notFound:
+            do { try helper.register() } catch { report(.helperNotRegistered) }
+        case .requiresApproval, .enabled:
+            break
+        }
     }
 
     private func applyAssertion(_ target: StayAwakeTarget) {

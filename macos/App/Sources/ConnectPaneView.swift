@@ -244,9 +244,15 @@ struct ConnectPaneView<Extra: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 12)
                     AccessibleButton("Use Built-In Tailscale", style: .primary) { model.chooseBuiltInTailscale() }
+                        .disabled(model.builtInChoiceBlockedReason != nil)
                         .fixedSize()
                 }
                 .padding(.top, 4)
+                if let reason = model.builtInChoiceBlockedReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

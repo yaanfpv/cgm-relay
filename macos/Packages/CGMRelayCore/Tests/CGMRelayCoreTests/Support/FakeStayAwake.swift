@@ -63,3 +63,31 @@ final class FakeSleepSettingWriter: SleepSettingWriting {
         log.append("setDisableSleep(\(on))")
     }
 }
+
+/// FakeSleepHelperRegistration counts register() calls and lets a test set
+/// the status. Like the system, a register moves a not-registered helper to
+/// waiting for approval. The protocol has no unregister, so calls holds
+/// everything the controller could have done to it.
+final class FakeSleepHelperRegistration: SleepHelperRegistering, @unchecked Sendable {
+    var status: SleepHelperStatus
+    var statusAfterRegister: SleepHelperStatus = .requiresApproval
+    private(set) var calls: [String] = []
+    var registerCount: Int { calls.filter { $0 == "register" }.count }
+    init(status: SleepHelperStatus) { self.status = status }
+    func register() throws {
+        calls.append("register")
+        status = statusAfterRegister
+    }
+}
+
+/// FakeSleepRules records every call the controller could make on the sleep
+/// permission.
+final class FakeSleepRules: SleepRuleManaging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var calls: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    private func note(_ call: String) { lock.lock(); recorded.append(call); lock.unlock() }
+    func isInstalled() async -> Bool { note("isInstalled"); return true }
+    func install() async -> SleepRuleOutcome { note("install"); return .done }
+    func remove() async -> SleepRuleOutcome { note("remove"); return .done }
+}
