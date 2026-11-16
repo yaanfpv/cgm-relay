@@ -145,6 +145,7 @@ type Node struct {
 	prevDone chan struct{} // the previous serving cycle's end
 	restart  context.CancelFunc
 	nextUp   chan struct{} // closed when the next server has started
+	settled  chan struct{} // closed when the current server's own sign-in has settled
 	cur      *openListener
 	read     *ipnstate.Status // the status the last test read, and its error
 	readErr  error
@@ -387,13 +388,18 @@ const (
 // removes its state folder. The node is stopped only after the logout has
 // answered, and the folder is removed only after that. A logout that fails or
 // is cut short by ctx keeps the folder and the key and answers KeptForRetry.
+// The logout is sent only after the node's own sign-in attempt has settled;
+// when ctx ends first, nothing is sent and the result is the same.
 // Nothing else logs out: Close and every restart keep the key.
 func (n *Node) LeaveTailnet(ctx context.Context) (LeaveResult, error) {
 	n.mu.Lock()
-	api := n.api
+	api, settled := n.api, n.settled
 	n.mu.Unlock()
 	if api == nil {
 		return KeptForRetry, ErrNotServing
+	}
+	if err := awaitSettled(ctx, settled); err != nil {
+		return KeptForRetry, err
 	}
 	if err := api.Logout(ctx); err != nil {
 		return KeptForRetry, err
@@ -460,6 +466,7 @@ func (n *Node) run(ctx context.Context) {
 			if rn, ok := api.(*realNode); ok {
 				n.srv = rn.s
 			}
+			n.settled = make(chan struct{})
 			close(n.nextUp)
 			n.nextUp = make(chan struct{})
 			n.mu.Unlock()
@@ -693,6 +700,7 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 			if note.State == nil {
 				continue
 			}
+			n.markSettled(*note.State)
 			state := note.State.String()
 			n.update(func(o *Observation) {
 				o.Backend = state
@@ -723,6 +731,21 @@ func (n *Node) watch(ctx context.Context, api nodeAPI) {
 			}
 			n.update(func(o *Observation) { o.Listening, o.FunnelAllowed, o.PublicAnswered = false, false, false })
 		}
+	}
+}
+
+// markSettled records that the current server's own sign-in attempt has
+// settled, when state shows it.
+func (n *Node) markSettled(state ipn.State) {
+	if !signInSettled(state) {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	select {
+	case <-n.settled:
+	default:
+		close(n.settled)
 	}
 }
 
