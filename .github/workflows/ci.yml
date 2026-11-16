@@ -61,6 +61,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: select Xcode 27
+        run: bash .github/checks/select-xcode.sh
+
       - name: show toolchain
         run: |
           xcodebuild -version
@@ -83,6 +86,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: select Xcode 27
+        run: bash .github/checks/select-xcode.sh
 
       - name: show toolchain
         run: |
