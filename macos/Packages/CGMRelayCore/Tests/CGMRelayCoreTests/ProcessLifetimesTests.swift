@@ -439,13 +439,21 @@ enum AppModelSource {
     static let exits = ["return", "break", "continue", "throw", "fatalError"]
 
     /// problem is why a caller's body does not act on the owner's answer, nil
-    /// when it does.
+    /// when it does. Every release in the body must be guarded.
     static func problem(body: String, caller: Caller, owner: String) -> String? {
         let asked = mentions(of: owner, in: body)
         if asked.isEmpty { return "never consults \(owner)" }
-        let firstRelease = caller.releases.compactMap { body.range(of: $0)?.lowerBound }.min()
 
-        // The answers a caller used in a condition, with the block they guard.
+        // The blocks guarded by a condition that reads the owner's answer, and
+        // whether each is a guard, leaves the caller, or has an else branch.
+        struct Guarded {
+            let isGuard: Bool
+            let block: Range<String.Index>
+            let leaves: Bool
+            let close: String.Index
+            let elseBlock: ClosedRange<String.Index>?
+        }
+        var guarded: [Guarded] = []
         let conditions = try! NSRegularExpression(pattern: #"\b(if|guard|while)\b([^{]*)\{"#)
         for match in conditions.matches(in: body, range: NSRange(body.startIndex..., in: body)) {
             guard let whole = Range(match.range, in: body),
@@ -455,22 +463,32 @@ enum AppModelSource {
                   let open = body[whole.lowerBound...].firstIndex(of: "{"),
                   let close = closing(body, from: open)
             else { continue }
-            guard let firstRelease else { return nil }
             let block = body.index(after: open)..<close
-            let leaves = exits.contains { body[block].contains($0) }
-            if body[keywordRange] == "guard" {
-                if leaves, firstRelease > close { return nil }
-            } else {
-                if block.contains(firstRelease) { return nil }
-                if leaves, firstRelease > close { return nil }
-                // The release in the else branch of the question.
-                let after = body[body.index(after: close)...]
-                if after.drop(while: { $0.isWhitespace }).hasPrefix("else"),
-                   let elseOpen = after.firstIndex(of: "{"), let elseClose = closing(body, from: elseOpen),
-                   (elseOpen...elseClose).contains(firstRelease) { return nil }
+            var elseBlock: ClosedRange<String.Index>?
+            let after = body[body.index(after: close)...]
+            if after.drop(while: { $0.isWhitespace }).hasPrefix("else"),
+               let elseOpen = after.firstIndex(of: "{"), let elseClose = closing(body, from: elseOpen) {
+                elseBlock = elseOpen...elseClose
+            }
+            guarded.append(Guarded(
+                isGuard: body[keywordRange] == "guard",
+                block: block,
+                leaves: exits.contains { body[block].contains($0) },
+                close: close,
+                elseBlock: elseBlock
+            ))
+        }
+
+        func isGuarded(_ release: String.Index) -> Bool {
+            guarded.contains { g in
+                if g.leaves && release > g.close { return true }
+                if g.isGuard { return false }
+                return g.block.contains(release) || (g.elseBlock?.contains(release) ?? false)
             }
         }
+
         if caller.releases.isEmpty {
+            if !guarded.isEmpty { return nil }
             // An answer handed on as the caller's own answer is used; one read and dropped is not.
             let dropped = asked.allSatisfy { match in
                 let line = body.lineContaining(Range(match.range, in: body)!.lowerBound)
@@ -478,7 +496,14 @@ enum AppModelSource {
             }
             return dropped ? "reads the owner's answer and does not use it" : nil
         }
-        return "reads the owner's answer but it guards no release"
+        for token in caller.releases {
+            var searchFrom = body.startIndex
+            while let found = body.range(of: token, range: searchFrom..<body.endIndex) {
+                if !isGuarded(found.lowerBound) { return "reads the owner's answer but it guards no release" }
+                searchFrom = found.upperBound
+            }
+        }
+        return nil
     }
 
     /// violations lists every caller that does not act on the owner's answer.
@@ -516,6 +541,8 @@ enum AppModelSource {
         case answerIgnored
         /// askedAfterRelease: asked, in a condition, only after the release it should guard.
         case askedAfterRelease
+        /// secondReleaseUnguarded: a release added ahead of everything, under no condition.
+        case secondReleaseUnguarded
         var testDescription: String { "\(self)" }
     }
 
@@ -525,8 +552,13 @@ enum AppModelSource {
     static func planting(_ fault: Fault, in caller: Caller, of rawSource: String) -> String? {
         var source = stripped(rawSource)
         guard let owner = ownerName(in: source), let range = bodyRange(of: caller, in: source) else { return nil }
-        if fault == .askedAfterRelease, caller.releases.isEmpty { return nil }
+        if fault == .askedAfterRelease || fault == .secondReleaseUnguarded, caller.releases.isEmpty { return nil }
         var body = String(source[range])
+        if fault == .secondReleaseUnguarded {
+            body = "\n" + caller.releases[0] + "\n" + body
+            source.replaceSubrange(range, with: body)
+            return source
+        }
         let asked = mentions(of: owner, in: body)
         guard let answer = asked.first.flatMap({ Range($0.range(at: 1), in: body) }).map({ String(body[$0]) }) else { return nil }
         for match in asked.reversed() {
@@ -536,6 +568,7 @@ enum AppModelSource {
         case .consultRemoved: break
         case .answerIgnored: body = "\n_ = \(owner).\(answer)\n" + body
         case .askedAfterRelease: body += "\nif \(owner).\(answer) {\n}\n"
+        case .secondReleaseUnguarded: break
         }
         source.replaceSubrange(range, with: body)
         return source
@@ -622,7 +655,7 @@ struct AppModelConsultTests {
     func plantedFaultIsCaught(callerName: String, fault: AppModelSource.Fault) throws {
         let caller = try #require(AppModelSource.callers.first { $0.name == callerName })
         guard let planted = AppModelSource.planting(fault, in: caller, of: Self.conformingSource) else {
-            #expect(caller.releases.isEmpty && fault == .askedAfterRelease, "\(callerName) cannot take the fault \(fault)")
+            #expect(caller.releases.isEmpty && (fault == .askedAfterRelease || fault == .secondReleaseUnguarded), "\(callerName) cannot take the fault \(fault)")
             return
         }
         let violations = AppModelSource.violations(in: planted)
@@ -642,6 +675,24 @@ struct AppModelConsultTests {
             with: """
             case .stopped:
                         boundHost = nil
+            """
+        )
+        #expect(source != Self.conformingSource)
+        let violations = AppModelSource.violations(in: source)
+        #expect(violations.count == 1 && violations.first?.hasPrefix("handleEngineStateChange:") == true, Comment(rawValue: "\(violations)"))
+    }
+
+    @Test("a second, unguarded release at the end of the state callback is caught for that caller alone")
+    func secondReleaseAtTheEndIsCaught() {
+        let source = Self.conformingSource.replacingOccurrences(
+            of: """
+                    default: break
+                    }
+            """,
+            with: """
+                    default: break
+                    }
+                    boundHost = nil
             """
         )
         #expect(source != Self.conformingSource)
@@ -673,7 +724,7 @@ struct AppModelConsultTests {
         let caller = try #require(AppModelSource.callers.first { $0.name == callerName })
         guard let planted = AppModelSource.planting(fault, in: caller, of: text) else {
             // Optional or release-less callers, or no caller body that asks yet.
-            #expect(caller.optional || (caller.releases.isEmpty && fault == .askedAfterRelease), "\(callerName) cannot take the fault \(fault) in the app's own source")
+            #expect(caller.optional || (caller.releases.isEmpty && (fault == .askedAfterRelease || fault == .secondReleaseUnguarded)), "\(callerName) cannot take the fault \(fault) in the app's own source")
             return
         }
         let violations = AppModelSource.violations(in: planted)
