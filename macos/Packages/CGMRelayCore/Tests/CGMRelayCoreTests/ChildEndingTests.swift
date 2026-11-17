@@ -2172,6 +2172,8 @@ struct ProcessSuiteReapFactSourceTests {
                      requires: ["HeldFifo(", "endChildrenAfterRelease(", "release:"], forbids: ["removeItem(", "StoppedChildSupport.signal(", "kill("]),
         ReapFactRule(file: "AccountCheckerTests.swift", function: "timedOutCheckProcessIsEnded",
                      requires: ["HeldFifo(", "RunnerLaunch(", "endChildrenAfterRelease(", "requireEnded("], forbids: ["kill(", "removeItem("]),
+        ReapFactRule(file: "AccountCheckerTests.swift", function: "echoingChildLeavesLogClean",
+                     requires: ["RunnerLaunch(", "endChildrenAfterRelease(", "in: fixture"], forbids: ["kill(", "removeItem("]),
         ReapFactRule(file: "TailscaleServeTests.swift", function: "enableOutcomes",
                      requires: ["RunnerLaunch(", "endChildrenAfterRelease(", "release:"], forbids: ["fake.remove()", "kill("]),
         ReapFactRule(file: "TailscaleServeTests.swift", function: "changeRetries",

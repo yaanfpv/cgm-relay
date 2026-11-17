@@ -123,9 +123,9 @@ struct RealAccountCheckerTests {
         #expect(!reason.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) })
     }
 
-    /// writeEngine writes a stand-in engine script and returns its URL.
-    private func writeEngine(_ body: String, in existing: URL? = nil) throws -> URL {
-        let dir = existing ?? FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-\(UUID().uuidString)")
+    /// writeEngine writes a stand-in engine script into a directory the test owns
+    /// and removes in its cleanup, and returns its URL.
+    private func writeEngine(_ body: String, in dir: URL) throws -> URL {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("engine")
         try Data("#!/bin/sh\n\(body)\n".utf8).write(to: url)
@@ -161,9 +161,14 @@ struct RealAccountCheckerTests {
 
     @Test("a real child that echoes the request it was given still leaves the log clean")
     func echoingChildLeavesLogClean() async throws {
-        let engine = try writeEngine("cat >&2\nexit 1")
+        // The stand-in engine ends when the runner closes its input; its directory goes once
+        // the run's own result shows that end, and stays, naming the call, if it does not.
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-echo-\(UUID().uuidString)")
+        let launch = RunnerLaunch()
+        defer { launch.endChildrenAfterRelease(removing: fixture, release: {}) }
+        let engine = try writeEngine("cat >&2\nexit 1", in: fixture)
         let log = RecordingLog()
-        let checker = RealAccountChecker(engineURL: engine, log: log)
+        let checker = RealAccountChecker(engineURL: engine, runner: launch.runner, log: log)
 
         let outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
 
