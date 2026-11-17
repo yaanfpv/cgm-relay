@@ -166,23 +166,21 @@ struct RealBoundedProcessRunnerTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let pidFile = dir.appendingPathComponent("pid")
         var hung = false
-        // The identity the runner's own launch recorded, before any reap
-        // was possible.
-        let launch = LaunchRecorder()
         defer {
             // Only a run that never returned leaves its child behind. Its
-            // number is signalled only while it still shows the start time
-            // recorded at launch.
-            if hung, let recorded = launch.recorded { StoppedChildSupport.signal(recorded, SIGKILL) }
+            // number is signalled only while ps still shows the start time
+            // the child itself recorded before it stopped.
+            if hung { Self.killRecordedChild(pidFile: pidFile) }
             try? FileManager.default.removeItem(at: dir)
         }
-        // The child records its pid, then stops itself: the same state as a
-        // stop sent from outside, with no pid this test did not start.
-        let script = "open(my $f,\">\",$ARGV[0]) or die; print $f $$; close($f) or die; kill 'STOP', $$; sleep 30"
+        // The child records its pid and its own start time (read by the
+        // child itself), then stops itself: the same state as a stop sent
+        // from outside, with no pid this test did not start.
+        let script = "open(my $f,\">\",$ARGV[0]) or die; print $f \"$$\\n\", `/bin/ps -o lstart= -p $$`; close($f) or die; kill 'STOP', $$; sleep 30"
         let executable = URL(fileURLWithPath: "/usr/bin/perl")
         let arguments = ["-e", script, pidFile.path]
 
-        let runner = RealBoundedProcessRunner(onLaunched: { pid, start in launch.set(pid: pid, start: start) })
+        let runner = RealBoundedProcessRunner()
         let result: BoundedProcessResult?
         switch mode {
         case .run:
@@ -202,8 +200,46 @@ struct RealBoundedProcessRunnerTests {
         try #require(result != nil, "the run did not end for a stopped child")
         #expect(result == .timedOut)
 
-        let pid = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8)))
-        #expect(StoppedChildSupport.isGone(pid: pid), "child \(pid) was not reaped")
+        let recordedChild = try #require(Self.readRecordedChild(pidFile: pidFile))
+        #expect(StoppedChildSupport.isGone(pid: recordedChild.pid), "child \(recordedChild.pid) was not reaped")
+    }
+
+    /// readRecordedChild reads the pid and start time the test child wrote
+    /// about itself: the pid on the first line, `ps -o lstart=` on the second.
+    private static func readRecordedChild(pidFile: URL) -> (pid: Int32, lstart: String)? {
+        guard let text = try? String(contentsOf: pidFile, encoding: .utf8) else { return nil }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 2, let pid = Int32(lines[0]) else { return nil }
+        let lstart = lines[1].trimmingCharacters(in: .whitespaces)
+        return lstart.isEmpty ? nil : (pid, lstart)
+    }
+
+    /// lstart reads `ps -o lstart= -p pid`, bounded by the hang ceiling. It is
+    /// nil when ps fails, finds no such process or does not finish in time.
+    private static func lstart(ofPid pid: Int32) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-o", "lstart=", "-p", String(pid)]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        guard (try? process.run()) != nil else { return nil }
+        guard finished.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success,
+              process.terminationStatus == 0 else { return nil }
+        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// killRecordedChild sends SIGKILL to the recorded child only when ps now
+    /// shows the start time the child recorded; a mismatch or a failed read
+    /// sends nothing.
+    private static func killRecordedChild(pidFile: URL) {
+        guard let recorded = readRecordedChild(pidFile: pidFile),
+              let now = lstart(ofPid: recorded.pid), now == recorded.lstart else { return }
+        kill(recorded.pid, SIGKILL)
     }
 
     @Test(
