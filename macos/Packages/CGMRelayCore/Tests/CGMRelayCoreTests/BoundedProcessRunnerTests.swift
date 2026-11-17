@@ -12,7 +12,7 @@ private final class LaunchRecorder: @unchecked Sendable {
     }
 }
 
-@Suite("RealBoundedProcessRunner")
+@Suite("RealBoundedProcessRunner", .noSurvivingChildren)
 struct RealBoundedProcessRunnerTests {
     @Test("reports an ordinary exit code")
     func reportsExitCode() async throws {
@@ -165,13 +165,19 @@ struct RealBoundedProcessRunnerTests {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-stopped-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let pidFile = dir.appendingPathComponent("pid")
-        var hung = false
         defer {
-            // Only a run that never returned leaves its child behind. Its
-            // number is signalled only while ps still shows the start time
-            // the child itself recorded before it stopped.
-            if hung { Self.killRecordedChild(pidFile: pidFile) }
-            try? FileManager.default.removeItem(at: dir)
+            // Whatever the run returned, the child it started is ended here
+            // unless it is already gone. Its number is signalled only while ps
+            // still shows the start time the child itself recorded before it
+            // stopped. A child whose end is not confirmed fails the test
+            // naming it, and its record stays on disk.
+            ChildCleanup.endRecordedChild(
+                pidFile: pidFile, removingOnEnd: dir,
+                readStart: { Self.lstart(ofPid: $0) },
+                exists: { !StoppedChildSupport.isGone(pid: $0) },
+                send: { kill($0, $1) },
+                waitingMilliseconds: TestChild.hangCeilingMilliseconds
+            )
         }
         // The child records its pid and its own start time (read by the
         // child itself), then stops itself: the same state as a stop sent
@@ -196,7 +202,6 @@ struct RealBoundedProcessRunnerTests {
                 runner.runOnCallingThread(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .seconds(1))
             }
         }
-        hung = result == nil
         try #require(result != nil, "the run did not end for a stopped child")
         #expect(result == .timedOut)
 
@@ -215,31 +220,16 @@ struct RealBoundedProcessRunnerTests {
     }
 
     /// lstart reads `ps -o lstart= -p pid`, bounded by the hang ceiling. It is
-    /// nil when ps fails, finds no such process or does not finish in time.
+    /// nil when ps fails, finds no such process or does not finish in time; a
+    /// ps that does not finish is ended and collected before this returns.
     private static func lstart(ofPid pid: Int32) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-o", "lstart=", "-p", String(pid)]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
-        guard (try? process.run()) != nil else { return nil }
-        guard finished.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success,
-              process.terminationStatus == 0 else { return nil }
-        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text
-    }
-
-    /// killRecordedChild sends SIGKILL to the recorded child only when ps now
-    /// shows the start time the child recorded; a mismatch or a failed read
-    /// sends nothing.
-    private static func killRecordedChild(pidFile: URL) {
-        guard let recorded = readRecordedChild(pidFile: pidFile),
-              let now = lstart(ofPid: recorded.pid), now == recorded.lstart else { return }
-        kill(recorded.pid, SIGKILL)
+        let observation = ObservedHelper.read(
+            executable: "/bin/ps",
+            arguments: ["-o", "lstart=", "-p", String(pid)],
+            waitingMilliseconds: TestChild.hangCeilingMilliseconds
+        )
+        guard let text = observation.output, !text.isEmpty else { return nil }
+        return text
     }
 
     @Test(
@@ -266,7 +256,10 @@ struct RealBoundedProcessRunnerTests {
                 while StoppedChildSupport.namesRecorded(recorded), DispatchTime.now() < deadline {
                     usleep(20_000)
                 }
-                #expect(!StoppedChildSupport.namesRecorded(recorded), "test child \(recorded.pid) may still be running, it was not confirmed ended")
+                #expect(
+                    !StoppedChildSupport.namesRecorded(recorded),
+                    "test child \(ChildCleanup.describe(pid: recorded.pid, start: "\(recorded.start.seconds).\(recorded.start.microseconds)")) may still be running, it was not confirmed ended"
+                )
             }
             try? FileManager.default.removeItem(at: dir)
         }
@@ -301,7 +294,7 @@ struct RealBoundedProcessRunnerTests {
     }
 }
 
-@Suite("RealBoundedProcessRunner on the calling thread")
+@Suite("RealBoundedProcessRunner on the calling thread", .noSurvivingChildren)
 struct RealBoundedProcessRunnerCallingThreadTests {
     /// Runs body on a thread of its own, so the call is made from a plain
     /// thread and never from one of Swift's pool threads.
