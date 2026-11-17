@@ -811,12 +811,17 @@ struct SleepResetHelperProcessListTests {
 @Suite("StayAwakeCopy")
 struct StayAwakeCopyTests {
     /// Every keep-awake string a person can see: the laptop and desktop
-    /// explanation, the password line and the approval line.
+    /// explanation, the password line, the approval line and the notice for
+    /// each way keeping the Mac awake can fail.
     private static let shown: [(name: String, text: String)] = [
         ("explanation laptop", StayAwakeCopy.explanation(isLaptop: true)),
         ("explanation desktop", StayAwakeCopy.explanation(isLaptop: false)),
         ("permissionNote", StayAwakeCopy.permissionNote),
         ("approvalNeeded", StayAwakeCopy.approvalNeeded),
+        ("failure sleepSettingNotChanged", StayAwakeFailure.sleepSettingNotChanged.message),
+        ("failure permissionNotInstalled", StayAwakeFailure.permissionNotInstalled.message),
+        ("failure assertionNotHeld", StayAwakeFailure.assertionNotHeld.message),
+        ("failure helperNotRegistered", StayAwakeFailure.helperNotRegistered.message),
     ]
 
     private static func sentences(_ text: String) -> [String] {
