@@ -142,15 +142,14 @@ struct RealAccountCheckerTests {
         try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
         let fifo = try HeldFifo(in: fixture)
         let launch = RunnerLaunch()
-        var outcome: AccountCheckOutcome?
         defer {
-            launch.endChildrenAfterRelease(removing: fixture, launchFailed: outcome == .launchFailed, release: { fifo.release() })
+            launch.endChildrenAfterRelease(removing: fixture, release: { fifo.release() })
         }
         let engine = try writeEngine("trap '' TERM\nread line < '\(fifo.path)'", in: fixture)
         let log = RecordingLog()
         let checker = RealAccountChecker(engineURL: engine, runner: launch.runner, timeout: .seconds(2), log: log)
 
-        outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
+        let outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
 
         #expect(outcome == .timedOut)
         launch.requireEnded()

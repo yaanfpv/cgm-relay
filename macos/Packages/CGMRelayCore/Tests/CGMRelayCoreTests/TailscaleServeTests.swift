@@ -251,7 +251,7 @@ struct TailscaleServeTests {
         // Every command's identity is recorded at launch; the FIFO is released and each child
         // confirmed ended by read before the directory is removed, whatever the run returned.
         let launch = RunnerLaunch(extraEnvironment: RealTailscaleController.environment)
-        defer { launch.endChildrenAfterRelease(removing: fake.directory, launchFailed: false, release: { fake.release() }) }
+        defer { launch.endChildrenAfterRelease(removing: fake.directory, release: { fake.release() }) }
         let controller = RealTailscaleController(
             executableURL: fake.executable,
             runner: launch.runner,
@@ -287,7 +287,7 @@ struct TailscaleServeTests {
     func changeRetries(_ testCase: (name: String, turningOn: Bool, modes: String, serveJSON: String, want: TailscaleChangeResult, wantChangeCommands: Int, wantWaits: Int)) async throws {
         let fake = try FakeTailscale(mode: testCase.modes, serveJSON: testCase.serveJSON)
         let launch = RunnerLaunch(extraEnvironment: RealTailscaleController.environment)
-        defer { launch.endChildrenAfterRelease(removing: fake.directory, launchFailed: false, release: { fake.release() }) }
+        defer { launch.endChildrenAfterRelease(removing: fake.directory, release: { fake.release() }) }
         let controller = RealTailscaleController(executableURL: fake.executable, runner: launch.runner, changeTimeout: .seconds(2))
         let read: () async -> TailscaleHTTPSState = {
             TailscaleHTTPSState.evaluate(status: await controller.status(), config: await controller.serveConfig(), relayPort: 1337)

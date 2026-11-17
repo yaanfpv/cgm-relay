@@ -1242,6 +1242,196 @@ struct FailedReadsAreNotEndsTests {
     }
 }
 
+// MARK: - A launch is accounted by how its run ended
+
+/// AccountedRead stands in for the read of a recorded identity after the
+/// release: it answers from a fixed set of pids that read gone, and keeps every
+/// identity it was asked about, so a check can tell that a confirmed end was
+/// never read again.
+private final class AccountedRead: @unchecked Sendable {
+    private let lock = NSLock()
+    private let gone: Set<Int32>
+    private var askedPids: [Int32] = []
+
+    init(gone: Set<Int32>) { self.gone = gone }
+
+    var asked: [Int32] { lock.withLock { askedPids } }
+
+    func isGone(_ identity: StoppedChildSupport.RecordedProcess) -> Bool {
+        lock.withLock {
+            askedPids.append(identity.pid)
+            return gone.contains(identity.pid)
+        }
+    }
+}
+
+@Suite("A test accounts for every launch by how its run ended")
+struct LaunchAccountTests {
+    /// DecisionCase is a list of calls (each one's result, nil while it still
+    /// runs, and the pid of the identity its launch read gave, nil when none)
+    /// with what the cleanup must decide for it.
+    struct DecisionCase: Sendable, CustomTestStringConvertible {
+        let label: String
+        let results: [BoundedProcessResult?]
+        let identities: [Int32?]
+        /// the identities that read gone after the release
+        var gone: Set<Int32> = []
+        let removesDirectory: Bool
+        /// the calls, by position, that the cleanup names and keeps the records for
+        var named: [Int] = []
+        /// the identities read after the release, in order
+        var reads: [Int32] = []
+        var testDescription: String { label }
+
+        var calls: [LaunchCall] {
+            zip(results, identities).map { result, pid in
+                LaunchCall(result: result, identity: pid.map(LaunchAccountTests.identity))
+            }
+        }
+    }
+
+    static func identity(_ pid: Int32) -> StoppedChildSupport.RecordedProcess {
+        StoppedChildSupport.RecordedProcess(pid: pid, start: ProcessStart(seconds: 1_700_000_000, microseconds: Int(pid)))
+    }
+
+    static let decisionCases: [DecisionCase] = [
+        // The two schedules the account exists for.
+        DecisionCase(label: "a known child that ended, then an unbound unconfirmed call: the unbound one is named and the records kept",
+                     results: [.exited(0), .notConfirmedEnded], identities: [101, nil], removesDirectory: false, named: [1]),
+        DecisionCase(label: "an unbound unconfirmed call, then a known child that ended: the unbound one is named and the records kept",
+                     results: [.notConfirmedEnded, .exited(0)], identities: [nil, 101], removesDirectory: false, named: [0]),
+        DecisionCase(label: "every call ended with a recorded identity: nothing is read and the records go",
+                     results: [.exited(0), .exited(7), .timedOut], identities: [101, 102, 103], removesDirectory: true),
+        DecisionCase(label: "every call has no identity and a confirmed end (exit codes, a death by signal, a timeout): no failure",
+                     results: [.exited(0), .timedOut, .exited(-9), .exited(1)], identities: [nil, nil, nil, nil], removesDirectory: true),
+        DecisionCase(label: "every identity missing and every result unconfirmed: each is named and the records kept",
+                     results: [.notConfirmedEnded, .notConfirmedEnded], identities: [nil, nil], removesDirectory: false, named: [0, 1]),
+        // Kept genuine controls.
+        DecisionCase(label: "a failed launch is no child",
+                     results: [.failedToLaunch], identities: [nil], removesDirectory: true),
+        DecisionCase(label: "a failed launch beside a call that ended",
+                     results: [.exited(0), .failedToLaunch, .timedOut], identities: [101, nil, nil], removesDirectory: true),
+        DecisionCase(label: "a confirmed exit after an unavailable launch read is an end",
+                     results: [.exited(3)], identities: [nil], removesDirectory: true),
+        DecisionCase(label: "exited(255) is an end, with no identity",
+                     results: [.exited(255)], identities: [nil], removesDirectory: true),
+        // An unconfirmed call is confirmed only by a read of its own identity.
+        DecisionCase(label: "an unconfirmed call whose identity reads gone after the release is removed",
+                     results: [.notConfirmedEnded], identities: [101], gone: [101], removesDirectory: true, reads: [101]),
+        DecisionCase(label: "an unconfirmed call whose identity still reads present is named and the records kept",
+                     results: [.notConfirmedEnded], identities: [101], removesDirectory: false, named: [0], reads: [101]),
+        DecisionCase(label: "two unconfirmed calls, one gone and one still present: only the present one is named",
+                     results: [.notConfirmedEnded, .notConfirmedEnded], identities: [101, 102], gone: [101], removesDirectory: false, named: [1], reads: [101, 102]),
+        DecisionCase(label: "a call that ended is never read again, whatever an unconfirmed one beside it reads",
+                     results: [.exited(0), .notConfirmedEnded, .timedOut], identities: [101, 102, 103], gone: [102], removesDirectory: true, reads: [102]),
+        // A call still running when the cleanup starts is an unconfirmed call.
+        DecisionCase(label: "a call with no result yet whose identity reads gone is removed",
+                     results: [nil], identities: [101], gone: [101], removesDirectory: true, reads: [101]),
+        DecisionCase(label: "a call with no result yet whose identity still reads present is named",
+                     results: [nil], identities: [101], removesDirectory: false, named: [0], reads: [101]),
+        DecisionCase(label: "a call with no result yet and no identity is named",
+                     results: [nil], identities: [nil], removesDirectory: false, named: [0]),
+        DecisionCase(label: "a failed launch, an exit without identity and an unconfirmed call that reads gone, together",
+                     results: [.failedToLaunch, .exited(0), .notConfirmedEnded], identities: [nil, nil, 103], gone: [103], removesDirectory: true, reads: [103]),
+    ]
+
+    @Test("the per-call decision names every call it cannot confirm, and the records go only when none is left", arguments: decisionCases)
+    func decisionPerCall(_ testCase: DecisionCase) {
+        let read = AccountedRead(gone: testCase.gone)
+        let verdict = LaunchAccount.decide(testCase.calls, gone: read.isGone)
+        #expect(verdict.removeDirectory == testCase.removesDirectory)
+        #expect(verdict.named == testCase.named)
+        #expect(read.asked == testCase.reads, "the read after the release looked at \(read.asked)")
+    }
+
+    @Test("the signalling route signals only a call that has an identity and no confirmed end")
+    func signalTargets() {
+        let calls = [
+            LaunchCall(result: .exited(0), identity: Self.identity(101)),
+            LaunchCall(result: .notConfirmedEnded, identity: Self.identity(102)),
+            LaunchCall(result: nil, identity: Self.identity(103)),
+            LaunchCall(result: .notConfirmedEnded, identity: nil),
+            LaunchCall(result: .failedToLaunch, identity: nil),
+            LaunchCall(result: .timedOut, identity: Self.identity(104)),
+            LaunchCall(result: nil, identity: nil),
+            LaunchCall(result: .exited(255), identity: nil),
+        ]
+        #expect(LaunchAccount.signalTargets(calls) == [1, 2])
+    }
+
+    // MARK: Calls counted at the call, with no child started
+
+    private static let missing = URL(fileURLWithPath: "/no/such/executable-cgmrelay-test")
+
+    private static func directory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("launch-account-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    /// failLaunches makes one call of each entry point at an executable that is
+    /// not there: posix_spawn refuses, so no child exists.
+    private static func failLaunches(_ runner: any BoundedProcessRunning) async -> [BoundedProcessResult] {
+        let first = await runner.run(executableURL: missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+        let second = await runner.runCapturingOutput(executableURL: missing, arguments: [], standardInputData: Data(), timeout: .seconds(5)).result
+        let third = runner.runOnCallingThread(executableURL: missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+        return [first, second, third]
+    }
+
+    @Test("run, runCapturingOutput and runOnCallingThread each leave one entry with that call's own result and no identity when the launch failed")
+    func everyEntryPointLeavesOneEntry() async throws {
+        let launch = RunnerLaunch()
+        let runner: any BoundedProcessRunning = launch.runner
+        #expect(launch.calls.isEmpty)
+
+        let first = await runner.run(executableURL: Self.missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+        #expect(launch.calls.map(\.result) == [first])
+        let second = await runner.runCapturingOutput(executableURL: Self.missing, arguments: [], standardInputData: Data(), timeout: .seconds(5)).result
+        #expect(launch.calls.map(\.result) == [first, second])
+        let third = runner.runOnCallingThread(executableURL: Self.missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+
+        #expect([first, second, third] == [.failedToLaunch, .failedToLaunch, .failedToLaunch])
+        #expect(launch.calls.map(\.result) == [.failedToLaunch, .failedToLaunch, .failedToLaunch])
+        #expect(launch.calls.allSatisfy { $0.identity == nil })
+    }
+
+    @Test("a launch that failed is no child: endChildren removes the records and fails nothing")
+    func endChildrenAfterFailedLaunches() async throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launch = RunnerLaunch()
+        _ = await Self.failLaunches(launch.runner)
+        launch.endChildren(removing: directory)
+        #expect(!FileManager.default.fileExists(atPath: directory.path), "the records of a launch that started nothing were kept")
+    }
+
+    @Test("a launch that failed is no child: endChildrenAfterRelease releases once, removes the records and fails nothing")
+    func endChildrenAfterReleaseAfterFailedLaunches() async throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launch = RunnerLaunch()
+        _ = await Self.failLaunches(launch.runner)
+        let releases = Counter()
+        launch.endChildrenAfterRelease(removing: directory, release: { releases.bump() })
+        #expect(releases.value == 1)
+        #expect(!FileManager.default.fileExists(atPath: directory.path), "the records of a launch that started nothing were kept")
+    }
+
+    @Test("a launch that failed needs no identity: requireEnded fails nothing")
+    func requireEndedAfterFailedLaunches() async throws {
+        let launch = RunnerLaunch()
+        _ = await Self.failLaunches(launch.runner)
+        launch.requireEnded()
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
+    }
+}
+
 // MARK: - The suites call the cleanup on every exit path
 
 /// SourceText reads a test file with its comments and the contents of its
@@ -1688,9 +1878,11 @@ struct ProcessSuiteReapFactSourceTests {
         ReapFactRule(file: "TailscaleServeTests.swift", function: "changeRetries",
                      requires: ["RunnerLaunch(", "endChildrenAfterRelease(", "release:"], forbids: ["fake.remove()", "kill("]),
         ReapFactRule(file: "Support/RunnerLaunch.swift", function: "endChildren",
-                     requires: ["launchFailed", "unknownLaunch(", "ChildCleanup.endRecordedRecordingNotConfirmed("], forbids: []),
+                     requires: ["LaunchAccount.signalTargets(", "ChildCleanup.endRecordedRecordingNotConfirmed(", "LaunchAccount.decide("], forbids: ["launchFailed", "unknownLaunch("]),
         ReapFactRule(file: "Support/RunnerLaunch.swift", function: "endChildrenAfterRelease",
-                     requires: ["release()", "launchFailed", "unknownLaunch(", "DescendantCheck.requireGone(", "Issue.record("], forbids: ["signal(", "kill("]),
+                     requires: ["release()", "LaunchAccount.decide(", "DescendantCheck.requireGone(", "Issue.record("], forbids: ["signal(", "kill(", "launchFailed", "unknownLaunch("]),
+        ReapFactRule(file: "Support/RunnerLaunch.swift", function: "requireEnded",
+                     requires: ["LaunchAccount.decide(", "Issue.record("], forbids: ["signal(", "kill("]),
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "stoppedChildEndsTheRunAsTimedOut",
                      requires: ["launchFailed:"], forbids: []),
     ]

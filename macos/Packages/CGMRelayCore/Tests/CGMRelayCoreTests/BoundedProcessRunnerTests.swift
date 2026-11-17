@@ -68,8 +68,7 @@ struct RealBoundedProcessRunnerTests {
         // The child's own timer is 30 s, so its absence of a marker proves nothing about
         // its end: the end is read from the process table, and a child left alive is ended here.
         let launch = RunnerLaunch()
-        var runResult: BoundedProcessResult?
-        defer { launch.endChildren(removing: dir, launchFailed: runResult == .failedToLaunch) }
+        defer { launch.endChildren(removing: dir) }
         let marker = dir.appendingPathComponent("marker")
         #expect(!FileManager.default.fileExists(atPath: marker.path))
 
@@ -80,7 +79,6 @@ struct RealBoundedProcessRunnerTests {
             standardInputData: Data(),
             timeout: .seconds(3)
         )
-        runResult = result
 
         // A runner that waited for the child to finish by itself would
         // write the marker.
@@ -244,9 +242,8 @@ struct RealBoundedProcessRunnerTests {
         // accepted and every send is refused; the launch read still names the child.
         let fifo = try HeldFifo(in: dir)
         let launch = RunnerLaunch(showsIdentityToRunner: false)
-        var runResult: BoundedProcessResult?
         defer {
-            launch.endChildrenAfterRelease(removing: dir, launchFailed: runResult == .failedToLaunch, release: { fifo.release() })
+            launch.endChildrenAfterRelease(removing: dir, release: { fifo.release() })
         }
         let script = "open(my $r,\"<\",$ARGV[0]) or die; my $line = <$r>; exit 0"
         let executable = URL(fileURLWithPath: "/usr/bin/perl")
@@ -268,9 +265,8 @@ struct RealBoundedProcessRunnerTests {
                 runner.runOnCallingThread(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .milliseconds(500))
             }
         }
-        runResult = result
         try #require(result != nil, "the run did not return for a child that could not be signalled")
-        try #require(!launch.recorded.isEmpty, "no identity was recorded for the launched child")
+        try #require(launch.calls.first?.identity != nil, "no identity was recorded for the launched child")
         #expect(result == .notConfirmedEnded)
     }
 }
@@ -318,8 +314,7 @@ struct RealBoundedProcessRunnerCallingThreadTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // The end is read from the process table; a child left alive is ended here.
         let launch = RunnerLaunch()
-        var runResult: BoundedProcessResult?
-        defer { launch.endChildren(removing: dir, launchFailed: runResult == .failedToLaunch) }
+        defer { launch.endChildren(removing: dir) }
         let marker = dir.appendingPathComponent("marker")
         let script = (ignoresTerminate ? "$SIG{TERM}='IGNORE'; " : "")
             + "sleep 30; open(my $m,\">\",$ARGV[0]) or die; print $m \"done\"; close($m) or die"
@@ -333,7 +328,6 @@ struct RealBoundedProcessRunnerCallingThreadTests {
                 timeout: .milliseconds(300)
             )
         }
-        runResult = result
         #expect(result == .timedOut)
         launch.requireEnded()
         #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
