@@ -165,14 +165,18 @@ struct RealBoundedProcessRunnerTests {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-stopped-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let pidFile = dir.appendingPathComponent("pid")
+        var runResult: BoundedProcessResult?
         defer {
             // Whatever the run returned, the child it started is ended here
             // unless it is already gone. Its number is signalled only while ps
             // still shows the start time the child itself recorded before it
             // stopped. A child whose end is not confirmed fails the test
-            // naming it, and its record stays on disk.
+            // naming it, and its record stays on disk. A missing record counts
+            // as "nothing started" only when the runner reported that the
+            // launch itself failed.
             ChildCleanup.endRecordedChild(
                 pidFile: pidFile, removingOnEnd: dir,
+                launchFailed: runResult == .failedToLaunch,
                 readStart: { Self.lstart(ofPid: $0) },
                 exists: { !StoppedChildSupport.isGone(pid: $0) },
                 send: { kill($0, $1) },
@@ -202,6 +206,7 @@ struct RealBoundedProcessRunnerTests {
                 runner.runOnCallingThread(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .seconds(1))
             }
         }
+        runResult = result
         try #require(result != nil, "the run did not end for a stopped child")
         #expect(result == .timedOut)
 
@@ -220,14 +225,15 @@ struct RealBoundedProcessRunnerTests {
     }
 
     /// lstart reads `ps -o lstart= -p pid`, bounded by the hang ceiling. It is
-    /// nil when ps fails, finds no such process or does not finish in time; a
-    /// ps that does not finish is ended and collected before this returns.
+    /// nil when ps fails or finds no such process. A ps whose end is not
+    /// confirmed fails the test naming it, since its answer is then unknown.
     private static func lstart(ofPid pid: Int32) -> String? {
         let observation = ObservedHelper.read(
             executable: "/bin/ps",
             arguments: ["-o", "lstart=", "-p", String(pid)],
             waitingMilliseconds: TestChild.hangCeilingMilliseconds
         )
+        observation.failIfNotEnded()
         guard let text = observation.output, !text.isEmpty else { return nil }
         return text
     }
@@ -248,20 +254,20 @@ struct RealBoundedProcessRunnerTests {
         defer {
             // The child stopped itself, so it cannot end by its own and the
             // runner sent it nothing. It is ended here, and only while its
-            // number still shows the start time recorded at launch. Waiting
-            // for it to go is bounded by the hang ceiling.
+            // number still shows the start time recorded at launch. The
+            // directory with the child's own record is removed only once its end
+            // is confirmed; otherwise the test fails naming the child and the
+            // record stays.
             if let recorded = launch.recorded {
-                StoppedChildSupport.signal(recorded, SIGKILL)
-                let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
-                while StoppedChildSupport.namesRecorded(recorded), DispatchTime.now() < deadline {
-                    usleep(20_000)
-                }
-                #expect(
-                    !StoppedChildSupport.namesRecorded(recorded),
-                    "test child \(ChildCleanup.describe(pid: recorded.pid, start: "\(recorded.start.seconds).\(recorded.start.microseconds)")) may still be running, it was not confirmed ended"
+                ChildCleanup.endRecordedRemovingOnEnd(
+                    pid: recorded.pid, start: "\(recorded.start.seconds).\(recorded.start.microseconds)",
+                    removingOnEnd: dir,
+                    readStart: { ChildCleanup.startNow(pid: $0) },
+                    exists: { !StoppedChildSupport.isGone(pid: $0) },
+                    send: { _, signal in StoppedChildSupport.signal(recorded, signal) },
+                    waitingMilliseconds: TestChild.hangCeilingMilliseconds
                 )
             }
-            try? FileManager.default.removeItem(at: dir)
         }
         let script = "open(my $f,\">\",$ARGV[0]) or die; print $f $$; close($f) or die; kill 'STOP', $$; sleep 30"
         let executable = URL(fileURLWithPath: "/usr/bin/perl")

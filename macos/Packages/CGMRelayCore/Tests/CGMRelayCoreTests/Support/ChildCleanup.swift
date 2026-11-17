@@ -40,9 +40,6 @@ enum ChildCleanup {
         LaunchedChildSignaller.systemProcessTable(pid).map(startText)
     }
 
-    /// launchStart is startNow under its earlier name.
-    static func launchStart(pid: Int32) -> String? { startNow(pid: pid) }
-
     // MARK: A child the caller holds
 
     /// endHeld ends a child the caller still holds. It does nothing and returns
