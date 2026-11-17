@@ -152,6 +152,9 @@ struct RealAccountCheckerTests {
         let outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
 
         #expect(outcome == .timedOut)
+        // The end oracle reads the launch's own identity, so a launch it could not
+        // identify would leave it showing nothing: that is a failure, not a pass.
+        #expect(launch.calls.count == 1 && launch.calls.first?.identity != nil, "the launch was not identified, so its end cannot be shown")
         launch.requireEnded()
         #expect(log.lines.count == 1)
     }

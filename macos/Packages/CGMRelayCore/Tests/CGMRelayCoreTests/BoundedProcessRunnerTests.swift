@@ -83,6 +83,9 @@ struct RealBoundedProcessRunnerTests {
         // A runner that waited for the child to finish by itself would
         // write the marker.
         #expect(result == .timedOut)
+        // The end oracle reads the launch's own identity, so a launch it could not
+        // identify would leave it showing nothing: that is a failure, not a pass.
+        #expect(launch.calls.count == 1 && launch.calls.first?.identity != nil, "the launch was not identified, so its end cannot be shown")
         launch.requireEnded()
         #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
     }
@@ -329,6 +332,9 @@ struct RealBoundedProcessRunnerCallingThreadTests {
             )
         }
         #expect(result == .timedOut)
+        // The end oracle reads the launch's own identity, so a launch it could not
+        // identify would leave it showing nothing: that is a failure, not a pass.
+        #expect(launch.calls.count == 1 && launch.calls.first?.identity != nil, "the launch was not identified, so its end cannot be shown")
         launch.requireEnded()
         #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
     }

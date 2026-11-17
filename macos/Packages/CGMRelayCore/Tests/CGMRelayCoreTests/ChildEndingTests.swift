@@ -1367,7 +1367,7 @@ private final class Snapshots: @unchecked Sendable {
     var values: [[BoundedProcessResult?]] { lock.withLock { all } }
 }
 
-@Suite("A test accounts for every launch by how its run ended")
+@Suite("A test accounts for every launch by how its run ended", .noSurvivingChildren)
 struct LaunchAccountTests {
     /// DecisionCase is a list of calls (each one's result, nil while it still
     /// runs, and the pid of the identity its launch read gave, nil when none)
@@ -1886,7 +1886,7 @@ private enum AllTestFiles {
     /// The starters of a real child: each names a type or helper that starts a process.
     static let realChildStarters = [
         "RealProcessLauncher(", "RealAccountChecker(", "RealTailscaleController(", "RealBoundedProcessRunner(",
-        "ChildSpawner.spawn(", "HeldChild.start(", "HeldSleeper(", "TestChild(", "ObservedHelper.read(", "FakeTailscale(",
+        "ChildSpawner.spawn(", "HeldChild.start(", "HeldSleeper(", "TestChild(", "ObservedHelper.read(", "FakeTailscale(", "RunnerLaunch(",
     ]
 
     static func read() throws -> [(name: String, text: String)] {
