@@ -469,11 +469,12 @@ struct EngineSupervisorTests {
         var exitCodes: [Int32] { lock.withLock { codes } }
 
         /// endEngineIfLeftRunning kills the child this test started if no
-        /// exit was reported, then waits for the report. Once an exit was
-        /// reported there is nothing left to end or wait for.
-        func endEngineIfLeftRunning(pid: Int32) {
+        /// exit was reported, through the handle the launch returned, then
+        /// waits for the report. Once an exit was reported there is nothing
+        /// left to end or wait for.
+        func endEngineIfLeftRunning() {
             guard exitCodes.isEmpty else { return }
-            kill(pid, SIGKILL)
+            process?.kill()
             _ = exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds)))
         }
 
@@ -514,6 +515,7 @@ struct EngineSupervisorTests {
         $SIG{TERM} = 'IGNORE';
         $| = 1;
         print "ready\n";
+        kill 'STOP', $$;
         while (1) { sleep 30 }
         """.write(to: engine, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
@@ -525,15 +527,15 @@ struct EngineSupervisorTests {
         let pid = process.processIdentifier
         defer {
             // Only reached with the child still alive when the test failed.
-            launcher.endEngineIfLeftRunning(pid: pid)
+            launcher.endEngineIfLeftRunning()
         }
         let isReady = await StoppedChildSupport.withinBlocking {
             launcher.ready.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
         }
         try #require(isReady == true, "engine pid \(pid) never reported ready")
 
-        // Stopped by someone else, not by the app.
-        #expect(kill(pid, SIGSTOP) == 0)
+        // The engine stopped itself after its ready line: the same state as a
+        // stop sent from outside, with no signal sent by this test.
         try #require(StoppedChildSupport.waitUntilStopped(pid: pid), "engine pid \(pid) never showed as stopped")
 
         let returned: Void? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .seconds(1)) }

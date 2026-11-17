@@ -625,7 +625,7 @@ struct RealProcessLauncherTests {
     /// its exit was not reported, closes its input and waits for the report.
     private func endNow(_ started: AnnouncedChild) {
         let alreadyReported = !started.exits.reported.isEmpty
-        if !alreadyReported && !started.child.hasExited { kill(started.pid, SIGKILL) }
+        if !alreadyReported && !started.child.hasExited { started.child.signaller.send(SIGKILL) }
         try? started.input.close()
         if !alreadyReported { _ = started.exits.waitForExit() }
     }
@@ -637,7 +637,7 @@ struct RealProcessLauncherTests {
         let started = try await spawnAnnounced(Self.stopTarget)
         defer { endNow(started) }
 
-        #expect(kill(started.pid, SIGSTOP) == 0)
+        #expect(started.child.signaller.send(SIGSTOP))
         try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
         let signaller = started.child.signaller
         let sent = await StoppedChildSupport.withinBlocking { signaller.send(SIGCONT) }
@@ -656,7 +656,7 @@ struct RealProcessLauncherTests {
         let started = try await spawnAnnounced(#"$SIG{USR1} = sub { exit 5 }; $|=1; print "ready\n"; while (1) { sleep 30 }"#)
         defer { endNow(started) }
 
-        #expect(kill(started.pid, SIGSTOP) == 0)
+        #expect(started.child.signaller.send(SIGSTOP))
         try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
         let signaller = started.child.signaller
         let sent = await StoppedChildSupport.withinBlocking { signaller.send(SIGUSR1) }
@@ -666,7 +666,7 @@ struct RealProcessLauncherTests {
         #expect(started.exits.reported.isEmpty)
 
         // Only now does the child run and act on the signal it was sent.
-        #expect(kill(started.pid, SIGCONT) == 0)
+        #expect(started.child.signaller.send(SIGCONT))
         try #require(started.exits.waitForExit(), "child \(started.pid) did not act on the signal sent while it was stopped")
         #expect(started.exits.reported == [5])
     }
@@ -676,9 +676,9 @@ struct RealProcessLauncherTests {
         let started = try await spawnAnnounced(Self.stopTarget)
         defer { endNow(started) }
 
-        #expect(kill(started.pid, SIGSTOP) == 0)
+        #expect(started.child.signaller.send(SIGSTOP))
         try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
-        #expect(kill(started.pid, SIGKILL) == 0)
+        #expect(started.child.signaller.send(SIGKILL))
         try #require(started.exits.waitForExit(), "child \(started.pid) did not report its exit")
         #expect(started.exits.reported == [-SIGKILL])
         let signaller = started.child.signaller

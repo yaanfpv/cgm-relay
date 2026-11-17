@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+@testable import CGMRelayCore
 
 /// ChildEnd is what ending a test child can honestly say. `.ended` means the
 /// child's exit event was observed. Anything else, including a wait that ran
@@ -161,5 +162,64 @@ enum StoppedChildSupport {
     static func isGone(pid: Int32) -> Bool {
         errno = 0
         return kill(pid, 0) == -1 && errno == ESRCH
+    }
+
+    /// RecordedProcess is a pid bound to the start time it had when it was
+    /// recorded, taken while the test still knew the number named its child.
+    struct RecordedProcess: Sendable {
+        let pid: Int32
+        let start: ProcessStart
+    }
+
+    /// record binds pid to its start time now. It returns nil unless the
+    /// process table shows the pid as a child of this process, so a number
+    /// that names anything else is never recorded. Call it only while the
+    /// child is known to be unreaped.
+    static func record(pid: Int32) -> RecordedProcess? {
+        guard let entry = LaunchedChildSignaller.systemProcessTable(pid), entry.pid == pid, entry.parentPID == getpid() else { return nil }
+        return RecordedProcess(pid: pid, start: entry.start)
+    }
+
+    /// recordWhenStopped waits for the child to write its pid to pidFile and
+    /// to show as stopped, and records it then. A stopped child cannot end by
+    /// itself, so the number still names it at that moment. It returns nil
+    /// when the child was not seen stopped within the hang ceiling.
+    static func recordWhenStopped(pidFile: URL) -> RecordedProcess? {
+        let stoppedStatus: UInt32 = 4 // SSTOP in <sys/proc.h>
+        let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+        while DispatchTime.now() < deadline {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(text) {
+                var info = proc_bsdinfo()
+                let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+                if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+                   info.pbi_status == stoppedStatus, info.pbi_ppid == getpid() {
+                    return record(pid: pid)
+                }
+            }
+            sched_yield()
+        }
+        return nil
+    }
+
+    /// namesRecorded is false only when the recorded process is gone: no
+    /// process has the number, or the number now has another start time. A
+    /// process that has exited but is not yet reaped still has its number, so
+    /// it counts as named.
+    static func namesRecorded(_ recorded: RecordedProcess) -> Bool {
+        if let entry = LaunchedChildSignaller.systemProcessTable(recorded.pid) {
+            return entry.pid == recorded.pid && entry.start == recorded.start
+        }
+        errno = 0
+        return !(kill(recorded.pid, 0) == -1 && errno == ESRCH)
+    }
+
+    /// signal sends signal to the recorded process only when the number still
+    /// shows the start time recorded for it, read just before the send. A
+    /// mismatch or a read that fails sends nothing and returns false.
+    @discardableResult
+    static func signal(_ recorded: RecordedProcess, _ signal: Int32) -> Bool {
+        guard let entry = LaunchedChildSignaller.systemProcessTable(recorded.pid),
+              entry.pid == recorded.pid, entry.start == recorded.start else { return false }
+        return kill(recorded.pid, signal) == 0
     }
 }

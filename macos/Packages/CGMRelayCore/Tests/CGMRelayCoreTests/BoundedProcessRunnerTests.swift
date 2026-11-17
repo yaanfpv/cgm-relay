@@ -156,11 +156,12 @@ struct RealBoundedProcessRunnerTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let pidFile = dir.appendingPathComponent("pid")
         var hung = false
+        var recorded: StoppedChildSupport.RecordedProcess?
         defer {
-            // Only a run that never returned leaves its child behind.
-            if hung, let text = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(text) {
-                kill(pid, SIGKILL)
-            }
+            // Only a run that never returned leaves its child behind. The
+            // number from the file is signalled only while it still shows the
+            // start time recorded when the child was seen stopped.
+            if hung, let recorded { StoppedChildSupport.signal(recorded, SIGKILL) }
             try? FileManager.default.removeItem(at: dir)
         }
         // The child records its pid, then stops itself: the same state as a
@@ -170,6 +171,7 @@ struct RealBoundedProcessRunnerTests {
         let arguments = ["-e", script, pidFile.path]
 
         let runner = RealBoundedProcessRunner()
+        async let recording = StoppedChildSupport.withinBlocking { StoppedChildSupport.recordWhenStopped(pidFile: pidFile) }
         let result: BoundedProcessResult?
         switch mode {
         case .run:
@@ -186,6 +188,7 @@ struct RealBoundedProcessRunnerTests {
             }
         }
         hung = result == nil
+        recorded = await recording ?? nil
         try #require(result != nil, "the run did not end for a stopped child")
         #expect(result == .timedOut)
 
