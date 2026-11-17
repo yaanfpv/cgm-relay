@@ -7,6 +7,12 @@ import Foundation
 /// is ended through the handle that started it and collected before `read`
 /// returns, so it can never outlive the call.
 ///
+/// A helper is signalled only on its identity: the start time the kernel shows
+/// for its pid is recorded right after the launch and read again just before
+/// every signal, and a signal is sent only when both reads agree. A start that
+/// cannot be read, or that changed, sends nothing and the helper is reported as
+/// not confirmed ended.
+///
 /// The helper's output is read only after it has exited, so it must write
 /// less than a pipe buffer before it does; one that writes more is treated as
 /// a helper that did not finish, and is ended.
@@ -22,7 +28,15 @@ enum ObservedHelper {
         let helperEnded: Bool
     }
 
-    static func read(executable: String, arguments: [String], waitingMilliseconds: Int32) -> Observation {
+    /// `readStart` and `send` are the kernel read and the signal; tests pass
+    /// stand-ins to check what is sent when the identity does not hold.
+    static func read(
+        executable: String,
+        arguments: [String],
+        waitingMilliseconds: Int32,
+        readStart: (Int32) -> String? = { ChildCleanup.launchStart(pid: $0) },
+        send: (Int32, Int32) -> Void = { _ = kill($0, $1) }
+    ) -> Observation {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -39,6 +53,7 @@ enum ObservedHelper {
             return Observation(output: nil, helperPid: nil, helperEnded: true)
         }
         let pid = process.processIdentifier
+        let launchStart = readStart(pid)
 
         var ended = exited.wait(timeout: .now() + .milliseconds(Int(max(0, waitingMilliseconds)))) == .success
         var output: String?
@@ -48,21 +63,33 @@ enum ObservedHelper {
                 output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         } else {
-            ended = end(process, exited: exited)
+            ended = end(pid: pid, launchStart: launchStart, exited: exited, readStart: readStart, send: send)
         }
         try? pipe.fileHandleForReading.close()
         return Observation(output: output, helperPid: pid, helperEnded: ended)
     }
 
-    /// end ends a helper that did not finish in time, through its own handle:
-    /// terminate, then kill if it is still running, each followed by a wait on
-    /// its exit event bounded by the hang ceiling. It says whether the exit was
-    /// observed.
-    private static func end(_ process: Process, exited: DispatchSemaphore) -> Bool {
+    /// end ends a helper that did not finish in time: terminate, then kill if
+    /// it is still there, each followed by a wait on its exit event bounded by
+    /// the hang ceiling. Before each signal the helper's start is read again and
+    /// must equal the one recorded at launch; otherwise nothing is sent and the
+    /// end is not confirmed. It says whether the exit was observed.
+    private static func end(
+        pid: Int32,
+        launchStart: String?,
+        exited: DispatchSemaphore,
+        readStart: (Int32) -> String?,
+        send: (Int32, Int32) -> Void
+    ) -> Bool {
         let bound = Int(TestChild.hangCeilingMilliseconds)
-        if process.isRunning { process.terminate() }
+        func signalIfSame(_ signal: Int32) -> Bool {
+            guard let launchStart, readStart(pid) == launchStart else { return false }
+            send(pid, signal)
+            return true
+        }
+        guard signalIfSame(SIGTERM) else { return false }
         if exited.wait(timeout: .now() + .milliseconds(bound)) == .success { return true }
-        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        guard signalIfSame(SIGKILL) else { return false }
         return exited.wait(timeout: .now() + .milliseconds(bound)) == .success
     }
 }

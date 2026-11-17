@@ -522,6 +522,34 @@ struct ObservedHelperTests {
         #expect(StoppedChildSupport.isGone(pid: pid), "helper \(pid) was not collected")
     }
 
+    @Test("a helper whose start time changed since launch is sent nothing and is not confirmed ended")
+    func changedIdentityIsNeverSignalled() throws {
+        let log = CallLog()
+        let reads = CallLog()
+        // The number shows one start at launch and another before the send. The
+        // sleep ends by itself after 3 seconds, so nothing here has to end it.
+        let observation = ObservedHelper.read(
+            executable: "/bin/sleep", arguments: ["3"], waitingMilliseconds: 100,
+            readStart: { _ in reads.event("read"); return reads.events.count == 1 ? "launch" : "other" },
+            send: { log.send($0, $1) }
+        )
+        #expect(observation.helperPid != nil)
+        #expect(observation.output == nil)
+        #expect(!observation.helperEnded, "a helper whose end was not seen was reported ended")
+        #expect(log.sends.isEmpty, "a signal went to a number that shows another start time")
+    }
+
+    @Test("a helper whose start time cannot be read is sent nothing and is not confirmed ended")
+    func unreadableIdentityIsNeverSignalled() throws {
+        let log = CallLog()
+        let observation = ObservedHelper.read(
+            executable: "/bin/sleep", arguments: ["3"], waitingMilliseconds: 100,
+            readStart: { _ in nil }, send: { log.send($0, $1) }
+        )
+        #expect(!observation.helperEnded)
+        #expect(log.sends.isEmpty, "a signal was sent on an identity that could not be read")
+    }
+
     @Test("a helper that cannot be started gives no output and has no process to end")
     func unstartableHelperGivesNothing() {
         let observation = ObservedHelper.read(executable: "/no/such/helper-cgmrelay-test", arguments: [], waitingMilliseconds: TestChild.hangCeilingMilliseconds)
