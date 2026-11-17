@@ -142,8 +142,8 @@ final class AppModel: ObservableObject {
     /// engineUsesKeptFolder is whether the engine startEngine last started
     /// was given the kept Tailscale folder.
     private var engineUsesKeptFolder = false
-    /// isStartingEngine is whether a startEngine run is in flight, so a second call returns at once.
-    private var isStartingEngine = false
+    /// startInFlight is the start startEngine is running, so a second call returns at once and a restart can wait for it.
+    private var startInFlight: Task<Void, Never>?
     private let engineURL: URL
     private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
@@ -924,6 +924,7 @@ final class AppModel: ObservableObject {
         setupPortNotice = nil
         persistSettings()
         Task {
+            if let start = startInFlight { await start.value }
             // A relay that could not listen on the old port starts on the
             // new one at once; a running one restarts onto it.
             if engineState == .failed(.portInUse), lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
@@ -1439,6 +1440,7 @@ final class AppModel: ObservableObject {
     /// never disturbs a permanent failure, which stays exactly as
     /// reported until Try Again or Start Fresh.
     private func restartEngineIfRunning() async {
+        if let start = startInFlight { await start.value }
         switch engineState {
         case .starting, .running, .waitingToRestart:
             // Wait for the old process to be gone, so its own listener never
@@ -1472,54 +1474,57 @@ final class AppModel: ObservableObject {
     /// Start Fresh itself reports keeps that recovery path the only way
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
-        guard !isStartingEngine else { return }
-        isStartingEngine = true
-        defer { isStartingEngine = false }
-        stopRequested = false
-        if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
-            boundHost = nil
-            await supervisor.fail(.recoveryMoveFailed)
-            return
-        }
-        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
-        if let refusal = choosePortBeforeStart(interfaces: interfaces) {
-            boundHost = nil
-            await supervisor.fail(refusal)
-            return
-        }
-        var stateDirectory: String?
-        if settings.useBuiltInTailscale {
-            stateDirectory = builtInStateDirectory()
-            if stateDirectory == nil {
+        if startInFlight != nil { return }
+        let run = Task { [self] in
+            stopRequested = false
+            if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
+                boundHost = nil
+                await supervisor.fail(.recoveryMoveFailed)
+                return
+            }
+            let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+            if let refusal = choosePortBeforeStart(interfaces: interfaces) {
+                boundHost = nil
+                await supervisor.fail(refusal)
+                return
+            }
+            var stateDirectory: String?
+            if settings.useBuiltInTailscale {
+                stateDirectory = builtInStateDirectory()
+                if stateDirectory == nil {
+                    boundHost = nil
+                    await supervisor.fail(.configurationUnreadable)
+                    return
+                }
+            }
+            guard
+                let configuration = try? SettingsEngineConfigurationBuilder.build(
+                    settings: settings,
+                    from: credentialStore,
+                    interfaces: interfaces,
+                    statusAddr: statusAddr,
+                    databasePath: databasePath,
+                    tailscaleStateDir: stateDirectory,
+                    librelinkupBaseURL: librelinkupBaseURL
+                )
+            else {
                 boundHost = nil
                 await supervisor.fail(.configurationUnreadable)
                 return
             }
+            boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+            engineUsesKeptFolder = stateDirectory != nil
+            // A status from before this start must not read as this node's,
+            // including one still being fetched.
+            await statusPoller.discardPending()
+            latestStatus?.builtIn = nil
+            refreshBuiltInRoute()
+            await alertEngine.resumeAfterEngineStart()
+            await supervisor.start(configuration: configuration)
         }
-        guard
-            let configuration = try? SettingsEngineConfigurationBuilder.build(
-                settings: settings,
-                from: credentialStore,
-                interfaces: interfaces,
-                statusAddr: statusAddr,
-                databasePath: databasePath,
-                tailscaleStateDir: stateDirectory,
-                librelinkupBaseURL: librelinkupBaseURL
-            )
-        else {
-            boundHost = nil
-            await supervisor.fail(.configurationUnreadable)
-            return
-        }
-        boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        engineUsesKeptFolder = stateDirectory != nil
-        // A status from before this start must not read as this node's,
-        // including one still being fetched.
-        await statusPoller.discardPending()
-        latestStatus?.builtIn = nil
-        refreshBuiltInRoute()
-        await alertEngine.resumeAfterEngineStart()
-        await supervisor.start(configuration: configuration)
+        startInFlight = run
+        await run.value
+        startInFlight = nil
     }
 
     /// choosePortBeforeStart settles the follower port before the engine
