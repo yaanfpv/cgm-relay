@@ -495,9 +495,9 @@ final class AppModel: ObservableObject {
     }
 
     /// shutDown stops the status poller and the engine and waits, briefly,
-    /// for the engine process to be gone, so a relaunch never meets a store
-    /// the old engine still holds. If its end cannot be confirmed the app is
-    /// quitting anyway, so shutDown goes on and logs it.
+    /// for the engine process to be gone. If its end cannot be confirmed the
+    /// app is quitting anyway, so shutDown goes on and logs it; that engine
+    /// may outlive the app.
     func shutDown() async {
         stopRequested = true
         builtInSession.cancel()
@@ -1558,7 +1558,8 @@ final class AppModel: ObservableObject {
     }
 
     /// handleEngineStateChange clears boundHost whenever the engine
-    /// reaches .stopped or .failed, so a permanent failure the supervisor
+    /// reaches .stopped or .failed, unless its end is still being waited for
+    /// or was not confirmed, so a permanent failure the supervisor
     /// discovers on its own after starting (a store key mismatch, a
     /// damaged file, another copy already holding the store) never leaves
     /// the Connect pane showing an address nothing is listening on; a
@@ -1567,7 +1568,9 @@ final class AppModel: ObservableObject {
     private func handleEngineStateChange(_ state: EngineSupervisor.RunState) {
         switch state {
         case .stopped:
-            boundHost = nil
+            if lifetimes.keepAwakeMayBeReleased, lifetimes.engine != .confirming {
+                boundHost = nil
+            }
         case .failed(let reason):
             lifetimes.engineEnded(confirmed: reason != .engineStatusUnknown)
             if lifetimes.keepAwakeMayBeReleased {
