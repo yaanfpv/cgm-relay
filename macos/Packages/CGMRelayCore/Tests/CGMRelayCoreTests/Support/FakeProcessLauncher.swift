@@ -9,22 +9,84 @@ final class FakeRunningProcess: RunningProcess, @unchecked Sendable {
     private let onTerminate: @Sendable () -> Void
     private let exitsWhenAsked: Bool
     private let onKill: @Sendable () -> Void
+    private let gate: ExitGate?
 
     init(
         processIdentifier: Int32,
         exitsWhenAsked: Bool = true,
+        gate: ExitGate? = nil,
         onKill: @escaping @Sendable () -> Void = {},
         onTerminate: @escaping @Sendable () -> Void
     ) {
         self.processIdentifier = processIdentifier
         self.exitsWhenAsked = exitsWhenAsked
+        self.gate = gate
         self.onKill = onKill
         self.onTerminate = onTerminate
     }
 
     func terminate() { onTerminate() }
-    func waitUntilExit(timeout: Duration) async -> Bool { exitsWhenAsked }
+    func waitUntilExit(timeout: Duration) async -> Bool {
+        if let gate { return await gate.wait() }
+        return exitsWhenAsked
+    }
     func kill() { onKill() }
+}
+
+/// ExitGate holds every waitUntilExit of the processes it was given open
+/// until the test decides how it ends: release() ends the wait (and every
+/// later one) as reaped, expirePending() ends the waits now open as not
+/// reaped, the way a bound that ran out would. It waits on events only:
+/// awaitWaits(_:) suspends until that many waits have begun.
+final class ExitGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [CheckedContinuation<Bool, Never>] = []
+    private var arrivals = 0
+    private var watchers: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var isOpen = false
+
+    func wait() async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let (openNow, due): (Bool, [CheckedContinuation<Void, Never>]) = lock.withLock {
+                arrivals += 1
+                if !isOpen { pending.append(continuation) }
+                let ready = watchers.filter { $0.count <= arrivals }.map(\.continuation)
+                watchers.removeAll { $0.count <= arrivals }
+                return (isOpen, ready)
+            }
+            if openNow { continuation.resume(returning: true) }
+            for watcher in due { watcher.resume() }
+        }
+    }
+
+    /// awaitWaits returns once at least count waits have begun, in all.
+    func awaitWaits(_ count: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready: Bool = lock.withLock {
+                if arrivals >= count { return true }
+                watchers.append((count, continuation))
+                return false
+            }
+            if ready { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let open: [CheckedContinuation<Bool, Never>] = lock.withLock {
+            isOpen = true
+            defer { pending = [] }
+            return pending
+        }
+        for continuation in open { continuation.resume(returning: true) }
+    }
+
+    func expirePending() {
+        let open: [CheckedContinuation<Bool, Never>] = lock.withLock {
+            defer { pending = [] }
+            return pending
+        }
+        for continuation in open { continuation.resume(returning: false) }
+    }
 }
 
 /// FakeProcessLauncher records every launch and hands the test full
@@ -48,6 +110,10 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
     /// processesIgnoreTerminate makes every process launched afterwards
     /// still be running when asked to exit, so a test can see it killed.
     var processesIgnoreTerminate = false
+
+    /// exitGate, when set, holds the exit wait of every process launched
+    /// afterwards open until the test releases or expires it.
+    var exitGate: ExitGate?
 
     var launchCount: Int {
         lock.withLock { launches.count }
@@ -81,6 +147,7 @@ final class FakeProcessLauncher: ProcessLauncher, @unchecked Sendable {
         return FakeRunningProcess(
             processIdentifier: pid,
             exitsWhenAsked: !ignores,
+            gate: exitGate,
             onKill: { [weak self] in self?.lock.withLock { self?.killedFlags[index] = true } }
         ) { [weak self] in
             self?.markTerminated(index: index)

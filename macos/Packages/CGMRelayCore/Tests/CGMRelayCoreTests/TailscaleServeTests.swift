@@ -347,6 +347,19 @@ struct TailscaleServeTests {
         #expect(await RealTailscaleController(executableURL: URL(fileURLWithPath: "/no/such/tailscale-cgmrelay-test")).status() == .absent)
     }
 
+    @Test("a status probe whose end is not confirmed reads as unknown, never as stopped; every other end keeps its reading", arguments: [
+        (BoundedProcessResult.notConfirmedEnded, TailscaleStatus.unknown),
+        (BoundedProcessResult.timedOut, TailscaleStatus.stopped),
+        (BoundedProcessResult.exited(1), TailscaleStatus.stopped),
+        (BoundedProcessResult.failedToLaunch, TailscaleStatus.absent),
+    ])
+    func statusOfAProbeByHowItEnded(_ testCase: (result: BoundedProcessResult, want: TailscaleStatus)) async {
+        let runner = EndedAsRunner(result: testCase.result)
+        let controller = RealTailscaleController(executableURL: URL(fileURLWithPath: "/unused/tailscale"), runner: runner)
+        #expect(await controller.status() == testCase.want)
+        #expect(runner.calls == [["status", "--json"]])
+    }
+
     static let locatorCases: [(name: String, debug: Bool, fake: String?, service: String?, executable: Set<String>, want: String?)] = [
         ("release uses the app bundle's tool first", false, nil, nil, Set(TailscaleLocator.standardLocations), TailscaleLocator.standardLocations[0]),
         ("release falls through to the next location", false, nil, nil, [TailscaleLocator.standardLocations[1]], TailscaleLocator.standardLocations[1]),
@@ -470,5 +483,31 @@ struct TailscaleAppDetectorTests {
     func eitherBuild(identifier: String) {
         let found = TailscaleAppDetector.isInstalled(lookup: { $0 == identifier ? URL(fileURLWithPath: "/Applications/Tailscale.app") : nil })
         #expect(found)
+    }
+}
+
+/// EndedAsRunner ends every bounded run the one scripted way, so how a run
+/// ended is driven without a process.
+private final class EndedAsRunner: BoundedProcessRunning, @unchecked Sendable {
+    private let result: BoundedProcessResult
+    private let lock = NSLock()
+    private var recorded: [[String]] = []
+    var calls: [[String]] { lock.withLock { recorded } }
+
+    init(result: BoundedProcessResult) { self.result = result }
+
+    func run(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessResult {
+        lock.withLock { recorded.append(arguments) }
+        return result
+    }
+
+    func runCapturingOutput(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessOutput {
+        lock.withLock { recorded.append(arguments) }
+        return BoundedProcessOutput(result: result, output: Data())
+    }
+
+    func runOnCallingThread(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) -> BoundedProcessResult {
+        lock.withLock { recorded.append(arguments) }
+        return result
     }
 }

@@ -696,4 +696,228 @@ struct EngineSupervisorTests {
             #expect(!stillNamed, "round \(round): stopAndWait returned while pid \(pid) still named the engine")
         }
     }
+
+    // MARK: - An end that is not confirmed is a process still running
+
+    /// RunOrder records what happened in the order it happened, so a test can
+    /// say which result came after which event without timing anything.
+    private final class RunOrder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: [String] = []
+        var events: [String] { lock.withLock { recorded } }
+        func note(_ event: String) { lock.withLock { recorded.append(event) } }
+    }
+
+    /// Starts one engine whose exit wait the returned gate holds open, then
+    /// has two callers ask stopAndWait at once. The first is waiting on the
+    /// gate and the second has been handed to the supervisor before this
+    /// returns.
+    private func startOverlappingStops(
+        launcher: FakeProcessLauncher,
+        supervisor: EngineSupervisor,
+        gate: ExitGate,
+        order: RunOrder
+    ) async -> (first: Task<Bool, Never>, second: Task<Bool, Never>) {
+        await supervisor.start(configuration: .fixture())
+        let first = Task {
+            let confirmed = await supervisor.stopAndWait(timeout: .seconds(3))
+            order.note("first returned \(confirmed)")
+            return confirmed
+        }
+        await gate.awaitWaits(1)
+        let entered = AsyncSignal()
+        let second = Task {
+            entered.fire()
+            let confirmed = await supervisor.stopAndWait(timeout: .seconds(3))
+            order.note("second returned \(confirmed)")
+            return confirmed
+        }
+        await entered.wait()
+        // Handled after the second call's own turn on the supervisor.
+        _ = await supervisor.state
+        return (first, second)
+    }
+
+    @Test("a second stopAndWait while the first awaits the reap returns nothing before that engine's exit is reported, then both confirm")
+    func overlappingStopAndWaitBothWaitForTheReap() async throws {
+        let launcher = FakeProcessLauncher()
+        let gate = ExitGate()
+        launcher.exitGate = gate
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        let order = RunOrder()
+        let calls = await startOverlappingStops(launcher: launcher, supervisor: supervisor, gate: gate, order: order)
+
+        order.note("exit reported")
+        launcher.finishLaunch(at: 0, exitCode: -SIGTERM)
+        gate.release()
+        let results = await StoppedChildSupport.withinAsync { (await calls.first.value, await calls.second.value) }
+        try #require(results != nil, "an overlapping stopAndWait never returned")
+
+        #expect(results?.0 == true)
+        #expect(results?.1 == true)
+        let events = order.events
+        #expect(events.first == "exit reported", "a caller returned before the first engine's exit was reported: \(events)")
+        #expect(events.count == 3)
+        #expect(launcher.launchCount == 1)
+        #expect(await supervisor.state == .stopped)
+    }
+
+    @Test("when the post-kill bound runs out both overlapping stopAndWait calls say false, the engine was killed once asked, and nothing starts")
+    func overlappingStopAndWaitBothFailWhenTheBoundRunsOut() async throws {
+        let launcher = FakeProcessLauncher()
+        let gate = ExitGate()
+        launcher.exitGate = gate
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        let order = RunOrder()
+        let calls = await startOverlappingStops(launcher: launcher, supervisor: supervisor, gate: gate, order: order)
+
+        // The wait for the exit runs out, the engine is killed, and the wait
+        // after the kill runs out as well.
+        gate.expirePending()
+        await gate.awaitWaits(2)
+        #expect(launcher.wasKilled(at: 0))
+        gate.expirePending()
+        let results = await StoppedChildSupport.withinAsync { (await calls.first.value, await calls.second.value) }
+        try #require(results != nil, "an overlapping stopAndWait never returned")
+
+        #expect(results?.0 == false)
+        #expect(results?.1 == false, "the second caller was told the engine ended while it was never confirmed reaped: \(order.events)")
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "no second engine while the first may still run")
+    }
+
+    @Test("a stopAndWait that arrives while another has failed to confirm the end is told false, and a start still launches nothing")
+    func stopAndWaitAfterAnUnconfirmedEndStaysFalse() async throws {
+        let launcher = FakeProcessLauncher()
+        let gate = ExitGate()
+        launcher.exitGate = gate
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+        let first = Task { await supervisor.stopAndWait(timeout: .seconds(3)) }
+        await gate.awaitWaits(1)
+        gate.expirePending()
+        await gate.awaitWaits(2)
+        gate.expirePending()
+        let firstResult = await StoppedChildSupport.withinAsync { await first.value }
+        try #require(firstResult != nil, "stopAndWait never returned")
+        #expect(firstResult == false)
+
+        let later = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .zero) }
+        #expect(later == false)
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1)
+    }
+
+    @Test("a status-unknown exit reported after a plain stop is honoured: the supervisor reports it and no second engine starts")
+    func statusUnknownExitAfterAPlainStopIsHonoured() async throws {
+        let launcher = FakeProcessLauncher()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+
+        await supervisor.stop()
+        #expect(await supervisor.state == .stopped)
+        launcher.finishLaunch(at: 0, exitCode: ProcessExitCode.statusUnknown)
+        #expect(await waitUntil { await supervisor.state == .failed(.engineStatusUnknown) },
+                "the engine's end was not confirmed, yet start is open again")
+
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "a second engine started while the first may still run")
+    }
+
+    @Test("a status-unknown exit reported after a plain stop and a later start is honoured too")
+    func statusUnknownExitFromAnEarlierGenerationIsHonoured() async throws {
+        let launcher = FakeProcessLauncher()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+        await supervisor.stop()
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 2)
+
+        // The first engine's end is only now reported, as not confirmed.
+        launcher.finishLaunch(at: 0, exitCode: ProcessExitCode.statusUnknown)
+        #expect(await waitUntil { await supervisor.state == .failed(.engineStatusUnknown) })
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 2)
+    }
+
+    @Test("clearFailure leaves a status-unknown failure as it is, however the engine got there, and start launches nothing", arguments: [true, false])
+    func clearFailureRefusesAStatusUnknownFailure(viaExit: Bool) async throws {
+        let launcher = FakeProcessLauncher()
+        launcher.processesIgnoreTerminate = !viaExit // an engine that is never reaped
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+        if viaExit {
+            launcher.finishLaunch(at: 0, exitCode: ProcessExitCode.statusUnknown)
+            #expect(await waitUntil { await supervisor.state == .failed(.engineStatusUnknown) })
+        } else {
+            let confirmed = await supervisor.stopAndWait(timeout: .zero)
+            #expect(confirmed == false)
+            #expect(await supervisor.state == .failed(.engineStatusUnknown))
+        }
+
+        await supervisor.clearFailure()
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "a second engine started after clearFailure while the first may still run")
+    }
+
+    @Test("fail never replaces a status-unknown failure, and a failure set during a confirmation that then fails still ends as status unknown")
+    func failNeverLeavesStatusUnknown() async throws {
+        let launcher = FakeProcessLauncher()
+        let gate = ExitGate()
+        launcher.exitGate = gate
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+        let stopping = Task { await supervisor.stopAndWait(timeout: .seconds(3)) }
+        await gate.awaitWaits(1)
+
+        // The caller reports its own failure and then tries to clear it while
+        // the first engine is still being waited for.
+        await supervisor.fail(.recoveryMoveFailed)
+        await supervisor.clearFailure()
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "a second engine started while the first was being waited for")
+
+        gate.expirePending()
+        await gate.awaitWaits(2)
+        gate.expirePending()
+        let confirmed = await StoppedChildSupport.withinAsync { await stopping.value }
+        try #require(confirmed != nil, "stopAndWait never returned")
+        #expect(confirmed == false)
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+
+        await supervisor.fail(.storeInUse)
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1)
+    }
+}
+
+/// AsyncSignal lets one task say it has reached a point and another wait for
+/// that, with no timing involved.
+private final class AsyncSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func fire() {
+        let resume: CheckedContinuation<Void, Never>? = lock.withLock {
+            fired = true
+            defer { waiter = nil }
+            return waiter
+        }
+        resume?.resume()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready: Bool = lock.withLock {
+                if fired { return true }
+                waiter = continuation
+                return false
+            }
+            if ready { continuation.resume() }
+        }
+    }
 }
