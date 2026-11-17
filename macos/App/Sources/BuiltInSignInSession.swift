@@ -26,7 +26,7 @@ final class BuiltInSignInSession: NSObject, ASWebAuthenticationPresentationConte
     static func pageURL(of route: BuiltInRouteState) -> URL? {
         switch route {
         case .signIn(let url), .approve(let url), .enableFunnel(let url): return url
-        case .starting, .settingUp, .publishing, .notReachable, .ready, .notAnswering, .waitingForInternet, .stopped, .failed: return nil
+        case .starting, .settingUp, .publishing, .notReachable, .ready, .notAnswering, .waitingForInternet, .stopped, .engineMayStillRun, .failed: return nil
         }
     }
 

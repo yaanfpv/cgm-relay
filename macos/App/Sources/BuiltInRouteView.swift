@@ -111,6 +111,8 @@ struct BuiltInRouteView: View {
             SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.settingsStatusText(timeZone: .current), slot: .checking)
         case .stopped:
             SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.notReadyReason, wrapsCaption: true, slot: .unavailable(model.builtInRoute.settingsStatusText(timeZone: .current)))
+        case .engineMayStillRun:
+            SetupStatusRow(name: "built-in", title: "Tailscale", caption: model.builtInRoute.notReadyReason, captionIsError: true, wrapsCaption: true, slot: .unavailable(model.builtInRoute.settingsStatusText(timeZone: .current)))
         case .failed(let message):
             SetupStatusRow(
                 name: "built-in",

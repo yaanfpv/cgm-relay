@@ -306,9 +306,11 @@ public struct MenuDisplayState: Sendable, Equatable {
     }
 
     /// engineMayStillRunStatus and engineMayStillRunDetail are the two lines
-    /// said wherever an engine's end was never confirmed.
+    /// said wherever an engine's end was never confirmed, and
+    /// engineMayStillRunText is the two together.
     public static let engineMayStillRunStatus = "Relay may still be running"
     public static let engineMayStillRunDetail = "Quit and reopen CGM Relay."
+    public static var engineMayStillRunText: String { "\(engineMayStillRunStatus). \(engineMayStillRunDetail)" }
 
     /// statusLine renders a permanent failure's headline, in the person's
     /// own terms: never "engine", "store", "key mismatch", or an exit

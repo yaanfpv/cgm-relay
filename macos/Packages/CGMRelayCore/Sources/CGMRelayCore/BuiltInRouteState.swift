@@ -192,7 +192,7 @@ public enum BuiltInRouteState: Equatable, Sendable {
         case .notAnswering: return "Your address isn't answering. Reconnecting…"
         case .waitingForInternet: return "Waiting for the internet to check your address."
         case .stopped: return "Your address is stopped. It works again once CGM Relay is running."
-        case .engineMayStillRun: return "\(MenuDisplayState.engineMayStillRunStatus). \(MenuDisplayState.engineMayStillRunDetail)"
+        case .engineMayStillRun: return MenuDisplayState.engineMayStillRunText
         case .failed(let message): return message
         case .ready: return ""
         }
