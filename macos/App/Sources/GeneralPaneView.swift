@@ -182,7 +182,7 @@ struct GeneralPaneView: View {
             get: { model.stayAwakeChoice == .on },
             set: { on in
                 if on {
-                    Task { await model.turnOnStayAwake() }
+                    model.turnOnStayAwake()
                 } else {
                     Task { await model.turnOffStayAwake() }
                 }

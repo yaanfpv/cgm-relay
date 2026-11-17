@@ -132,8 +132,10 @@ final class AppModel: ObservableObject {
     private let signInStarter: any BuiltInSignInStarting
     private let routeLeaver: any BuiltInRouteLeaving
     /// isLeavingRoute is whether a way out of the built-in route is waiting on
-    /// the engine's logout, so a second press does not start another.
-    private var isLeavingRoute = false
+    /// the engine's logout, so a second press does not start another. The
+    /// press that starts a leave sets it before anything else runs, and the
+    /// run it started clears it when that run ends.
+    @Published private(set) var isLeavingRoute = false
     /// lifetimes owns when the engine and the leave child count as running:
     /// an end that was not confirmed counts as running until the app quits.
     private let lifetimes = ProcessLifetimes()
@@ -703,7 +705,9 @@ final class AppModel: ObservableObject {
     /// the engine restarts without it.
     func chooseOwnTailscale() {
         guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        isLeavingRoute = true
         Task {
+            defer { isLeavingRoute = false }
             await leaveBuiltInRoute(for: .chooseOwnTailscale) {
                 self.settings.useBuiltInTailscale = false
                 self.persistSettings()
@@ -719,7 +723,9 @@ final class AppModel: ObservableObject {
     /// the built-in route, logging out of the person's Tailscale account first.
     private func chooseThisMacOnlyLeavingBuiltIn() {
         guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        isLeavingRoute = true
         Task {
+            defer { isLeavingRoute = false }
             await leaveBuiltInRoute(for: .chooseThisMacOnly) {
                 self.settings.useBuiltInTailscale = false
                 self.settings = self.settings.choosing(.thisMacOnly)
@@ -736,14 +742,12 @@ final class AppModel: ObservableObject {
     /// out of the built-in route. The leave is awaited, with its own timeout,
     /// before the engine stops, since the node that logs out lives in the
     /// engine. What the leave answered is saved, so a launch retries it when
-    /// the Mac was not yet logged out.
+    /// the Mac was not yet logged out. The caller owns isLeavingRoute.
     private func leaveBuiltInRoute(
         for trigger: LeaveTrigger,
         applyChoice: () async -> Void
     ) async {
         guard !lifetimes.builtInChoiceBlocked else { return }
-        isLeavingRoute = true
-        defer { isLeavingRoute = false }
         for step in LeaveTailnetSequence.steps(for: trigger, builtInOn: settings.useBuiltInTailscale) {
             switch step {
             case .leave:
@@ -1013,28 +1017,30 @@ final class AppModel: ObservableObject {
     /// whether this Mac's own entry is now serving. A transient failure is
     /// retried quietly (TailscaleChange), each attempt starting from a fresh
     /// read, and the spinner stays up until the last attempt has ended.
-    func enableTailscaleHTTPS(shownPort: Int) async {
+    func enableTailscaleHTTPS(shownPort: Int) {
         guard !isChangingTailscale else { return }
         isChangingTailscale = true
         tailscaleFailure = nil
-        defer { isChangingTailscale = false }
-
-        let result = await TailscaleChange.turnOn(
-            shownPort: shownPort,
-            relayPort: settings.port,
-            controller: tailscale,
-            read: { [self] in await readHTTPSState() },
-            wait: { try? await Task.sleep(for: $0) }
-        )
-        switch result {
-        case .done, .unchanged:
-            settings = settings.choosing(.tailscaleHTTPS)
-            persistSettings()
-            refreshNetworkAddresses()
-        case .refused:
-            reportFailure(.settingsChanged, turningOn: true)
-        case .failed(let outcome):
-            reportFailure(outcome, turningOn: true)
+        let relayPort = settings.port
+        Task {
+            defer { isChangingTailscale = false }
+            let result = await TailscaleChange.turnOn(
+                shownPort: shownPort,
+                relayPort: relayPort,
+                controller: tailscale,
+                read: { [self] in await readHTTPSState() },
+                wait: { try? await Task.sleep(for: $0) }
+            )
+            switch result {
+            case .done, .unchanged:
+                settings = settings.choosing(.tailscaleHTTPS)
+                persistSettings()
+                refreshNetworkAddresses()
+            case .refused:
+                reportFailure(.settingsChanged, turningOn: true)
+            case .failed(let outcome):
+                reportFailure(outcome, turningOn: true)
+            }
         }
     }
 
@@ -1045,31 +1051,32 @@ final class AppModel: ObservableObject {
     /// removes the handler: the chosen way is never changed here, so a person
     /// who chose Tailscale HTTPS stays on it, told that followers can't reach
     /// this Mac until it is turned on again or another way is chosen.
-    func disableTailscaleHTTPS(shownPort: Int) async {
+    func disableTailscaleHTTPS(shownPort: Int) {
         guard !isChangingTailscale else { return }
         isChangingTailscale = true
         tailscaleFailure = nil
-        defer { isChangingTailscale = false }
-
-        let result = await TailscaleChange.turnOff(
-            shownPort: shownPort,
-            controller: tailscale,
-            read: { [self] in await readHTTPSState() },
-            wait: { try? await Task.sleep(for: $0) }
-        )
-        switch result {
-        case .done:
-            // A start refused for Tailscale HTTPS on the status port can move
-            // now that nothing holds the port.
-            if engineState == .failed(.httpsOnStatusPort) {
-                tryAgain()
+        Task {
+            defer { isChangingTailscale = false }
+            let result = await TailscaleChange.turnOff(
+                shownPort: shownPort,
+                controller: tailscale,
+                read: { [self] in await readHTTPSState() },
+                wait: { try? await Task.sleep(for: $0) }
+            )
+            switch result {
+            case .done:
+                // A start refused for Tailscale HTTPS on the status port can
+                // move now that nothing holds the port.
+                if engineState == .failed(.httpsOnStatusPort) {
+                    tryAgain()
+                }
+            case .unchanged:
+                break
+            case .refused:
+                reportFailure(.settingsChanged, turningOn: false)
+            case .failed(let outcome):
+                reportFailure(outcome, turningOn: false)
             }
-        case .unchanged:
-            break
-        case .refused:
-            reportFailure(.settingsChanged, turningOn: false)
-        case .failed(let outcome):
-            reportFailure(outcome, turningOn: false)
         }
     }
 
@@ -1326,11 +1333,15 @@ final class AppModel: ObservableObject {
     /// first needs the permission to change the sleep setting, which asks
     /// for the Mac's password once; the answer is saved only when that
     /// worked, so a closed prompt leaves things as they were.
-    func turnOnStayAwake() async {
+    func turnOnStayAwake() {
         guard !isChangingStayAwake else { return }
         stayAwakeNotice = nil
-        if isLaptop {
-            isChangingStayAwake = true
+        guard isLaptop else {
+            saveStayAwake(.on)
+            return
+        }
+        isChangingStayAwake = true
+        Task {
             defer { isChangingStayAwake = false }
             if await !sleepRules.isInstalled() {
                 switch await sleepRules.install() {
@@ -1343,8 +1354,8 @@ final class AppModel: ObservableObject {
                     return
                 }
             }
+            saveStayAwake(.on)
         }
-        saveStayAwake(.on)
     }
 
     /// turnOffStayAwake saves the answer and puts the Mac back to sleeping

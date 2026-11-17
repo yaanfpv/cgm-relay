@@ -195,7 +195,8 @@ struct TailscaleChoiceView: View {
             ChoiceRow(
                 title: "Use My Tailscale",
                 description: "Reach this Mac over your own Tailscale, on a private address.",
-                selected: !model.settings.useBuiltInTailscale
+                selected: !model.settings.useBuiltInTailscale,
+                disabled: model.isLeavingRoute
             ) { model.chooseOwnTailscale() }
             ChoiceRow(
                 title: "Use Built-In Tailscale",

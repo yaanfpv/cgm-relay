@@ -26,16 +26,18 @@ final class SignInForm: ObservableObject {
 
     /// submit checks the account against LibreLinkUp; the password is
     /// dropped once it has been accepted.
-    func submit(model: AppModel) async {
+    func submit(model: AppModel) {
         guard canSubmit else { return }
         isChecking = true
         message = nil
-        let outcome = await model.signIn(email: email, password: password)
-        isChecking = false
-        if outcome == .signedIn {
-            password = ""
-        } else {
-            message = outcome.message
+        Task {
+            defer { isChecking = false }
+            let outcome = await model.signIn(email: email, password: password)
+            if outcome == .signedIn {
+                password = ""
+            } else {
+                message = outcome.message
+            }
         }
     }
 
@@ -99,7 +101,7 @@ struct AccountPaneView: View {
                 ProgressView().controlSize(.small)
             }
             AccessibleButton(form.isChecking ? "Checking…" : "Sign In", style: .primary) {
-                Task { await form.submit(model: model) }
+                form.submit(model: model)
             }
             .keyboardShortcut(.defaultAction)
             .disabled(!form.canSubmit)
@@ -240,6 +242,6 @@ private struct SignInSection: View {
     }
 
     private func submit() {
-        Task { await form.submit(model: model) }
+        form.submit(model: model)
     }
 }

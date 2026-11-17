@@ -228,7 +228,7 @@ struct SetupView: View {
                     ProgressView().controlSize(.small)
                 }
                 AccessibleButton(signInForm.isChecking ? "Checking…" : "Sign In", style: .primary) {
-                    Task { await signInForm.submit(model: model) }
+                    signInForm.submit(model: model)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!signInForm.canSubmit)
@@ -397,7 +397,7 @@ struct SetupStayAwakeStep: View {
             }
         case .off, nil:
             return .action("Turn On", accessibleName: "Turn On Keep this Mac awake") {
-                Task { await model.turnOnStayAwake() }
+                model.turnOnStayAwake()
             }
         }
     }

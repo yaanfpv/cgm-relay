@@ -50,7 +50,7 @@ struct TailscaleHTTPSControl: View {
                 model.settings.tailscaleHTTPSEnabled ? "Turned off in Tailscale. Turn it on again." : Self.offCaption,
                 model.isChangingTailscale
                     ? .checking
-                    : .action("Use Tailscale HTTPS", style: model.phoneReachability.isReachable ? .secondary : .primary) { Task { await model.enableTailscaleHTTPS(shownPort: port) } }
+                    : .action("Use Tailscale HTTPS", style: model.phoneReachability.isReachable ? .secondary : .primary) { model.enableTailscaleHTTPS(shownPort: port) }
             )
         case .on(let port):
             row(
@@ -65,7 +65,7 @@ struct TailscaleHTTPSControl: View {
                 titleVisibility: .visible
             ) {
                 Button("Turn Off", role: .destructive) {
-                    Task { await model.disableTailscaleHTTPS(shownPort: port) }
+                    model.disableTailscaleHTTPS(shownPort: port)
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
