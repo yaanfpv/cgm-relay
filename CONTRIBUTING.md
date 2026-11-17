@@ -46,7 +46,9 @@ open "macos/.build/DerivedData/Build/Products/Debug/CGM Relay.app" --args \
 
 Keep each one to a single change, add tests for behaviour you change, and add a line under `## [Unreleased]` in `CHANGELOG.md` saying what changed for someone using the app. A docs or CI change can skip the changelog with the `no changelog` label.
 
-Every pull request runs only the jobs its change can reach, so a docs-only change runs just Checks. A plan job picks them with `bash .github/checks/ci-legs.sh --legs-for origin/main`, which names each job it leaves out and why; a change it cannot classify runs every job. Go formatting and the selector's own tests run in Checks, the Go vet, tests and build checks run side by side in Go checks, and the macOS jobs are Go tests (macOS), Swift tests and Mac app build. The one check a pull request waits on is gate, which is green only when every planned job passed and every other job was skipped. The changelog entry is its own check, changelog, which adding or removing the label re-runs on its own. The full set runs nightly when main has moved. Each check is a script in `.github/checks/`, and you can run the same command yourself from the repo root:
+A pull request runs only the jobs its change can reach, and a change to docs, issue templates or the changelog runs just Checks. A plan job picks the jobs with `bash .github/checks/ci-legs.sh --legs-for origin/main`, which names each job it leaves out and why. A change to a file it has no rule for, or one it cannot read, runs every job. The full set also runs nightly when main has moved.
+
+The jobs are Checks (Go formatting and the selector's own tests), Go checks (vet, tests and build, side by side), Go tests (macOS), Swift tests and Mac app build. The one check a pull request waits on is gate, which is green only when every planned job passed and every other job was skipped. The changelog entry is its own check, changelog, which adding or removing the label re-runs on its own. Each check is a script in `.github/checks/`, and you can run the same command yourself from the repo root:
 
 | Check | Command |
 | --- | --- |
