@@ -549,24 +549,31 @@ struct EngineSupervisorTests {
         private var codes: [Int32] = []
         let ready = DispatchSemaphore(value: 0)
         let exited = DispatchSemaphore(value: 0)
+        /// What the holder reported for the engine, for the cleanup's decision.
+        let watch = ExitWatch()
+        private var startRead: String?
 
         var process: (any RunningProcess)? { lock.withLock { launched } }
+        /// The start time read just after the launch, to name the engine in a
+        /// failure. It names; it never licenses a send.
+        var launchedStart: String? { lock.withLock { startRead } }
         var exitCodes: [Int32] { lock.withLock { codes } }
 
-        /// endEngineIfLeftRunning kills the child this test started if no
-        /// exit was reported, through the handle the launch returned, then
-        /// waits for the report. Once an exit was reported, or no launch
-        /// happened, there is nothing left to end. A report that does not
-        /// come fails the test naming the engine.
+        /// endEngineIfLeftRunning ends the engine this test started, unless the
+        /// holder has confirmed its reap. A report of an exit is not that: the
+        /// holder also reports a status it could not observe, which reaps
+        /// nothing. The end goes through the handle the launch returned, and an
+        /// end that is not confirmed, an unobserved one included, fails the test
+        /// naming the engine and the start read when it launched.
         func endEngineIfLeftRunning() {
-            let process = self.process
+            guard let process = self.process else { return }
             ChildCleanup.endHeldRecordingNotConfirmed(
-                pid: process?.processIdentifier ?? 0,
-                start: nil,
-                alreadyEnded: process == nil || !exitCodes.isEmpty,
-                send: { process?.kill() },
+                pid: process.processIdentifier,
+                start: launchedStart,
+                alreadyEnded: ConfirmedEnd.isReaped(process),
+                send: { process.kill() },
                 waitForEnd: { [self] milliseconds in
-                    exited.wait(timeout: .now() + .milliseconds(Int(milliseconds))) == .success
+                    !watch.reportedStatusUnknown && ConfirmedEnd.wait(process, milliseconds: milliseconds)
                 },
                 waitingMilliseconds: TestChild.hangCeilingMilliseconds
             )
@@ -589,11 +596,16 @@ struct EngineSupervisorTests {
                 },
                 onExit: { [self] code in
                     lock.withLock { codes.append(code) }
+                    watch.record(code)
                     exited.signal()
                     onExit(code)
                 }
             )
-            lock.withLock { launched = process }
+            let start = ChildCleanup.startNow(pid: process.processIdentifier)
+            lock.withLock {
+                launched = process
+                startRead = start
+            }
             return process
         }
     }
