@@ -4,7 +4,8 @@ import Foundation
 
 /// ChildCleanup ends the children a test started and says plainly when it
 /// could not confirm an end. `.ended` means the child's exit was observed, or
-/// that no process with the recorded identity exists any more. Anything else
+/// that no process with the recorded identity exists any more (identity being
+/// the pid and the start text, at the resolution of that text). Anything else
 /// is `.notConfirmed`, and the recording forms turn it into a test failure
 /// that names the child and the start time recorded for it.
 ///

@@ -1,8 +1,10 @@
 import Foundation
 
 /// EngineSupervisor starts the engine as a child process, restarts it
-/// with backoff if it exits on its own, and starts no second engine while
-/// the first may still be running. It is an actor because every field below is
+/// with backoff if it exits on its own, once stopped ends the child it started
+/// or reports that it could not confirm that end (see stopAndWait), and starts
+/// no second engine while the first may still be running. It is an actor
+/// because every field below is
 /// mutated from both the caller's own calls (start, stop) and from the
 /// child process's own termination handler, which fires on an arbitrary
 /// thread.

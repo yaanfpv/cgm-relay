@@ -5,9 +5,10 @@ import Foundation
 /// These checks are the contract of TestChild (Support/TestChild.swift), the
 /// test-target routine the credential lock test uses to end its child: it ends the child by
 /// closing its input, waits on the child's exit event, and says "ended" only
-/// when that event happened. They run real children, send no signal, and leave
-/// no child running: the one child that ignores end of input is released
-/// through a descriptor this suite owns, then ended.
+/// when that event happened. They run real children and send no signal. Each
+/// child is ended by its test: the one that ignores end of input is released
+/// through a descriptor this suite owns, and one whose end is not confirmed
+/// fails the test naming it.
 ///
 /// The routine under test:
 ///
@@ -155,11 +156,14 @@ struct ChildEndingTests {
 //     }
 //
 //     enum ObservedHelper {
-//         struct Observation { let output: String?; let helperPid: Int32?; let helperEnded: Bool }
-//         // Starts the helper, waits on its exit event for at most the bound and
-//         // returns its trimmed standard output only when it exited with status 0
-//         // in time. Whatever happened, a helper it started is ended through its
-//         // own handle and collected before this returns, and helperEnded says so.
+//         struct Observation { let output: String?; let helperPid: Int32?; let birthStart: String?
+//                              let helperEnded: Bool; let helper: HeldChild? }
+//         // Starts the helper through ChildSpawner, which holds it from birth, waits
+//         // for its confirmed reap for at most the bound and returns its trimmed
+//         // standard output only when it exited with status 0 in time. A helper
+//         // that did not finish is sent TERM, then KILL, only through its held
+//         // signaller. helperEnded is true only when its reap was confirmed (or
+//         // none was started); false names the helper by pid and birth start.
 //         static func read(executable: String, arguments: [String], waitingMilliseconds: Int32) -> Observation
 //     }
 //

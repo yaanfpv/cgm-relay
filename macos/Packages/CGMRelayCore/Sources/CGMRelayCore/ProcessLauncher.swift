@@ -27,7 +27,7 @@ public protocol RunningProcess: Sendable {
 }
 
 /// ProcessLauncher starts the engine as a child process. Production code
-/// uses RealProcessLauncher, backed by Foundation.Process; tests use a
+/// uses RealProcessLauncher, which starts the child through ChildSpawner; tests use a
 /// fake that records the launch and lets the test decide when and how the
 /// fake process exits.
 public protocol ProcessLauncher: Sendable {

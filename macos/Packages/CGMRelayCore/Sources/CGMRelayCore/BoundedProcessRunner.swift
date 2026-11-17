@@ -68,12 +68,13 @@ public protocol BoundedProcessRunning: Sendable {
     ) -> BoundedProcessResult
 }
 
-/// RealBoundedProcessRunner runs the process with Foundation.Process,
-/// giving it the same minimal, explicit environment RealProcessLauncher
-/// gives the supervised engine: a one-shot command needs no more of this
-/// app's own environment than the supervised one does. `run` discards the
-/// child's stdout and stderr outright; `runCapturingOutput` keeps them for
-/// a caller that must read the answer.
+/// RealBoundedProcessRunner runs the process through ChildSpawner, which
+/// holds it from birth: every signal goes through its held signaller and
+/// only its holder reaps it. It gives the child the same minimal, explicit
+/// environment RealProcessLauncher gives the supervised engine: a one-shot
+/// command needs no more of this app's own environment than the supervised
+/// one does. `run` discards the child's stdout and stderr outright;
+/// `runCapturingOutput` keeps them for a caller that must read the answer.
 public struct RealBoundedProcessRunner: BoundedProcessRunning {
     /// extraEnvironment is added to the minimal child environment, for a
     /// caller whose child needs one variable more than the engine does.

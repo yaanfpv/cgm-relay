@@ -1,10 +1,11 @@
 import Testing
 import Foundation
 
-/// ChildSurvivors names the children a group of suites started and left alive.
-/// It reads the direct children of this process from the kernel. A child that
+/// ChildSurvivors names the direct children of this process that a group of
+/// suites started and left alive. It reads them from the kernel. A child that
 /// ended and was collected is not in the list; one that is still there, or
-/// ended but was never collected, is.
+/// ended but was never collected, is. A process a child started and left
+/// behind is not a child of this one, so it is not seen here.
 enum ChildSurvivors {
     struct Child: Equatable, Sendable {
         let pid: Int32
