@@ -1265,6 +1265,108 @@ private final class AccountedRead: @unchecked Sendable {
     }
 }
 
+/// OpenOnce is a gate a test opens once: `wait` returns when it is open, at
+/// once if it already is. It lets a scripted run say "I am inside the call"
+/// and lets the test say "go on", with no sleep and no polling.
+private final class OpenOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        let pending = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            let all = waiters
+            waiters = []
+            return all
+        }
+        pending.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let already = lock.withLock { () -> Bool in
+                if isOpen { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if already { continuation.resume() }
+        }
+    }
+}
+
+/// ScriptedStep is what one call of a scripted inner runner does: read the
+/// launch identity of `readPid` through the reader it was given (if any), run
+/// `during` (which sees the calls listed so far), open `entered` and wait for
+/// `resume` (if given), then return `result`. It starts no process.
+private struct ScriptedStep: Sendable {
+    var readPid: pid_t?
+    var during: (@Sendable () -> Void)?
+    var entered: OpenOnce?
+    var resume: OpenOnce?
+    var result: BoundedProcessResult
+
+    init(_ result: BoundedProcessResult, readPid: pid_t? = nil, during: (@Sendable () -> Void)? = nil, entered: OpenOnce? = nil, resume: OpenOnce? = nil) {
+        self.result = result
+        self.readPid = readPid
+        self.during = during
+        self.entered = entered
+        self.resume = resume
+    }
+}
+
+/// ScriptedPlan hands out one step per call, in the order the calls are made.
+private final class ScriptedPlan: @unchecked Sendable {
+    private let lock = NSLock()
+    private let steps: [ScriptedStep]
+    private var next = 0
+
+    init(_ steps: [ScriptedStep]) { self.steps = steps }
+
+    func take() -> ScriptedStep {
+        lock.withLock {
+            defer { next += 1 }
+            return next < steps.count ? steps[next] : ScriptedStep(.notConfirmedEnded)
+        }
+    }
+}
+
+private struct ScriptedRunner: BoundedProcessRunning {
+    let reader: LaunchedChildSignaller.ProcessTableReader
+    let step: ScriptedStep
+
+    private func perform() async -> BoundedProcessResult {
+        if let pid = step.readPid { _ = reader(pid) }
+        step.during?()
+        step.entered?.open()
+        if let resume = step.resume { await resume.wait() }
+        return step.result
+    }
+
+    func run(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessResult {
+        await perform()
+    }
+
+    func runCapturingOutput(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessOutput {
+        BoundedProcessOutput(result: await perform(), output: Data())
+    }
+
+    func runOnCallingThread(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) -> BoundedProcessResult {
+        if let pid = step.readPid { _ = reader(pid) }
+        step.during?()
+        return step.result
+    }
+}
+
+/// Snapshots keeps what a scripted run saw of the launch's calls.
+private final class Snapshots: @unchecked Sendable {
+    private let lock = NSLock()
+    private var all: [[BoundedProcessResult?]] = []
+    var launch: RunnerLaunch?
+    func take() { lock.withLock { all.append(launch?.calls.map(\.result) ?? []) } }
+    var values: [[BoundedProcessResult?]] { lock.withLock { all } }
+}
+
 @Suite("A test accounts for every launch by how its run ended")
 struct LaunchAccountTests {
     /// DecisionCase is a list of calls (each one's result, nil while it still
@@ -1331,6 +1433,8 @@ struct LaunchAccountTests {
                      results: [nil], identities: [101], removesDirectory: false, named: [0], reads: [101]),
         DecisionCase(label: "a call with no result yet and no identity is named",
                      results: [nil], identities: [nil], removesDirectory: false, named: [0]),
+        DecisionCase(label: "no call was recorded: nothing was launched, the records go and nothing is named",
+                     results: [], identities: [], removesDirectory: true),
         DecisionCase(label: "a failed launch, an exit without identity and an unconfirmed call that reads gone, together",
                      results: [.failedToLaunch, .exited(0), .notConfirmedEnded], identities: [nil, nil, 103], gone: [103], removesDirectory: true, reads: [103]),
     ]
@@ -1422,6 +1526,146 @@ struct LaunchAccountTests {
         let launch = RunnerLaunch()
         _ = await Self.failLaunches(launch.runner)
         launch.requireEnded()
+    }
+
+    // MARK: Calls counted at the call, through a scripted inner runner (no child)
+
+    /// A pid no live process has: the launch read of it finds nothing.
+    private static let nowhere: pid_t = 2_000_000_000
+
+    private static func scripted(_ steps: [ScriptedStep]) -> RunnerLaunch {
+        let plan = ScriptedPlan(steps)
+        return RunnerLaunch(inner: { reader in ScriptedRunner(reader: reader, step: plan.take()) })
+    }
+
+    private static func call(_ runner: any BoundedProcessRunning) async -> BoundedProcessResult {
+        await runner.run(executableURL: missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+    }
+
+    @Test("every entry point lists its call before the inner runner returns, with no result yet, and fills in that call's own result when it returns")
+    func callIsListedBeforeTheChildStarts() async throws {
+        let seen = Snapshots()
+        let steps = [
+            ScriptedStep(.exited(0), during: { seen.take() }),
+            ScriptedStep(.timedOut, during: { seen.take() }),
+            ScriptedStep(.exited(5), during: { seen.take() }),
+        ]
+        let launch = Self.scripted(steps)
+        seen.launch = launch
+        let runner: any BoundedProcessRunning = launch.runner
+
+        let first = await runner.run(executableURL: Self.missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+        let second = await runner.runCapturingOutput(executableURL: Self.missing, arguments: [], standardInputData: Data(), timeout: .seconds(5)).result
+        let third = runner.runOnCallingThread(executableURL: Self.missing, arguments: [], standardInputData: Data(), timeout: .seconds(5))
+
+        #expect([first, second, third] == [.exited(0), .timedOut, .exited(5)])
+        // Inside call n the list already holds n entries, the last one without a result.
+        #expect(seen.values == [[nil], [.exited(0), nil], [.exited(0), .timedOut, nil]])
+        #expect(launch.calls.map(\.result) == [.exited(0), .timedOut, .exited(5)])
+    }
+
+    @Test("a launch read that finds nothing, or a process that is not this process's child, leaves that call with no identity, and the next call is not given it")
+    func identityIsPerCall() async throws {
+        let launch = Self.scripted([
+            ScriptedStep(.exited(1), readPid: Self.nowhere),
+            ScriptedStep(.exited(2), readPid: getpid()),
+            ScriptedStep(.exited(3)),
+        ])
+        let runner: any BoundedProcessRunning = launch.runner
+        for _ in 0..<3 { _ = await Self.call(runner) }
+        #expect(launch.calls.map(\.result) == [.exited(1), .exited(2), .exited(3)])
+        #expect(launch.calls.allSatisfy { $0.identity == nil })
+    }
+
+    @Test("a known call that ended and an unbound unconfirmed call, in either order: the unbound one fails the test and the records stay", arguments: [false, true])
+    func unboundUnconfirmedCallKeepsTheRecords(unconfirmedFirst: Bool) async throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ended = ScriptedStep(.exited(0))
+        let unconfirmed = ScriptedStep(.notConfirmedEnded)
+        let launch = Self.scripted(unconfirmedFirst ? [unconfirmed, ended] : [ended, unconfirmed])
+        let runner: any BoundedProcessRunning = launch.runner
+        _ = await Self.call(runner)
+        _ = await Self.call(runner)
+
+        let releases = Counter()
+        withKnownIssue("the unconfirmed call has no identity and its end cannot be read") {
+            launch.endChildrenAfterRelease(removing: directory, release: { releases.bump() })
+        }
+        #expect(releases.value == 1)
+        #expect(FileManager.default.fileExists(atPath: directory.path), "the records were removed while a call may still have a child")
+    }
+
+    @Test("the signalling route and requireEnded also fail naming an unbound unconfirmed call, and endChildren keeps the records")
+    func otherCallersFailOnAnUnboundUnconfirmedCall() async throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launch = Self.scripted([ScriptedStep(.exited(0)), ScriptedStep(.notConfirmedEnded)])
+        let runner: any BoundedProcessRunning = launch.runner
+        _ = await Self.call(runner)
+        _ = await Self.call(runner)
+
+        withKnownIssue("the unconfirmed call has no identity, so nothing can be signalled or read") {
+            launch.endChildren(removing: directory)
+        }
+        #expect(FileManager.default.fileExists(atPath: directory.path), "the records were removed while a call may still have a child")
+        withKnownIssue("the unconfirmed call has neither a confirmed end nor an identity read gone") {
+            launch.requireEnded()
+        }
+    }
+
+    @Test("a confirmed exit after an unavailable launch read is an end: nothing fails and the records go", arguments: [BoundedProcessResult.exited(3), .exited(255), .timedOut])
+    func confirmedEndWithoutIdentity(_ result: BoundedProcessResult) async throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launch = Self.scripted([ScriptedStep(result, readPid: Self.nowhere), ScriptedStep(.exited(0), readPid: Self.nowhere)])
+        let runner: any BoundedProcessRunning = launch.runner
+        _ = await Self.call(runner)
+        _ = await Self.call(runner)
+        #expect(launch.calls.allSatisfy { $0.identity == nil })
+
+        launch.requireEnded()
+        launch.endChildrenAfterRelease(removing: directory, release: {})
+        #expect(!FileManager.default.fileExists(atPath: directory.path), "the records of calls that all ended were kept")
+    }
+
+    @Test("a call still running when the cleanup starts is an unconfirmed call: it fails the test and keeps the records, and once it returns the records go")
+    func callStillRunningAtCleanup() async throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let entered = OpenOnce()
+        let resume = OpenOnce()
+        let launch = Self.scripted([ScriptedStep(.exited(0), entered: entered, resume: resume)])
+        let runner: any BoundedProcessRunning = launch.runner
+        let running = Task { await Self.call(runner) }
+        await entered.wait()
+        // Whatever happens below, the scripted run is let go.
+        defer { resume.open() }
+
+        #expect(launch.calls.map(\.result) == [nil])
+        withKnownIssue("the call has not returned and has no identity") {
+            launch.endChildrenAfterRelease(removing: directory, release: {})
+        }
+        #expect(FileManager.default.fileExists(atPath: directory.path), "the records were removed while a call was still running")
+
+        resume.open()
+        #expect(await running.value == .exited(0))
+        launch.endChildrenAfterRelease(removing: directory, release: {})
+        #expect(!FileManager.default.fileExists(atPath: directory.path), "the records were kept after every call ended")
+    }
+
+    @Test("a launch with no call recorded started nothing: the records go and nothing fails")
+    func noCallsIsNoChild() throws {
+        let directory = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launch = RunnerLaunch()
+        launch.requireEnded()
+        launch.endChildrenAfterRelease(removing: directory, release: {})
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        let second = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: second) }
+        launch.endChildren(removing: second)
+        #expect(!FileManager.default.fileExists(atPath: second.path))
     }
 
     private final class Counter: @unchecked Sendable {
