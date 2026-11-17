@@ -228,7 +228,7 @@ struct SetupView: View {
                     ProgressView().controlSize(.small)
                 }
                 AccessibleButton(signInForm.isChecking ? "Checking…" : "Sign In", style: .primary) {
-                    Task { await signInForm.submit(model: model) }
+                    signInForm.submit(model: model)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!signInForm.canSubmit)
@@ -370,7 +370,7 @@ struct SetupStayAwakeStep: View {
                 SetupStatusRow(
                     name: "stay-awake",
                     title: StayAwakeCopy.title,
-                    caption: model.stayAwakeNotice ?? StayAwakeCopy.explanation(isLaptop: model.isLaptop),
+                    caption: model.stayAwakeNotice ?? stayAwakeCaption,
                     captionIsError: model.stayAwakeNotice != nil,
                     wrapsCaption: true,
                     slot: slot
@@ -379,6 +379,13 @@ struct SetupStayAwakeStep: View {
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// stayAwakeCaption is the explanation, plus the password line on a
+    /// laptop so the prompt is not a surprise.
+    private var stayAwakeCaption: String {
+        let explanation = StayAwakeCopy.explanation(isLaptop: model.isLaptop)
+        return model.isLaptop ? explanation + " " + StayAwakeCopy.permissionNote : explanation
     }
 
     private var slot: SetupStatusRow.Slot {
@@ -390,7 +397,7 @@ struct SetupStayAwakeStep: View {
             }
         case .off, nil:
             return .action("Turn On", accessibleName: "Turn On Keep this Mac awake") {
-                Task { await model.turnOnStayAwake() }
+                model.turnOnStayAwake()
             }
         }
     }

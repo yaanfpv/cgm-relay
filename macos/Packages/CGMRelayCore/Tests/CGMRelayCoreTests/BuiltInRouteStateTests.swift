@@ -205,6 +205,24 @@ struct BuiltInRouteStateHealthTests {
         }
     }
 
+    @Test("an engine whose end was never confirmed shows the menu's two lines, no new copy, and nothing to try again")
+    func unconfirmedEndShowsTheMenusWords() {
+        let stale = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked)
+        for status in [stale, nil] {
+            let got = BuiltInRouteState.resolve(engineState: .failed(.engineStatusUnknown), status: status)
+            #expect(got.address == nil)
+            for text in [got.notReadyReason, got.settingsStatusText(timeZone: utc)] {
+                #expect(text.contains("Relay may still be running"), Comment(rawValue: text))
+                #expect(text.contains("Quit and reopen CGM Relay."), Comment(rawValue: text))
+                #expect(!text.contains("Try Again"), Comment(rawValue: text))
+                #expect(!text.contains("couldn't start"), Comment(rawValue: text))
+            }
+            #expect(!got.showsTryAgain)
+        }
+        // Every other failure keeps its words.
+        #expect(BuiltInRouteState.resolve(engineState: .failed(.portInUse), status: stale) == .failed("CGM Relay couldn't start. Try Again."))
+    }
+
     @Test("with the engine running the route is what the engine reported")
     func engineRunningUsesTheReport() {
         let report = BuiltInStatus(state: "running", publicHost: host, checkedAt: checked)

@@ -6,9 +6,12 @@ import Testing
 /// was started with, answers `status --json` and `serve status --json` from
 /// files, and ends each change command the way the next line of the mode
 /// file says (the last line repeats), applying the change it was asked for
-/// or leaving it alone. Nothing here ever runs the real Tailscale.
+/// or leaving it alone. Nothing here ever runs the real Tailscale. The `hang`
+/// mode blocks reading a FIFO the test holds, so a hung command has no end of its
+/// own: the test calls `release` on every path.
 private struct FakeTailscale {
     let directory: URL
+    let fifo: HeldFifo
     var executable: URL { directory.appendingPathComponent("tailscale") }
     var recordedEnvironment: String {
         (try? String(contentsOf: directory.appendingPathComponent("env"), encoding: .utf8)) ?? ""
@@ -25,6 +28,7 @@ private struct FakeTailscale {
     ) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("fake-tailscale-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        fifo = try HeldFifo(in: directory)
         try mode.write(to: directory.appendingPathComponent("mode"), atomically: true, encoding: .utf8)
         try statusJSON.write(to: directory.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
         try serveJSON.write(to: directory.appendingPathComponent("serve.json"), atomically: true, encoding: .utf8)
@@ -52,7 +56,7 @@ private struct FakeTailscale {
                 exit 0 ;;
               nohttps) echo "error enabling https feature: HTTPS is not enabled for this tailnet" >&2; exit 1 ;;
               stopped) echo "Tailscale is stopped." >&2; exit 1 ;;
-              hang) sleep 60 ;;
+              hang) read line < "$here/release" ;;
               *) echo "something unexpected 100.64.0.1 secret-name" >&2; exit 1 ;;
             esac ;;
         esac
@@ -62,6 +66,9 @@ private struct FakeTailscale {
     }
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
+
+    /// release lets a command blocked in the `hang` mode go on.
+    func release() { fifo.release() }
 }
 
 private actor WaitLog {
@@ -69,7 +76,7 @@ private actor WaitLog {
     func record(_ wait: Duration) { values.append(wait) }
 }
 
-@Suite("Tailscale HTTPS")
+@Suite("Tailscale HTTPS", .noSurvivingChildren)
 struct TailscaleServeTests {
     @Test("the commands are exactly the two serve invocations, and the shown text is the text that runs")
     func commands() {
@@ -241,10 +248,13 @@ struct TailscaleServeTests {
     @Test("turning on classifies each ending, runs exactly one command, and never shows what the command printed", arguments: outcomeCases)
     func enableOutcomes(_ testCase: (mode: String, turningOn: Bool, want: TailscaleServeOutcome)) async throws {
         let fake = try FakeTailscale(mode: testCase.mode)
-        defer { fake.remove() }
+        // Every command's identity is recorded at launch; the FIFO is released and each child
+        // confirmed ended by read before the directory is removed, whatever the run returned.
+        let launch = RunnerLaunch(extraEnvironment: RealTailscaleController.environment)
+        defer { launch.endChildrenAfterRelease(removing: fake.directory, release: { fake.release() }) }
         let controller = RealTailscaleController(
             executableURL: fake.executable,
-            runner: RealBoundedProcessRunner(extraEnvironment: RealTailscaleController.environment),
+            runner: launch.runner,
             changeTimeout: testCase.mode == "hang" ? .seconds(2) : .seconds(10)
         )
         let outcome = await controller.enableHTTPS(proxyingToPort: 1337, httpsPort: 443)
@@ -276,8 +286,9 @@ struct TailscaleServeTests {
     @Test("a change is retried quietly on a transient failure, starting from a fresh read each time, and shown at once when only the person can fix it", arguments: changeCases)
     func changeRetries(_ testCase: (name: String, turningOn: Bool, modes: String, serveJSON: String, want: TailscaleChangeResult, wantChangeCommands: Int, wantWaits: Int)) async throws {
         let fake = try FakeTailscale(mode: testCase.modes, serveJSON: testCase.serveJSON)
-        defer { fake.remove() }
-        let controller = RealTailscaleController(executableURL: fake.executable, runner: RealBoundedProcessRunner(extraEnvironment: RealTailscaleController.environment), changeTimeout: .seconds(2))
+        let launch = RunnerLaunch(extraEnvironment: RealTailscaleController.environment)
+        defer { launch.endChildrenAfterRelease(removing: fake.directory, release: { fake.release() }) }
+        let controller = RealTailscaleController(executableURL: fake.executable, runner: launch.runner, changeTimeout: .seconds(2))
         let read: () async -> TailscaleHTTPSState = {
             TailscaleHTTPSState.evaluate(status: await controller.status(), config: await controller.serveConfig(), relayPort: 1337)
         }
@@ -345,6 +356,52 @@ struct TailscaleServeTests {
         #expect(fake.calls == ["status --json"])
         #expect(await RealTailscaleController(executableURL: nil).status() == .absent)
         #expect(await RealTailscaleController(executableURL: URL(fileURLWithPath: "/no/such/tailscale-cgmrelay-test")).status() == .absent)
+    }
+
+    @Test("a status probe whose end is not confirmed reads as unknown, never as stopped; every other end keeps its reading", arguments: [
+        (BoundedProcessResult.notConfirmedEnded, TailscaleStatus.unknown),
+        (BoundedProcessResult.timedOut, TailscaleStatus.stopped),
+        (BoundedProcessResult.exited(1), TailscaleStatus.stopped),
+        (BoundedProcessResult.failedToLaunch, TailscaleStatus.absent),
+    ])
+    func statusOfAProbeByHowItEnded(_ testCase: (result: BoundedProcessResult, want: TailscaleStatus)) async {
+        let runner = EndedAsRunner(result: testCase.result)
+        let controller = RealTailscaleController(executableURL: URL(fileURLWithPath: "/unused/tailscale"), runner: runner)
+        #expect(await controller.status() == testCase.want)
+        #expect(runner.calls == [["status", "--json"]])
+    }
+
+    @Test("a change command whose end was not confirmed reads as a timeout, like any other command that may still be running",
+          arguments: [
+              (BoundedProcessResult.notConfirmedEnded, TailscaleServeOutcome.timedOut),
+              (BoundedProcessResult.timedOut, TailscaleServeOutcome.timedOut),
+              (BoundedProcessResult.failedToLaunch, TailscaleServeOutcome.other),
+              (BoundedProcessResult.exited(0), TailscaleServeOutcome.succeeded),
+              (BoundedProcessResult.exited(1), TailscaleServeOutcome.other),
+          ])
+    func outcomeByHowTheCommandEnded(_ testCase: (result: BoundedProcessResult, want: TailscaleServeOutcome)) {
+        #expect(TailscaleServeOutcome.from(BoundedProcessOutput(result: testCase.result, output: Data())) == testCase.want)
+    }
+
+    @Test("a change whose command's end was not confirmed is returned at once as a timeout: one change command, no wait, never a second", arguments: [true, false])
+    func unconfirmedChangeIsNotRunAgain(_ turningOn: Bool) async {
+        let runner = EndedAsRunner(result: .notConfirmedEnded)
+        let controller = RealTailscaleController(executableURL: URL(fileURLWithPath: "/unused/tailscale"), runner: runner)
+        // The read never shows the change in place, so a second attempt would be a second command.
+        let read: () async -> TailscaleHTTPSState = { turningOn ? .off(port: 443) : .on(port: 443) }
+        let waits = WaitLog()
+        let got: TailscaleChangeResult
+        if turningOn {
+            got = await TailscaleChange.turnOn(shownPort: 443, relayPort: 1337, controller: controller, read: read, wait: { await waits.record($0) })
+        } else {
+            got = await TailscaleChange.turnOff(shownPort: 443, controller: controller, read: read, wait: { await waits.record($0) })
+        }
+        #expect(got == .failed(.timedOut))
+        #expect(await waits.values.isEmpty)
+        let wanted = turningOn
+            ? TailscaleServeCommand.enableHTTPS(proxyingToPort: 1337, httpsPort: 443).arguments
+            : TailscaleServeCommand.disableHTTPS(httpsPort: 443).arguments
+        #expect(runner.calls == [wanted], "a change command was run \(runner.calls.count) times")
     }
 
     static let locatorCases: [(name: String, debug: Bool, fake: String?, service: String?, executable: Set<String>, want: String?)] = [
@@ -470,5 +527,31 @@ struct TailscaleAppDetectorTests {
     func eitherBuild(identifier: String) {
         let found = TailscaleAppDetector.isInstalled(lookup: { $0 == identifier ? URL(fileURLWithPath: "/Applications/Tailscale.app") : nil })
         #expect(found)
+    }
+}
+
+/// EndedAsRunner ends every bounded run the one scripted way, so how a run
+/// ended is driven without a process.
+private final class EndedAsRunner: BoundedProcessRunning, @unchecked Sendable {
+    private let result: BoundedProcessResult
+    private let lock = NSLock()
+    private var recorded: [[String]] = []
+    var calls: [[String]] { lock.withLock { recorded } }
+
+    init(result: BoundedProcessResult) { self.result = result }
+
+    func run(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessResult {
+        lock.withLock { recorded.append(arguments) }
+        return result
+    }
+
+    func runCapturingOutput(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) async -> BoundedProcessOutput {
+        lock.withLock { recorded.append(arguments) }
+        return BoundedProcessOutput(result: result, output: Data())
+    }
+
+    func runOnCallingThread(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) -> BoundedProcessResult {
+        lock.withLock { recorded.append(arguments) }
+        return result
     }
 }

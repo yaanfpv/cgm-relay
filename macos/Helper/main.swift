@@ -2,6 +2,7 @@ import CGMRelayCore
 import Darwin
 import Foundation
 import IOKit.ps
+import os
 import Security
 
 // The sleep reset helper: a launchd daemon that runs as root while it is
@@ -55,19 +56,17 @@ func sleepDisabled() -> Bool? {
     return value != 0
 }
 
-func runResetCommand() -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: SleepResetHelper.command[0])
-    process.arguments = Array(SleepResetHelper.command.dropFirst())
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    } catch {
-        return false
+private let logger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "sleep-helper")
+
+/// runResetCommand runs the reset through the bounded runner. The look does
+/// not call it again after a run that may still be running, so that case is
+/// logged once.
+func runResetCommand() -> SleepResetHelper.ResetOutcome {
+    let outcome = SleepResetHelper.runReset(using: RealBoundedProcessRunner())
+    if outcome == .mayStillRun {
+        logger.error("The sleep reset command may still be running; the helper starts no further one until it is launched again.")
     }
+    return outcome
 }
 
 nonisolated(unsafe) var state = SleepResetHelper.Look()

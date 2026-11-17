@@ -21,6 +21,10 @@ public actor StatusPoller {
 
     public private(set) var latestStatus: EngineStatus?
     private var loopTask: Task<Void, Never>?
+    /// generation counts the stop() and discardPending() calls so far. A
+    /// fetch records it when it starts and its result is used only while
+    /// it is still the current one.
+    private var generation = 0
 
     public init(
         fetcher: any StatusFetcher,
@@ -53,10 +57,18 @@ public actor StatusPoller {
     }
 
     public func stop() {
+        generation += 1
         loopTask?.cancel()
         loopTask = nil
         latestStatus = nil
         onUpdate(nil)
+    }
+
+    /// discardPending drops the result of every fetch already under way:
+    /// none of them writes latestStatus or calls onUpdate. The loop keeps
+    /// running and fetches begun afterwards are not affected.
+    public func discardPending() {
+        generation += 1
     }
 
     /// pollNow fetches the status immediately, outside the slow timer --
@@ -71,11 +83,17 @@ public actor StatusPoller {
     }
 
     private func pollOnce() async {
+        let startedIn = generation
+        let fetched: EngineStatus?
         do {
-            latestStatus = try await fetcher.fetchStatus()
+            fetched = try await fetcher.fetchStatus()
+        } catch is CancellationError {
+            return
         } catch {
-            latestStatus = nil
+            fetched = nil
         }
+        guard startedIn == generation else { return }
+        latestStatus = fetched
         onUpdate(latestStatus)
     }
 }

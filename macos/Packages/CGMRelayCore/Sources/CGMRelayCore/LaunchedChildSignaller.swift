@@ -82,11 +82,15 @@ final class LaunchedChildSignaller: @unchecked Sendable {
     /// refuseSendsWhile refuses every later send and runs body, the reap,
     /// while holding the lock every send takes. A send that was waiting
     /// before the reap therefore finds the mark when it gets the lock and
-    /// sends nothing; none can run during or after the reap.
-    func refuseSendsWhile<T>(_ body: () -> T) -> T {
+    /// sends nothing; none can run during or after the reap. body must not
+    /// block. If it returns nil the child was not reaped: the refusal is
+    /// lifted again before the lock is released and nil is returned.
+    func refuseSendsWhile<T>(_ body: () -> T?) -> T? {
         lock.withLock {
             terminated = true
-            return body()
+            let result = body()
+            if result == nil { terminated = false }
+            return result
         }
     }
 
@@ -111,7 +115,10 @@ final class LaunchedChildSignaller: @unchecked Sendable {
 
     /// systemProcessTable reads pid's record from the system, or returns nil
     /// when there is none. A process that has exited but is not yet reaped
-    /// has none either.
+    /// has none either: on macOS 27.0.1, proc_pidinfo with PROC_PIDTBSDINFO
+    /// returns 0 with ESRCH for an exited, unreaped child, the same as after
+    /// the reap. So a send after the exit is observed is refused by the read
+    /// as well as by the terminated mark.
     static let systemProcessTable: ProcessTableReader = { pid in
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)

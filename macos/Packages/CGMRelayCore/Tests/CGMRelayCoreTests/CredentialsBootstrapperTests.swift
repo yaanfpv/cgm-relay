@@ -176,7 +176,7 @@ struct CredentialsBootstrapperTests {
     }
 }
 
-@Suite("KeychainCredentialStore across two running copies")
+@Suite("KeychainCredentialStore across two running copies", .noSurvivingChildren)
 struct KeychainCredentialStoreSharedItemTests {
     private func makeDirectory() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("kc-lock-\(UUID().uuidString)")

@@ -305,6 +305,13 @@ public struct MenuDisplayState: Sendable, Equatable {
         return "last reading \(age)"
     }
 
+    /// engineMayStillRunStatus and engineMayStillRunDetail are the two lines
+    /// said wherever an engine's end was never confirmed, and
+    /// engineMayStillRunText is the two together.
+    public static let engineMayStillRunStatus = "Relay may still be running"
+    public static let engineMayStillRunDetail = "Quit and reopen CGM Relay."
+    public static var engineMayStillRunText: String { "\(engineMayStillRunStatus). \(engineMayStillRunDetail)" }
+
     /// statusLine renders a permanent failure's headline, in the person's
     /// own terms: never "engine", "store", "key mismatch", or an exit
     /// status, and no longer than every other state's shortStatus (this
@@ -331,6 +338,8 @@ public struct MenuDisplayState: Sendable, Equatable {
             // short as every other status; detailLine below carries the
             // fuller explanation and the retry instruction.
             return "Couldn't start fresh"
+        case .engineStatusUnknown:
+            return engineMayStillRunStatus
         }
     }
 
@@ -353,6 +362,8 @@ public struct MenuDisplayState: Sendable, Equatable {
             return "Tailscale HTTPS is set on the port CGM Relay keeps for itself. Turn Tailscale HTTPS off in Settings, under Advanced, with Tailscale running, and CGM Relay moves to a free port."
         case .recoveryMoveFailed:
             return "Check that CGM Relay can write to its own folder, then try Start Fresh again."
+        case .engineStatusUnknown:
+            return engineMayStillRunDetail
         }
     }
 

@@ -96,6 +96,7 @@ public enum DiagnosticsReport {
         case .portInUse: return "port in use by another app"
         case .httpsOnStatusPort: return "Tailscale HTTPS on the status port"
         case .recoveryMoveFailed: return "recovery move failed"
+        case .engineStatusUnknown: return "engine could not be confirmed stopped"
         }
     }
 
@@ -115,6 +116,7 @@ public enum DiagnosticsReport {
         case .notAnswering: state = "not answering"
         case .waitingForInternet: state = "waiting for the internet"
         case .stopped: state = "stopped"
+        case .engineMayStillRun: state = "engine could not be confirmed stopped"
         case .failed: state = "failed"
         }
         return "public address (built-in), \(state)"

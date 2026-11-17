@@ -88,6 +88,40 @@ public enum SleepResetHelper {
     public static let command = ["/usr/bin/pmset", "-a", "disablesleep", "0"]
     public static let inputs: [Input] = [.processList, .powerSource]
 
+    /// resetTimeout is how long the command may run before the runner ends
+    /// it. pmset writes one setting and returns in well under a second, so
+    /// 10 s is generous; with the runner's grace and its bound on the wait
+    /// after a kill, a stuck run still returns well inside the helper's 20 s
+    /// look interval.
+    public static let resetTimeout: Duration = .seconds(10)
+
+    /// ResetOutcome is how one run of the command ended.
+    public enum ResetOutcome: Equatable, Sendable {
+        /// The command exited with status 0.
+        case done
+        /// The command did not succeed and is known to have ended.
+        case notDone
+        /// The command was asked to end and its end was not seen, so it may
+        /// still be running.
+        case mayStillRun
+    }
+
+    /// runReset runs command through runner on the calling thread, bounded by
+    /// resetTimeout. Only an exit with status 0 is done.
+    public static func runReset(using runner: any BoundedProcessRunning) -> ResetOutcome {
+        let result = runner.runOnCallingThread(
+            executableURL: URL(fileURLWithPath: command[0]),
+            arguments: Array(command.dropFirst()),
+            standardInputData: Data(),
+            timeout: resetTimeout
+        )
+        switch result {
+        case .exited(0): return .done
+        case .notConfirmedEnded: return .mayStillRun
+        case .exited, .timedOut, .failedToLaunch: return .notDone
+        }
+    }
+
     /// daemonPlistName is the launchd plist inside the app bundle, in
     /// Contents/Library/LaunchDaemons.
     public static let daemonPlistName = "com.yaanfpv.cgmrelay.sleep-helper.plist"
@@ -154,9 +188,11 @@ public enum SleepResetHelper {
 
     /// Look is the helper's state across looks: whether a write was made while
     /// the setting could not be read, so an unreadable setting does not run
-    /// the command at every look.
+    /// the command at every look, and whether a run may still be running, after
+    /// which the look starts no further command.
     public struct Look {
         private var wroteWithoutReading = false
+        private var commandMayStillRun = false
 
         public init() {}
 
@@ -167,17 +203,22 @@ public enum SleepResetHelper {
         }
 
         /// run is one look: it decides with SleepResetPolicy and calls
-        /// runCommand, which returns whether the command succeeded, only for
-        /// a write.
+        /// runCommand, which returns how the command ended, only for a write.
+        /// After a run that may still be running it is never called again.
         public mutating func run(
-            appRunning: Bool, onBattery: Bool, sleepDisabled: Bool?, runCommand: () -> Bool
+            appRunning: Bool, onBattery: Bool, sleepDisabled: Bool?, runCommand: () -> ResetOutcome
         ) {
+            if commandMayStillRun { return }
             if appRunning || sleepDisabled != nil { wroteWithoutReading = false }
             guard SleepResetPolicy.decide(
                 appRunning: appRunning, onBattery: onBattery, sleepDisabled: sleepDisabled
             ) == .writeOff else { return }
             if sleepDisabled == nil && wroteWithoutReading { return }
-            if runCommand() && sleepDisabled == nil { wroteWithoutReading = true }
+            switch runCommand() {
+            case .done: if sleepDisabled == nil { wroteWithoutReading = true }
+            case .notDone: break
+            case .mayStillRun: commandMayStillRun = true
+            }
         }
     }
 }

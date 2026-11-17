@@ -74,13 +74,13 @@ public enum StayAwakeFailure: Error, Equatable, Sendable {
     public var message: String {
         switch self {
         case .sleepSettingNotChanged:
-            "CGM Relay isn't allowed to change the sleep setting, so the Mac may sleep with its lid closed. Turn Keep this Mac awake off and on again to allow it."
+            "CGM Relay can't change the sleep setting, so the Mac may sleep with its lid closed. Turn Keep this Mac awake off and on again to allow it."
         case .permissionNotInstalled:
-            "CGM Relay doesn't have permission to change the sleep setting, so the Mac may sleep with its lid closed. Turn Keep this Mac awake off and on again to allow it."
+            "CGM Relay has no permission to change the sleep setting, so a closed Mac may sleep. Turn Keep this Mac awake off and on again to allow it."
         case .assertionNotHeld:
             "The Mac couldn't be kept awake right now. CGM Relay tries again whenever something changes."
         case .helperNotRegistered:
-            "CGM Relay couldn't set up the helper that lets this Mac sleep again if CGM Relay ends unexpectedly. Turn Keep this Mac awake off and on again to retry."
+            "CGM Relay couldn't set up the helper that lets this Mac sleep again after a crash. Turn Keep this Mac awake off and on again to retry."
         }
     }
 }

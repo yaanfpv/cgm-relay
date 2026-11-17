@@ -4,11 +4,18 @@ import Foundation
 /// the process's own exit code (the negative of the signal number if it
 /// died by signal, matching RealProcessLauncher's own convention), or that
 /// it never exited within its bound and was terminated, or that it could
-/// not even be started.
+/// not even be started, or that it was asked to end and could not be
+/// confirmed ended.
 public enum BoundedProcessResult: Sendable, Equatable {
     case exited(Int32)
     case timedOut
     case failedToLaunch
+    /// notConfirmedEnded is a child that outlived its bound and was asked to
+    /// end, but whose end was not seen within RealBoundedProcessRunner's
+    /// post-kill bound (or no signal could be sent to it). It may still be
+    /// running; a caller treats it as a failure and never as the child
+    /// having ended.
+    case notConfirmedEnded
 }
 
 /// BoundedProcessOutput is a bounded run's result together with everything
@@ -51,7 +58,8 @@ public protocol BoundedProcessRunning: Sendable {
     /// Swift's thread pool: it starts the child, waits for it and returns on
     /// the calling thread, with no Swift concurrency task in the path. It
     /// blocks that thread for up to the timeout plus the time a child that
-    /// ignores the request to exit is given before it is killed.
+    /// ignores the request to exit is given before it is killed, plus the
+    /// bound on the wait after the kill.
     func runOnCallingThread(
         executableURL: URL,
         arguments: [String],
@@ -60,12 +68,13 @@ public protocol BoundedProcessRunning: Sendable {
     ) -> BoundedProcessResult
 }
 
-/// RealBoundedProcessRunner runs the process with Foundation.Process,
-/// giving it the same minimal, explicit environment RealProcessLauncher
-/// gives the supervised engine: a one-shot command needs no more of this
-/// app's own environment than the supervised one does. `run` discards the
-/// child's stdout and stderr outright; `runCapturingOutput` keeps them for
-/// a caller that must read the answer.
+/// RealBoundedProcessRunner runs the process through ChildSpawner, which
+/// holds it from birth: every signal goes through its held signaller and
+/// only its holder reaps it. It gives the child the same minimal, explicit
+/// environment RealProcessLauncher gives the supervised engine: a one-shot
+/// command needs no more of this app's own environment than the supervised
+/// one does. `run` discards the child's stdout and stderr outright;
+/// `runCapturingOutput` keeps them for a caller that must read the answer.
 public struct RealBoundedProcessRunner: BoundedProcessRunning {
     /// extraEnvironment is added to the minimal child environment, for a
     /// caller whose child needs one variable more than the engine does.
@@ -75,8 +84,34 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
     /// being asked to before it is killed.
     private static let terminateGrace: Duration = .seconds(2)
 
+    /// postKillBound is how long a run waits for the end of a child after the
+    /// kill (or after a refused send). SIGKILL cannot be caught and ends even
+    /// a stopped child, so the end follows at once; the bound only covers a
+    /// child that never ends or one that cannot be signalled, which is then
+    /// reported as notConfirmedEnded.
+    static let postKillBound: Duration = .seconds(2)
+
+    private let readProcessTable: LaunchedChildSignaller.ProcessTableReader
+
     public init(extraEnvironment: [String: String] = [:]) {
         self.extraEnvironment = extraEnvironment
+        self.readProcessTable = LaunchedChildSignaller.systemProcessTable
+    }
+
+    /// init with a process table reader, for a test that scripts what the
+    /// launch's identity read sees.
+    init(
+        extraEnvironment: [String: String] = [:],
+        readProcessTable: @escaping LaunchedChildSignaller.ProcessTableReader
+    ) {
+        self.extraEnvironment = extraEnvironment
+        self.readProcessTable = readProcessTable
+    }
+
+    /// result maps a child's reported exit code: ProcessExitCode.statusUnknown
+    /// is not an exit.
+    private static func result(forExitCode code: Int32) -> BoundedProcessResult {
+        code == ProcessExitCode.statusUnknown ? .notConfirmedEnded : .exited(code)
     }
 
     public func run(
@@ -129,7 +164,8 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
                 environment: environment,
                 standardInput: inputPipe.fileHandleForReading.fileDescriptor,
                 standardOutput: nil,
-                standardError: nil
+                standardError: nil,
+                readProcessTable: readProcessTable
             ) { exitCode in
                 exit.finish(exitCode)
             }
@@ -147,15 +183,20 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
         try? writeHandle.close()
 
         if let exitCode = exit.wait(timeout: timeout) {
-            return .exited(exitCode)
+            return Self.result(forExitCode: exitCode)
         }
         // The exit code of a child ended here is discarded: the caller asked
         // for a timeout, however this call happened to end the process.
-        child.signaller.send(SIGTERM)
-        if exit.wait(timeout: Self.terminateGrace) == nil {
-            child.signaller.send(SIGKILL)
-            _ = exit.wait(timeout: nil)
+        var ended: Int32?
+        if child.signaller.send(SIGTERM) {
+            ended = exit.wait(timeout: Self.terminateGrace)
+            if ended == nil { child.signaller.send(SIGKILL) }
         }
+        // A refused send means the child's end was already seen (its report is
+        // on its way) or it can never be signalled: either way the wait is
+        // bounded.
+        if ended == nil { ended = exit.wait(timeout: Self.postKillBound) }
+        guard let ended, ended != ProcessExitCode.statusUnknown else { return .notConfirmedEnded }
         return .timedOut
     }
 
@@ -182,7 +223,8 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
                 environment: environment,
                 standardInput: inputPipe.fileHandleForReading.fileDescriptor,
                 standardOutput: outputDescriptor,
-                standardError: outputDescriptor
+                standardError: outputDescriptor,
+                readProcessTable: readProcessTable
             ) { exitCode in
                 Task { await exitSignal.resolve(exitCode) }
             }
@@ -209,45 +251,31 @@ public struct RealBoundedProcessRunner: BoundedProcessRunning {
         }
         try? writeHandle.close()
 
-        let result: BoundedProcessResult = await withTaskGroup(of: Int32?.self) { group in
-            group.addTask { await exitSignal.wait() }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return nil
+        let result: BoundedProcessResult
+        if let exitCode = await exitSignal.wait(for: timeout) {
+            result = Self.result(forExitCode: exitCode)
+        } else {
+            // The timeout fired first. Ask the process to exit; its own exit
+            // code (ordinarily the negative of SIGTERM's own number) is
+            // discarded rather than reported as .exited: a caller asked for
+            // timeout, not for however this call happened to end the process,
+            // and a future change to how it is terminated must never turn
+            // .timedOut into .exited under this same test. Every wait below
+            // is bounded: the exit signal is not tied to a task group, which
+            // would wait for it for ever.
+            var ended: Int32?
+            if signaller.send(SIGTERM) {
+                // A child that ignores the request is killed outright after a
+                // short grace, so a timed-out run never leaves it running.
+                ended = await exitSignal.wait(for: Self.terminateGrace)
+                if ended == nil { signaller.send(SIGKILL) }
             }
-
-            guard let first = await group.next() else {
-                return .timedOut
+            if ended == nil { ended = await exitSignal.wait(for: Self.postKillBound) }
+            if let ended, ended != ProcessExitCode.statusUnknown {
+                result = .timedOut
+            } else {
+                result = .notConfirmedEnded
             }
-            if let exitCode = first {
-                // The process exited first: the sleep task is no longer
-                // needed, and cancelling it is safe here since nothing
-                // else is still waiting on it.
-                group.cancelAll()
-                return .exited(exitCode)
-            }
-
-            // The timeout fired first. Ask the process to exit, then
-            // drain the SAME exit-signal task already in this group --
-            // never a second, independent call to exitSignal.wait() --
-            // so its one continuation is resumed exactly once rather
-            // than being silently replaced and leaked. Its own exit code
-            // (ordinarily the negative of SIGTERM's own number, per
-            // RealProcessLauncher's convention) is discarded rather than
-            // reported as .exited: a caller asked for timeout, not for
-            // however this call happened to end the process, and a
-            // future change to how it is terminated must never turn
-            // .timedOut into .exited under this same test.
-            signaller.send(SIGTERM)
-            // A child that ignores the request is killed outright after a
-            // short grace, so a timed-out run never leaves it running.
-            let killer = Task {
-                try? await Task.sleep(for: Self.terminateGrace)
-                if !Task.isCancelled { signaller.send(SIGKILL) }
-            }
-            _ = await group.next()
-            killer.cancel()
-            return .timedOut
         }
         return BoundedProcessOutput(result: result, output: await collectedOutput?.data() ?? Data())
     }
@@ -284,12 +312,14 @@ private final class OutputCollection: @unchecked Sendable {
     }
 }
 
-/// BoundedProcessExitSignal lets RealBoundedProcessRunner await a
-/// termination handler that fires on an arbitrary thread, resolving once
-/// and remembering the result for any later waiter.
+/// BoundedProcessExitSignal lets RealBoundedProcessRunner await the child's
+/// exit report, which arrives from the thread that holds the child, for a
+/// limited time.
+/// It remembers the result for any later waiter; one wait at a time.
 private actor BoundedProcessExitSignal {
-    private var continuation: CheckedContinuation<Int32, Never>?
+    private var continuation: CheckedContinuation<Int32?, Never>?
     private var result: Int32?
+    private var waitNumber = 0
 
     func resolve(_ code: Int32) {
         result = code
@@ -297,9 +327,25 @@ private actor BoundedProcessExitSignal {
         continuation = nil
     }
 
-    func wait() async -> Int32 {
+    /// wait returns the exit code, or nil if none had been reported within
+    /// duration.
+    func wait(for duration: Duration) async -> Int32? {
         if let result { return result }
-        return await withCheckedContinuation { continuation = $0 }
+        waitNumber += 1
+        let mine = waitNumber
+        return await withCheckedContinuation { (waiting: CheckedContinuation<Int32?, Never>) in
+            continuation = waiting
+            Task {
+                try? await Task.sleep(for: duration)
+                self.expire(waitNumber: mine)
+            }
+        }
+    }
+
+    private func expire(waitNumber number: Int) {
+        guard number == waitNumber else { return }
+        continuation?.resume(returning: nil)
+        continuation = nil
     }
 }
 

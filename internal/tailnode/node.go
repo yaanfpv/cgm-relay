@@ -19,7 +19,6 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
-	"tailscale.com/logtail"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
@@ -445,8 +444,6 @@ func (n *Node) run(ctx context.Context) {
 		closeStarted()
 		return
 	}
-	// The node's own logs stay on this Mac: logtail would otherwise upload them to Tailscale's log service.
-	logtail.Disable()
 	for first := true; ctx.Err() == nil; first = false {
 		// A server that is restarted keeps the folder, and with it the key.
 		gctx, gcancel := context.WithCancel(ctx)

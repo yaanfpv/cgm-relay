@@ -118,6 +118,207 @@ struct StatusPollerTests {
         #expect(fetcher.callCount == 1, "the loop must not keep polling after stop")
     }
 
+    // MARK: - A check begun before a stop or a discard never lands after it
+
+    @Test("a fetch still in flight when stop is called is dropped: no status written, none delivered")
+    func stopDropsTheInFlightFetch() async throws {
+        let fetcher = FakeStatusFetcher(results: [.success(EngineStatus(running: true, lastReadingMgDl: 100))])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        fetcher.holdNextFetch()
+        let check = Task { await poller.pollNow() }
+        #expect(await waitUntil { fetcher.heldCount == 1 })
+
+        await poller.stop()
+        fetcher.releaseHeld()
+        await check.value
+
+        #expect(await poller.latestStatus == nil, "a status fetched before the stop must not be written after it")
+        #expect(!observed.values.contains { $0 != nil }, "a status fetched before the stop must not be delivered after it")
+    }
+
+    @Test("stop still reports nil exactly once when nothing was in flight")
+    func stopReportsNilOnce() async throws {
+        let fetcher = FakeStatusFetcher(results: [.success(EngineStatus(running: true, lastReadingMgDl: 100))])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        await poller.pollNow()
+        await poller.stop()
+
+        #expect(observed.values.count == 2)
+        #expect(observed.values[0]?.lastReadingMgDl == 100)
+        #expect(observed.values[1] == nil)
+    }
+
+    @Test("stop then start before the old fetch lands: the old result is dropped and the new one is kept")
+    func oldFetchLosesToTheRestartedLoop() async throws {
+        let fetcher = FakeStatusFetcher(results: [
+            .success(EngineStatus(running: true, lastReadingMgDl: 100)),
+            .success(EngineStatus(running: true, lastReadingMgDl: 200)),
+        ])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        fetcher.holdNextFetch()
+        let check = Task { await poller.pollNow() }
+        #expect(await waitUntil { fetcher.heldCount == 1 })
+
+        await poller.stop()
+        await poller.start()
+        #expect(await waitUntil { await poller.latestStatus?.lastReadingMgDl == 200 })
+
+        fetcher.releaseHeld()
+        await check.value
+
+        #expect(await poller.latestStatus?.lastReadingMgDl == 200, "the old fetch must not overwrite the newer one")
+        #expect(!Self.readings(observed).contains(100), "the old result must never be delivered")
+        #expect(Self.readings(observed).contains(200), "the newer result must be delivered")
+
+        await poller.stop()
+    }
+
+    @Test("discardPending drops the in-flight fetch, leaves the loop running, and the next fetch is kept")
+    func discardPendingDropsOnlyTheOldFetch() async throws {
+        let fetcher = FakeStatusFetcher(results: [
+            .success(EngineStatus(running: true, lastReadingMgDl: 100)),
+            .success(EngineStatus(running: true, lastReadingMgDl: 200)),
+        ])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        fetcher.holdNextFetch()
+        let check = Task { await poller.pollNow() }
+        #expect(await waitUntil { fetcher.heldCount == 1 })
+
+        await poller.discardPending()
+        await poller.start()
+        #expect(await waitUntil { await poller.latestStatus?.lastReadingMgDl == 200 })
+
+        fetcher.releaseHeld()
+        await check.value
+
+        #expect(await poller.latestStatus?.lastReadingMgDl == 200, "the discarded fetch must not overwrite the newer one")
+        #expect(!Self.readings(observed).contains(100), "the discarded result must never be delivered")
+        #expect(Self.readings(observed).contains(200), "the newer result must be delivered")
+
+        await poller.stop()
+    }
+
+    @Test("discardPending does not stop the loop: it keeps polling on its interval")
+    func discardPendingKeepsTheLoopRunning() async throws {
+        let fetcher = FakeStatusFetcher(results: [
+            .success(EngineStatus(running: true, lastReadingMgDl: 100)),
+            .success(EngineStatus(running: true, lastReadingMgDl: 110)),
+        ])
+        let clock = FakeVirtualClock()
+        let poller = StatusPoller(fetcher: fetcher, clock: clock, interval: .seconds(30))
+
+        await poller.start()
+        #expect(await waitUntil { fetcher.callCount == 1 })
+        #expect(await waitUntil { await poller.latestStatus?.lastReadingMgDl == 100 })
+
+        await poller.discardPending()
+        await clock.advance(by: .seconds(30))
+
+        #expect(await waitUntil { await poller.latestStatus?.lastReadingMgDl == 110 })
+        await poller.stop()
+    }
+
+    @Test("a discarded fetch's status is not written even when nothing else fetches afterwards")
+    func discardPendingLeavesNoStatusBehind() async throws {
+        let fetcher = FakeStatusFetcher(results: [.success(EngineStatus(running: true, lastReadingMgDl: 100))])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        fetcher.holdNextFetch()
+        let check = Task { await poller.pollNow() }
+        #expect(await waitUntil { fetcher.heldCount == 1 })
+
+        await poller.discardPending()
+        fetcher.releaseHeld()
+        await check.value
+
+        #expect(await poller.latestStatus == nil)
+        #expect(observed.values.isEmpty, "a discarded fetch must produce no update at all")
+    }
+
+    @Test("a fetch that throws CancellationError produces no write and no update")
+    func cancelledFetchIsDropped() async throws {
+        let fetcher = FakeStatusFetcher(results: [.failure(CancellationError())])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        await poller.pollNow()
+
+        #expect(fetcher.callCount == 1)
+        #expect(await poller.latestStatus == nil)
+        #expect(observed.values.isEmpty, "a cancelled check is not a failed check and must not be reported as one")
+    }
+
+    @Test("a cancelled fetch leaves the status a good check already wrote")
+    func cancelledFetchKeepsThePriorStatus() async throws {
+        let fetcher = FakeStatusFetcher(results: [
+            .success(EngineStatus(running: true, lastReadingMgDl: 100)),
+            .failure(CancellationError()),
+        ])
+        let observed = ObservedUpdates<EngineStatus?>()
+        let poller = StatusPoller(fetcher: fetcher, clock: FakeVirtualClock(), interval: .seconds(30)) { status in
+            observed.append(status)
+        }
+
+        await poller.pollNow()
+        await poller.pollNow()
+
+        #expect(fetcher.callCount == 2)
+        #expect(await poller.latestStatus?.lastReadingMgDl == 100, "a cancelled check must not clear the status")
+        #expect(observed.values.count == 1, "a cancelled check must not deliver an update")
+    }
+
+    // MARK: - AppModel discards before it clears
+
+    @Test("startEngine discards pending checks before it clears the built-in status")
+    func startEngineDiscardsBeforeClearing() throws {
+        let source = AppModelSource.stripped(try Self.appModelText())
+        #expect(StartEngineOrder.violation(in: source) == nil, Comment(rawValue: StartEngineOrder.violation(in: source) ?? ""))
+    }
+
+    @Test("the startEngine order check is red when the discard is missing, late, or not awaited")
+    func startEngineOrderCheckHasTeeth() {
+        let clear = "latestStatus?.builtIn = nil"
+        let discard = "await statusPoller.discardPending()"
+        func source(_ body: String) -> String { "private func startEngine() async {\n\(body)\n}\n" }
+        #expect(StartEngineOrder.violation(in: source("\(discard)\n\(clear)")) == nil)
+        #expect(StartEngineOrder.violation(in: source("\(clear)\nrefresh()")) != nil, "no call")
+        #expect(StartEngineOrder.violation(in: source("\(clear)\n\(discard)")) != nil, "call after the clear")
+        #expect(StartEngineOrder.violation(in: source("statusPoller.discardPending()\n\(clear)")) != nil, "call not awaited")
+        #expect(StartEngineOrder.violation(in: source("\(discard)\nrefresh()")) != nil, "no clear to precede")
+    }
+
+    private static func readings(_ observed: ObservedUpdates<EngineStatus?>) -> [Int] {
+        observed.values.compactMap { (status: EngineStatus?) -> Int? in status?.lastReadingMgDl }
+    }
+
+    private static func appModelText() throws -> String {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        url.appendPathComponent("App/Sources/AppModel.swift")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
     @Test("the URLSession fetcher sends nothing until the secret is armed, then presents it on /status")
     func fetcherSendsTheSecretHeaderOnlyOnceArmed() async throws {
         let url = URL(string: "http://127.0.0.1:1/status-\(UUID().uuidString)")!
@@ -213,5 +414,41 @@ private final class LockedBox<Value: Sendable>: @unchecked Sendable {
 
     func update(_ change: (inout Value) -> Void) {
         lock.withLock { change(&stored) }
+    }
+}
+
+/// StartEngineOrder reads startEngine's body (comments and string contents
+/// already stripped) because the app has no test target: the awaited
+/// discardPending call must come before the line that clears the built-in
+/// status, so a check begun earlier cannot restore the old node's status.
+private enum StartEngineOrder {
+    static func violation(in source: String) -> String? {
+        guard let declaration = source.range(of: #"func\s+startEngine\s*\("#, options: .regularExpression),
+              let open = source[declaration.upperBound...].firstIndex(of: "{"),
+              let close = closing(source, from: open)
+        else { return "startEngine was not found" }
+        let body = String(source[open...close])
+        guard let discard = body.range(of: #"await\s+(?:self\.)?statusPoller\.discardPending\(\)"#, options: .regularExpression) else {
+            return "startEngine does not await statusPoller.discardPending()"
+        }
+        guard let clear = body.range(of: #"latestStatus\??\.builtIn\s*=\s*nil"#, options: .regularExpression) else {
+            return "startEngine no longer clears latestStatus.builtIn, so there is nothing to order against"
+        }
+        return discard.lowerBound < clear.lowerBound ? nil : "discardPending() comes after the built-in status is cleared"
+    }
+
+    /// closing is the index of the brace that closes the one at `open`.
+    private static func closing(_ text: String, from open: String.Index) -> String.Index? {
+        var depth = 0
+        var index = open
+        while index < text.endIndex {
+            if text[index] == "{" { depth += 1 }
+            if text[index] == "}" {
+                depth -= 1
+                if depth == 0 { return index }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 }

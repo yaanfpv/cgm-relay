@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+@testable import CGMRelayCore
 
 /// ChildEnd is what ending a test child can honestly say. `.ended` means the
 /// child's exit event was observed. Anything else, including a wait that ran
@@ -91,5 +92,113 @@ final class TestChild: @unchecked Sendable {
         if case .unknown(let pid, let reason) = end(waitingMilliseconds: waitingMilliseconds) {
             Issue.record("test child pid \(pid) may still be running, outcome unknown (\(reason)); it was not signalled, end it by hand")
         }
+    }
+}
+
+/// StoppedChildSupport holds what tests need for a child that has been
+/// stopped (SIGSTOP) from outside. Every wait is bounded only by the repo's
+/// hang ceiling, and a bound that runs out is a failure the caller reports,
+/// never an expected duration.
+enum StoppedChildSupport {
+    private final class Slot<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: T?
+        func set(_ value: T) { lock.withLock { stored = value } }
+        func get() -> T? { lock.withLock { stored } }
+    }
+
+    private static func ceilingWait(_ done: DispatchSemaphore) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                let bound = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+                continuation.resume(returning: done.wait(timeout: bound) == .success)
+            }
+        }
+    }
+
+    /// withinBlocking runs a blocking call on a plain thread and returns its
+    /// value, or nil if it had not returned within the hang ceiling. A call
+    /// that never returns keeps its thread until the process ends.
+    static func withinBlocking<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T? {
+        let slot = Slot<T>()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            slot.set(work())
+            done.signal()
+        }
+        return await ceilingWait(done) ? slot.get() : nil
+    }
+
+    /// withinAsync is withinBlocking for an async call.
+    static func withinAsync<T: Sendable>(_ work: @escaping @Sendable () async -> T) async -> T? {
+        let slot = Slot<T>()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            slot.set(await work())
+            done.signal()
+        }
+        return await ceilingWait(done) ? slot.get() : nil
+    }
+
+    /// waitUntilStopped returns true once the system reports the process as
+    /// stopped, false if it had not been within the hang ceiling. It reads the
+    /// process table only: it never waits on the child, so it consumes no
+    /// state a holder of the child waits on.
+    static func waitUntilStopped(pid: Int32) -> Bool {
+        let stoppedStatus: UInt32 = 4 // SSTOP in <sys/proc.h>
+        let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+        while DispatchTime.now() < deadline {
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status == stoppedStatus {
+                return true
+            }
+            usleep(20_000) // a pause per round, so a wait that never ends does not spin a core
+        }
+        return false
+    }
+
+    /// isGone is true when no process, not even an unreaped one, has this pid.
+    static func isGone(pid: Int32) -> Bool {
+        errno = 0
+        return kill(pid, 0) == -1 && errno == ESRCH
+    }
+
+    /// RecordedProcess is a pid bound to the start time it had when it was
+    /// recorded, taken while the test still knew the number named its child.
+    struct RecordedProcess: Sendable {
+        let pid: Int32
+        let start: ProcessStart
+    }
+
+    /// record binds pid to its start time now. It returns nil unless the
+    /// process table shows the pid as a child of this process, so a number
+    /// that names anything else is never recorded. Call it only while the
+    /// child is known to be unreaped.
+    static func record(pid: Int32) -> RecordedProcess? {
+        guard let entry = LaunchedChildSignaller.systemProcessTable(pid), entry.pid == pid, entry.parentPID == getpid() else { return nil }
+        return RecordedProcess(pid: pid, start: entry.start)
+    }
+
+    /// namesRecorded is false only when the recorded process is gone: no
+    /// process has the number, or the number now has another start time. A
+    /// process that has exited but is not yet reaped still has its number, so
+    /// it counts as named.
+    static func namesRecorded(_ recorded: RecordedProcess) -> Bool {
+        if let entry = LaunchedChildSignaller.systemProcessTable(recorded.pid) {
+            return entry.pid == recorded.pid && entry.start == recorded.start
+        }
+        errno = 0
+        return !(kill(recorded.pid, 0) == -1 && errno == ESRCH)
+    }
+
+    /// signal sends signal to the recorded process only when the number still
+    /// shows the start time recorded for it, read just before the send. A
+    /// mismatch or a read that fails sends nothing and returns false.
+    @discardableResult
+    static func signal(_ recorded: RecordedProcess, _ signal: Int32) -> Bool {
+        guard let entry = LaunchedChildSignaller.systemProcessTable(recorded.pid),
+              entry.pid == recorded.pid, entry.start == recorded.start else { return false }
+        return kill(recorded.pid, signal) == 0
     }
 }

@@ -111,6 +111,8 @@ struct BuiltInRouteView: View {
             SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.settingsStatusText(timeZone: .current), slot: .checking)
         case .stopped:
             SetupStatusRow(name: "built-in", title: "Your address", caption: model.builtInRoute.notReadyReason, wrapsCaption: true, slot: .unavailable(model.builtInRoute.settingsStatusText(timeZone: .current)))
+        case .engineMayStillRun:
+            SetupStatusRow(name: "built-in", title: "Tailscale", caption: model.builtInRoute.notReadyReason, captionIsError: true, wrapsCaption: true, slot: .unavailable(model.builtInRoute.settingsStatusText(timeZone: .current)))
         case .failed(let message):
             SetupStatusRow(
                 name: "built-in",
@@ -125,9 +127,10 @@ struct BuiltInRouteView: View {
 }
 
 /// BuiltInRouteCopy is what the person is told before signing in: the
-/// address is public and opened only by the token.
+/// address is public, the readings behind it need the token, and its name
+/// is in public certificate logs.
 enum BuiltInRouteCopy {
-    static let disclosure = "This gives your Mac a public https address that only your token opens. Its name appears in public certificate logs. A Tailscale account is free, and your phone needs nothing installed."
+    static let disclosure = "Your Mac gets a public https address, and your readings need your token. Its name shows in public certificate logs. A free Tailscale account works, and your phone needs nothing installed."
 }
 
 /// BuiltInRouteCopy's companion notice: shown wherever the route is chosen
@@ -192,7 +195,8 @@ struct TailscaleChoiceView: View {
             ChoiceRow(
                 title: "Use My Tailscale",
                 description: "Reach this Mac over your own Tailscale, on a private address.",
-                selected: !model.settings.useBuiltInTailscale
+                selected: !model.settings.useBuiltInTailscale,
+                disabled: model.isLeavingRoute
             ) { model.chooseOwnTailscale() }
             ChoiceRow(
                 title: "Use Built-In Tailscale",

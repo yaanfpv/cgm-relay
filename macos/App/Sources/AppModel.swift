@@ -132,11 +132,18 @@ final class AppModel: ObservableObject {
     private let signInStarter: any BuiltInSignInStarting
     private let routeLeaver: any BuiltInRouteLeaving
     /// isLeavingRoute is whether a way out of the built-in route is waiting on
-    /// the engine's logout, so a second press does not start another.
-    private var isLeavingRoute = false
-    /// isRunningLeaveChild is whether a leave child is running, so a second
-    /// one never starts beside it.
-    @Published private(set) var isRunningLeaveChild = false
+    /// the engine's logout, so a second press does not start another. The
+    /// press that starts a leave sets it before anything else runs, and the
+    /// run it started clears it when that run ends.
+    @Published private(set) var isLeavingRoute = false
+    /// lifetimes owns when the engine and the leave child count as running:
+    /// an end that was not confirmed counts as running until the app quits.
+    private let lifetimes = ProcessLifetimes()
+    /// engineUsesKeptFolder is whether the engine startEngine last started
+    /// was given the kept Tailscale folder.
+    private var engineUsesKeptFolder = false
+    /// startInFlight is the start startEngine is running, so a second call returns at once and a restart can wait for it.
+    private var startInFlight: Task<Void, Never>?
     private let engineURL: URL
     private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
@@ -203,10 +210,18 @@ final class AppModel: ObservableObject {
     /// chosen right now, nil when it can. Every control that chooses the
     /// built-in route reads it for both its disabled state and its caption.
     var builtInChoiceBlockedReason: String? {
-        LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: isRunningLeaveChild)
+        guard lifetimes.builtInChoiceBlocked else { return nil }
+        if lifetimes.engine == .notConfirmed { return MenuDisplayState.engineMayStillRunText }
+        return LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: true)
     }
 
-    var canStart: Bool { credentialsConfigured && engineState == .stopped }
+    /// startsOnKeptFolder is whether an engine started now would use the kept
+    /// Tailscale folder, which is what the built-in route is.
+    private var startsOnKeptFolder: Bool { settings.useBuiltInTailscale }
+
+    /// canStart is false while a stop is still waiting for the engine's end, since the supervisor
+    /// starts nothing until that end is confirmed and a press then would do nothing.
+    var canStart: Bool { credentialsConfigured && engineState == .stopped && lifetimes.engine != .confirming }
 
     /// canStop is true only while stopping would actually change
     /// something: a running engine, one still starting, or one waiting on
@@ -235,7 +250,7 @@ final class AppModel: ObservableObject {
         switch engineState {
         case .failed(.storeKeyMismatch), .failed(.recoveryMoveFailed), .failed(.storeDamaged):
             return true
-        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort), .stopped, .starting, .running, .waitingToRestart:
+        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort), .failed(.engineStatusUnknown), .stopped, .starting, .running, .waitingToRestart:
             return false
         }
     }
@@ -252,7 +267,7 @@ final class AppModel: ObservableObject {
         switch engineState {
         case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort):
             return true
-        case .failed(.storeKeyMismatch), .failed(.storeDamaged), .failed(.recoveryMoveFailed), .stopped, .starting, .running, .waitingToRestart:
+        case .failed(.storeKeyMismatch), .failed(.storeDamaged), .failed(.recoveryMoveFailed), .failed(.engineStatusUnknown), .stopped, .starting, .running, .waitingToRestart:
             return false
         }
     }
@@ -333,6 +348,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in ref.value?.handleStatusUpdate(status) }
         }
         ref.value = self
+        lifetimes.onChange = { [weak self] in self?.objectWillChange.send() }
         stayAwake.onFailure = { @Sendable failure in
             Task { @MainActor in ref.value?.stayAwakeNotice = failure.message }
         }
@@ -375,10 +391,12 @@ final class AppModel: ObservableObject {
         // A leave that did not reach Tailscale is tried again here whether or
         // not the engine can start: the child needs no LibreLinkUp sign-in.
         Task { await runPendingLeaveChild() }
-        async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
         async let tailscaleRead: Void = refreshTailscale()
-        _ = await (engineStarted, pollerStarted, tailscaleRead)
+        if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
+            await startEngine()
+        }
+        _ = await (pollerStarted, tailscaleRead)
     }
 
     /// removeRetiredCertificateSecrets deletes the certificate entries an
@@ -410,18 +428,31 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
-        guard canStart else { return }
+        guard canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) else { return }
         Task { await startEngine() }
     }
 
     func stop() {
         stopRequested = true
         Task {
-            await supervisor.stop()
-            stayAwake.relayStopped()
-            boundHost = nil
+            // A start still under way would launch the engine after this
+            // stop; it is waited for first, then stopped with the rest.
+            if let start = startInFlight { await start.value }
+            stopRequested = true
+            _ = await stopEngineAndWait()
+            if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
+            if lifetimes.mayReleaseBoundAddress { boundHost = nil }
             await alertEngine.pauseForEngineStop()
         }
+    }
+
+    /// stopEngineAndWait stops the engine, waits for its end, and tells
+    /// lifetimes how that came out. It returns whether the end was confirmed.
+    private func stopEngineAndWait() async -> Bool {
+        lifetimes.engineStopRequested()
+        let confirmed = await supervisor.stopAndWait(timeout: .seconds(3))
+        lifetimes.engineEnded(confirmed: confirmed)
+        return confirmed
     }
 
     /// startFresh recovers from a permanently failed engine: it moves the
@@ -440,7 +471,7 @@ final class AppModel: ObservableObject {
     func startFresh() {
         guard canStartFresh else { return }
         Task {
-            guard canStartFresh else { return }
+            guard canStartFresh, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) else { return }
             await supervisor.clearFailure()
             do {
                 try DatabaseRecovery.moveAside(databasePath: databasePath)
@@ -461,7 +492,7 @@ final class AppModel: ObservableObject {
     /// run CredentialsBootstrapper again, then start the engine. A no-op
     /// unless canTryAgain is currently true.
     func tryAgain() {
-        guard canTryAgain else { return }
+        guard canTryAgain, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) else { return }
         Task {
             await supervisor.clearFailure()
             try? CredentialsBootstrapper(store: credentialStore).ensureBootstrapped()
@@ -476,15 +507,22 @@ final class AppModel: ObservableObject {
     }
 
     /// shutDown stops the status poller and the engine and waits, briefly,
-    /// for the engine process to be gone, so a relaunch never meets a store
-    /// the old engine still holds.
+    /// for the engine process to be gone. If its end cannot be confirmed the
+    /// app is quitting anyway, so shutDown goes on and logs it; that engine
+    /// may outlive the app.
     func shutDown() async {
         stopRequested = true
         builtInSession.cancel()
         await stayAwake.willQuitInBackground()
         await statusPoller.stop()
-        await supervisor.stopAndWait(timeout: .seconds(3))
-        boundHost = nil
+        if let start = startInFlight { await start.value }
+        stopRequested = true
+        if !(await stopEngineAndWait()) {
+            recoveryLogger.error("the engine could not be confirmed stopped at quit")
+        }
+        if lifetimes.mayReleaseBoundAddress {
+            boundHost = nil
+        }
     }
 
     // MARK: - Account
@@ -498,7 +536,7 @@ final class AppModel: ObservableObject {
         let outcome = await accountSignIn.signIn(email: email, password: password, librelinkupBaseURL: librelinkupBaseURL)
         if outcome == .signedIn {
             refreshCredentialsConfigured()
-            if canStart {
+            if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
                 await startEngine()
             }
         }
@@ -514,9 +552,11 @@ final class AppModel: ObservableObject {
     @discardableResult
     func signOut() async -> Bool {
         stopRequested = true
-        await supervisor.stop()
-        stayAwake.relayStopped()
-        boundHost = nil
+        if let start = startInFlight { await start.value }
+        stopRequested = true
+        _ = await stopEngineAndWait()
+        if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
+        if lifetimes.mayReleaseBoundAddress { boundHost = nil }
         await alertEngine.pauseForEngineStop()
         let succeeded: Bool
         do {
@@ -655,10 +695,11 @@ final class AppModel: ObservableObject {
     /// chooseBuiltInTailscale moves the choice to the Tailscale built into
     /// CGM Relay and restarts the engine with its state folder. It runs only
     /// from a button the person pressed, and not while a leave child is using
-    /// the kept folder. A leave still waiting for a retry is over: the folder
-    /// it kept is the one in use again.
+    /// the kept folder, or an engine whose end was never confirmed. A leave
+    /// still waiting for a retry is over: the folder it kept is the one in
+    /// use again.
     func chooseBuiltInTailscale() {
-        guard !settings.useBuiltInTailscale, !isLeavingRoute, !isRunningLeaveChild else { return }
+        guard !settings.useBuiltInTailscale, !isLeavingRoute, !lifetimes.builtInChoiceBlocked else { return }
         settings.useBuiltInTailscale = true
         settings.pendingLeaveRetry = false
         settings.tailscaleHTTPSEnabled = false
@@ -674,7 +715,9 @@ final class AppModel: ObservableObject {
     /// the engine restarts without it.
     func chooseOwnTailscale() {
         guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        isLeavingRoute = true
         Task {
+            defer { isLeavingRoute = false }
             await leaveBuiltInRoute(for: .chooseOwnTailscale) {
                 self.settings.useBuiltInTailscale = false
                 self.persistSettings()
@@ -690,7 +733,9 @@ final class AppModel: ObservableObject {
     /// the built-in route, logging out of the person's Tailscale account first.
     private func chooseThisMacOnlyLeavingBuiltIn() {
         guard settings.useBuiltInTailscale, !isLeavingRoute else { return }
+        isLeavingRoute = true
         Task {
+            defer { isLeavingRoute = false }
             await leaveBuiltInRoute(for: .chooseThisMacOnly) {
                 self.settings.useBuiltInTailscale = false
                 self.settings = self.settings.choosing(.thisMacOnly)
@@ -707,13 +752,12 @@ final class AppModel: ObservableObject {
     /// out of the built-in route. The leave is awaited, with its own timeout,
     /// before the engine stops, since the node that logs out lives in the
     /// engine. What the leave answered is saved, so a launch retries it when
-    /// the Mac was not yet logged out.
+    /// the Mac was not yet logged out. The caller owns isLeavingRoute.
     private func leaveBuiltInRoute(
         for trigger: LeaveTrigger,
         applyChoice: () async -> Void
     ) async {
-        isLeavingRoute = true
-        defer { isLeavingRoute = false }
+        guard !lifetimes.builtInChoiceBlocked else { return }
         for step in LeaveTailnetSequence.steps(for: trigger, builtInOn: settings.useBuiltInTailscale) {
             switch step {
             case .leave:
@@ -731,16 +775,6 @@ final class AppModel: ObservableObject {
         Task { await runPendingLeaveChild() }
     }
 
-    /// engineHoldsFolder is whether an engine is running with the built-in
-    /// route on, the only time the engine uses the kept Tailscale folder.
-    private var engineHoldsFolder: Bool {
-        guard settings.useBuiltInTailscale else { return false }
-        switch engineState {
-        case .starting, .running, .waitingToRestart: return true
-        case .stopped, .failed: return false
-        }
-    }
-
     /// runPendingLeaveChild tries again to log this Mac out of the person's
     /// Tailscale account after a leave that did not reach it, by running
     /// `cgm-relay leave-tailnet --config-stdin` on the kept folder. It runs
@@ -748,14 +782,11 @@ final class AppModel: ObservableObject {
     /// and one at a time. The exit code is recorded with
     /// LeaveTailnetOutcome.fromLeaveChild.
     private func runPendingLeaveChild() async {
-        guard !isRunningLeaveChild,
-              LeaveTailnetOutcome.shouldRunLeaveChild(settings: settings, engineHoldsFolder: engineHoldsFolder)
-        else { return }
-        isRunningLeaveChild = true
-        defer { isRunningLeaveChild = false }
+        guard lifetimes.mayStartLeaveChild, settings.pendingLeaveRetry, !settings.useBuiltInTailscale else { return }
         let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
         let request = ["tailscale_state_dir": kept.path, "tailscale_hostname": SettingsEngineConfigurationBuilder.builtInHostname]
         guard let input = try? JSONSerialization.data(withJSONObject: request) else { return }
+        lifetimes.leaveChildStarted()
         let result = await leaveRunner.run(
             executableURL: engineURL,
             arguments: ["leave-tailnet", "--config-stdin"],
@@ -765,8 +796,13 @@ final class AppModel: ObservableObject {
         let outcome: LeaveTailnetOutcome
         if case .exited(let code) = result {
             outcome = LeaveTailnetOutcome.fromLeaveChild(exitCode: code)
+            lifetimes.leaveChildEnded(confirmed: true)
+        } else if case .notConfirmedEnded = result {
+            outcome = .notYetRemoved
+            lifetimes.leaveChildEnded(confirmed: false)
         } else {
             outcome = .notYetRemoved
+            lifetimes.leaveChildEnded(confirmed: true)
         }
         LeaveTailnetOutcome.record(outcome, into: &settings)
         persistSettings()
@@ -787,11 +823,14 @@ final class AppModel: ObservableObject {
         builtInSession.cancel()
         Task {
             switch engineState {
+            case .failed(.engineStatusUnknown):
+                // The engine may still run: no second one is started.
+                return
             case .failed:
                 await supervisor.clearFailure()
-                await startEngine()
+                if lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) { await startEngine() }
             case .stopped:
-                if canStart { await startEngine() }
+                if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) { await startEngine() }
             case .starting, .running, .waitingToRestart:
                 await restartEngineIfRunning()
             }
@@ -893,9 +932,10 @@ final class AppModel: ObservableObject {
         setupPortNotice = nil
         persistSettings()
         Task {
+            if let start = startInFlight { await start.value }
             // A relay that could not listen on the old port starts on the
             // new one at once; a running one restarts onto it.
-            if engineState == .failed(.portInUse) {
+            if engineState == .failed(.portInUse), lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
                 await supervisor.clearFailure()
                 await startEngine()
             } else {
@@ -988,28 +1028,30 @@ final class AppModel: ObservableObject {
     /// whether this Mac's own entry is now serving. A transient failure is
     /// retried quietly (TailscaleChange), each attempt starting from a fresh
     /// read, and the spinner stays up until the last attempt has ended.
-    func enableTailscaleHTTPS(shownPort: Int) async {
+    func enableTailscaleHTTPS(shownPort: Int) {
         guard !isChangingTailscale else { return }
         isChangingTailscale = true
         tailscaleFailure = nil
-        defer { isChangingTailscale = false }
-
-        let result = await TailscaleChange.turnOn(
-            shownPort: shownPort,
-            relayPort: settings.port,
-            controller: tailscale,
-            read: { [self] in await readHTTPSState() },
-            wait: { try? await Task.sleep(for: $0) }
-        )
-        switch result {
-        case .done, .unchanged:
-            settings = settings.choosing(.tailscaleHTTPS)
-            persistSettings()
-            refreshNetworkAddresses()
-        case .refused:
-            reportFailure(.settingsChanged, turningOn: true)
-        case .failed(let outcome):
-            reportFailure(outcome, turningOn: true)
+        let relayPort = settings.port
+        Task {
+            defer { isChangingTailscale = false }
+            let result = await TailscaleChange.turnOn(
+                shownPort: shownPort,
+                relayPort: relayPort,
+                controller: tailscale,
+                read: { [self] in await readHTTPSState() },
+                wait: { try? await Task.sleep(for: $0) }
+            )
+            switch result {
+            case .done, .unchanged:
+                settings = settings.choosing(.tailscaleHTTPS)
+                persistSettings()
+                refreshNetworkAddresses()
+            case .refused:
+                reportFailure(.settingsChanged, turningOn: true)
+            case .failed(let outcome):
+                reportFailure(outcome, turningOn: true)
+            }
         }
     }
 
@@ -1020,31 +1062,32 @@ final class AppModel: ObservableObject {
     /// removes the handler: the chosen way is never changed here, so a person
     /// who chose Tailscale HTTPS stays on it, told that followers can't reach
     /// this Mac until it is turned on again or another way is chosen.
-    func disableTailscaleHTTPS(shownPort: Int) async {
+    func disableTailscaleHTTPS(shownPort: Int) {
         guard !isChangingTailscale else { return }
         isChangingTailscale = true
         tailscaleFailure = nil
-        defer { isChangingTailscale = false }
-
-        let result = await TailscaleChange.turnOff(
-            shownPort: shownPort,
-            controller: tailscale,
-            read: { [self] in await readHTTPSState() },
-            wait: { try? await Task.sleep(for: $0) }
-        )
-        switch result {
-        case .done:
-            // A start refused for Tailscale HTTPS on the status port can move
-            // now that nothing holds the port.
-            if engineState == .failed(.httpsOnStatusPort) {
-                tryAgain()
+        Task {
+            defer { isChangingTailscale = false }
+            let result = await TailscaleChange.turnOff(
+                shownPort: shownPort,
+                controller: tailscale,
+                read: { [self] in await readHTTPSState() },
+                wait: { try? await Task.sleep(for: $0) }
+            )
+            switch result {
+            case .done:
+                // A start refused for Tailscale HTTPS on the status port can
+                // move now that nothing holds the port.
+                if engineState == .failed(.httpsOnStatusPort) {
+                    tryAgain()
+                }
+            case .unchanged:
+                break
+            case .refused:
+                reportFailure(.settingsChanged, turningOn: false)
+            case .failed(let outcome):
+                reportFailure(outcome, turningOn: false)
             }
-        case .unchanged:
-            break
-        case .refused:
-            reportFailure(.settingsChanged, turningOn: false)
-        case .failed(let outcome):
-            reportFailure(outcome, turningOn: false)
         }
     }
 
@@ -1301,11 +1344,15 @@ final class AppModel: ObservableObject {
     /// first needs the permission to change the sleep setting, which asks
     /// for the Mac's password once; the answer is saved only when that
     /// worked, so a closed prompt leaves things as they were.
-    func turnOnStayAwake() async {
+    func turnOnStayAwake() {
         guard !isChangingStayAwake else { return }
         stayAwakeNotice = nil
-        if isLaptop {
-            isChangingStayAwake = true
+        guard isLaptop else {
+            saveStayAwake(.on)
+            return
+        }
+        isChangingStayAwake = true
+        Task {
             defer { isChangingStayAwake = false }
             if await !sleepRules.isInstalled() {
                 switch await sleepRules.install() {
@@ -1318,8 +1365,8 @@ final class AppModel: ObservableObject {
                     return
                 }
             }
+            saveStayAwake(.on)
         }
-        saveStayAwake(.on)
     }
 
     /// turnOffStayAwake saves the answer and puts the Mac back to sleeping
@@ -1401,12 +1448,18 @@ final class AppModel: ObservableObject {
     /// never disturbs a permanent failure, which stays exactly as
     /// reported until Try Again or Start Fresh.
     private func restartEngineIfRunning() async {
+        if let start = startInFlight { await start.value }
         switch engineState {
         case .starting, .running, .waitingToRestart:
             // Wait for the old process to be gone, so its own listener never
             // reads as another app holding the port when the new start checks.
-            await supervisor.stopAndWait(timeout: .seconds(3))
-            await startEngine()
+            guard await stopEngineAndWait() else {
+                recoveryLogger.error("the engine could not be confirmed stopped, so no new one was started")
+                return
+            }
+            if lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
+                await startEngine()
+            }
         case .stopped, .failed:
             return
         }
@@ -1429,48 +1482,57 @@ final class AppModel: ObservableObject {
     /// Start Fresh itself reports keeps that recovery path the only way
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
-        stopRequested = false
-        if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
-            boundHost = nil
-            await supervisor.fail(.recoveryMoveFailed)
-            return
-        }
-        let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
-        if let refusal = choosePortBeforeStart(interfaces: interfaces) {
-            boundHost = nil
-            await supervisor.fail(refusal)
-            return
-        }
-        var stateDirectory: String?
-        if settings.useBuiltInTailscale {
-            stateDirectory = builtInStateDirectory()
-            if stateDirectory == nil {
+        if startInFlight != nil { return }
+        let run = Task { [self] in
+            stopRequested = false
+            if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
+                boundHost = nil
+                await supervisor.fail(.recoveryMoveFailed)
+                return
+            }
+            let interfaces = SystemNetworkInterfaces.currentIPv4Addresses()
+            if let refusal = choosePortBeforeStart(interfaces: interfaces) {
+                boundHost = nil
+                await supervisor.fail(refusal)
+                return
+            }
+            var stateDirectory: String?
+            if settings.useBuiltInTailscale {
+                stateDirectory = builtInStateDirectory()
+                if stateDirectory == nil {
+                    boundHost = nil
+                    await supervisor.fail(.configurationUnreadable)
+                    return
+                }
+            }
+            guard
+                let configuration = try? SettingsEngineConfigurationBuilder.build(
+                    settings: settings,
+                    from: credentialStore,
+                    interfaces: interfaces,
+                    statusAddr: statusAddr,
+                    databasePath: databasePath,
+                    tailscaleStateDir: stateDirectory,
+                    librelinkupBaseURL: librelinkupBaseURL
+                )
+            else {
                 boundHost = nil
                 await supervisor.fail(.configurationUnreadable)
                 return
             }
+            boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
+            engineUsesKeptFolder = stateDirectory != nil
+            // A status from before this start must not read as this node's,
+            // including one still being fetched.
+            await statusPoller.discardPending()
+            latestStatus?.builtIn = nil
+            refreshBuiltInRoute()
+            await alertEngine.resumeAfterEngineStart()
+            await supervisor.start(configuration: configuration)
         }
-        guard
-            let configuration = try? SettingsEngineConfigurationBuilder.build(
-                settings: settings,
-                from: credentialStore,
-                interfaces: interfaces,
-                statusAddr: statusAddr,
-                databasePath: databasePath,
-                tailscaleStateDir: stateDirectory,
-                librelinkupBaseURL: librelinkupBaseURL
-            )
-        else {
-            boundHost = nil
-            await supervisor.fail(.configurationUnreadable)
-            return
-        }
-        boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
-        // A status from before this start must not read as this node's.
-        latestStatus?.builtIn = nil
-        refreshBuiltInRoute()
-        await alertEngine.resumeAfterEngineStart()
-        await supervisor.start(configuration: configuration)
+        startInFlight = run
+        await run.value
+        startInFlight = nil
     }
 
     /// choosePortBeforeStart settles the follower port before the engine
@@ -1523,19 +1585,23 @@ final class AppModel: ObservableObject {
     }
 
     /// handleEngineStateChange clears boundHost whenever the engine
-    /// reaches .stopped or .failed, so a permanent failure the supervisor
+    /// reaches .stopped or .failed, unless its end is still being waited for
+    /// or was not confirmed, so a permanent failure the supervisor
     /// discovers on its own after starting (a store key mismatch, a
     /// damaged file, another copy already holding the store) never leaves
     /// the Connect pane showing an address nothing is listening on; a
     /// crash-triggered restart (.waitingToRestart, then .starting) keeps
     /// it, since it restarts with the same configuration.
     private func handleEngineStateChange(_ state: EngineSupervisor.RunState) {
+        lifetimes.engineStateReported(state, usingKeptFolder: engineUsesKeptFolder)
         switch state {
         case .stopped:
-            boundHost = nil
+            if lifetimes.mayReleaseBoundAddress {
+                boundHost = nil
+            }
         case .failed:
-            boundHost = nil
-            stayAwake.relayStopped()
+            if lifetimes.mayReleaseBoundAddress { boundHost = nil }
+            if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
         case .running:
             if !stopRequested { stayAwake.relayStarted() }
         case .starting, .waitingToRestart:

@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import CGMRelayCore
 
-@Suite("RealProcessLauncher")
+@Suite("RealProcessLauncher", .noSurvivingChildren)
 struct RealProcessLauncherTests {
     /// Case names one shell command and the exit code RealProcessLauncher
     /// must report for it through onExit.
@@ -153,7 +153,7 @@ struct RealProcessLauncherTests {
         defer { close(releaseFD) }
 
         let collector = LineCollector()
-        let exited = DispatchSemaphore(value: 0)
+        let watch = ExitWatch()
         let launcher = RealProcessLauncher(engineLog: { collector.add($0) })
         // The child writes its line, then stays running until the test writes
         // to the FIFO, and then exits on its own. No signal is ever sent.
@@ -162,14 +162,25 @@ struct RealProcessLauncherTests {
             arguments: ["-c", "printf 'poller: alive\\n' >&2; read _ < \"$1\"", "sh", fifo],
             standardInputData: Data(),
             onReady: {}
-        ) { _ in exited.signal() }
+        ) { watch.record($0) }
         let pid = process.processIdentifier
-        // Registered right after the launch: release the child, then observe its exit.
+        let launchedStart = ChildCleanup.startNow(pid: pid)
+        // Registered right after the launch, on every outcome: release the
+        // child, which then ends on its own, and confirm its reap. A callback is
+        // not that (a status the holder could not observe is reported through it
+        // too), so the confirmation is the process's own word that it was reaped
+        // and reported. A release that cannot be written ends the child through
+        // its own handle, and an end that is not confirmed fails the test naming
+        // the child and the start read just after the launch.
         defer {
-            _ = write(releaseFD, "x\n", 2)
-            if exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) != .success {
-                Issue.record("engine child pid \(pid) may still be running, outcome unknown; it was not signalled, end it by hand")
-            }
+            ChildCleanup.endHeldRecordingNotConfirmed(
+                pid: pid, start: launchedStart, alreadyEnded: ConfirmedEnd.isReaped(process),
+                send: { if write(releaseFD, "x\n", 2) != 2 { process.kill() } },
+                waitForEnd: { milliseconds in
+                    !watch.reportedStatusUnknown && ConfirmedEnd.wait(process, milliseconds: milliseconds)
+                },
+                waitingMilliseconds: TestChild.hangCeilingMilliseconds
+            )
         }
 
         // The child cannot exit before the defer above releases it, so a line
@@ -283,42 +294,38 @@ struct RealProcessLauncherTests {
 
     // MARK: Signals reach only the launched child
 
-    /// ExitRecord collects what a spawned child's onExit reported.
-    private final class ExitRecord: @unchecked Sendable {
-        private let lock = NSLock()
-        private var codes: [Int32] = []
-        let exited = DispatchSemaphore(value: 0)
-
-        func record(_ code: Int32) {
-            lock.withLock { codes.append(code) }
-            exited.signal()
-        }
-
-        var reported: [Int32] { lock.withLock { codes } }
-
-        /// waitForExit waits for one report, up to the repo's hang ceiling.
-        func waitForExit() -> Bool {
-            exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
-        }
+    /// spawn starts a child held from birth, with the write end of a pipe as
+    /// its stdin. The tuple's `exits` is what the holder reported for it.
+    private func spawn(_ executable: String, _ arguments: [String] = []) throws -> (child: HeldChild, input: FileHandle, exits: ExitWatch) {
+        let inputPipe = Pipe()
+        let held = try HeldChild.start(
+            executable: executable, arguments: arguments,
+            standardInput: inputPipe.fileHandleForReading.fileDescriptor
+        )
+        // The child is already running: nothing below may throw.
+        try? inputPipe.fileHandleForReading.close()
+        return (held, inputPipe.fileHandleForWriting, held.watch)
     }
 
-    private func spawn(_ executable: String, _ arguments: [String] = []) throws -> (child: SpawnedChild, input: FileHandle, exits: ExitRecord) {
-        let inputPipe = Pipe()
-        let exits = ExitRecord()
-        let child = try ChildSpawner.spawn(
-            executableURL: URL(fileURLWithPath: executable),
-            arguments: arguments,
-            environment: ["PATH": "/usr/bin:/bin"],
-            standardInput: inputPipe.fileHandleForReading.fileDescriptor,
-            standardOutput: nil,
-            standardError: nil
-        ) { exits.record($0) }
-        try inputPipe.fileHandleForReading.close()
-        return (child, inputPipe.fileHandleForWriting, exits)
+    /// endStarted ends a child started with `spawn`. Closing its input is the
+    /// whole request (cat ends on end of input and /usr/bin/true is already
+    /// ending), and it is made whatever the child's state. The child counts as
+    /// ended only when its holder confirms the reap; a status the holder could
+    /// not observe is not that, and fails the test naming the child and its
+    /// birth start.
+    private func endStarted(_ started: (child: HeldChild, input: FileHandle, exits: ExitWatch)) {
+        try? started.input.close()
+        ChildCleanup.endHeldRecordingNotConfirmed(
+            pid: started.child.processIdentifier, start: started.child.birthStart,
+            alreadyEnded: started.child.hasReportedExit,
+            send: {},
+            waitForEnd: { started.child.waitReaped(milliseconds: $0) },
+            waitingMilliseconds: TestChild.hangCeilingMilliseconds
+        )
     }
 
     /// startedCat spawns /bin/cat, which stays alive until its stdin closes.
-    private func startedCat() throws -> (child: SpawnedChild, input: FileHandle, exits: ExitRecord) {
+    private func startedCat() throws -> (child: HeldChild, input: FileHandle, exits: ExitWatch) {
         try spawn("/bin/cat")
     }
 
@@ -326,9 +333,9 @@ struct RealProcessLauncherTests {
     func signalReachesALiveChild() throws {
         let started = try startedCat()
         // Closing its input ends cat on its own if the signal never lands.
-        defer { try? started.input.close() }
+        defer { endStarted(started) }
         #expect(started.child.signaller.send(SIGTERM) == true)
-        try #require(started.exits.waitForExit(), "child pid \(started.child.processIdentifier) did not end after the signal")
+        try #require(started.child.waitReaped(), "child pid \(started.child.processIdentifier) did not end after the signal")
         #expect(started.exits.reported == [-SIGTERM])
         #expect(started.child.hasExited)
     }
@@ -336,8 +343,9 @@ struct RealProcessLauncherTests {
     @Test("once the child has ended and been reaped, a send is refused and reports that it sent nothing")
     func sendAfterTheChildEndedIsRefused() throws {
         let started = try startedCat()
+        defer { endStarted(started) }
         try started.input.close()
-        try #require(started.exits.waitForExit())
+        try #require(started.child.waitReaped())
         #expect(started.exits.reported == [0])
         #expect(started.child.signaller.send(SIGTERM) == false)
         #expect(started.child.signaller.send(SIGKILL) == false)
@@ -346,10 +354,11 @@ struct RealProcessLauncherTests {
     @Test("a send is refused for a child that has been reaped even by a sender that was never told it ended")
     func sendAfterTheChildWasReapedIsRefusedWithoutBeingTold() throws {
         let started = try startedCat()
+        defer { endStarted(started) }
         // A second sender over the same live child, which nothing tells about its end.
         let untold = LaunchedChildSignaller(pid: started.child.processIdentifier)
         try started.input.close()
-        try #require(started.exits.waitForExit())
+        try #require(started.child.waitReaped())
         #expect(untold.send(SIGTERM) == false)
         #expect(untold.send(SIGKILL) == false)
     }
@@ -358,7 +367,7 @@ struct RealProcessLauncherTests {
     func sendAfterBeingToldTheChildEndedIsRefusedWhileItLives() throws {
         let started = try startedCat()
         // Closing its input ends cat on its own if a refused send is wrongly delivered or the test fails early.
-        defer { try? started.input.close() }
+        defer { endStarted(started) }
         let pid = started.child.processIdentifier
         started.child.signaller.markTerminated()
         #expect(started.child.signaller.send(SIGTERM) == false)
@@ -368,7 +377,7 @@ struct RealProcessLauncherTests {
         let probeErrno = errno
         #expect(probe == 0, "kill(\(pid), 0) returned \(probe), errno \(probeErrno): a refused send still ended the child")
         try started.input.close()
-        try #require(started.exits.waitForExit())
+        try #require(started.child.waitReaped())
         #expect(started.exits.reported == [0])
     }
 
@@ -377,12 +386,14 @@ struct RealProcessLauncherTests {
         for _ in 0..<25 {
             // A child that may already have ended by the time the sender reads its record.
             let quick = try spawn("/usr/bin/true")
-            try #require(quick.exits.waitForExit())
+            defer { endStarted(quick) }
+            try #require(quick.child.waitReaped())
             #expect(quick.exits.reported == [0])
             #expect(quick.child.signaller.send(SIGTERM) == false)
         }
         for _ in 0..<25 {
             let racing = try startedCat()
+            defer { endStarted(racing) }
             let racerDone = DispatchSemaphore(value: 0)
             DispatchQueue.global().async {
                 // Send until a send is refused: it must be refused once the child is reaped.
@@ -390,7 +401,7 @@ struct RealProcessLauncherTests {
                 racerDone.signal()
             }
             try racing.input.close()
-            try #require(racing.exits.waitForExit())
+            try #require(racing.child.waitReaped())
             try #require(racerDone.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success)
             let reported = racing.exits.reported
             #expect(reported == [0] || reported == [-SIGTERM], "reported \(reported)")
@@ -401,18 +412,49 @@ struct RealProcessLauncherTests {
     @Test("a stop ends what the child started as well: it leads its own group and the signal goes to the group")
     func signalReachesTheChildsDescendants() throws {
         let outputPipe = Pipe()
-        let exits = ExitRecord()
-        let child = try ChildSpawner.spawn(
-            executableURL: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "sleep 30 & echo $!; wait"],
-            environment: ["PATH": "/usr/bin:/bin"],
-            standardInput: nil,
-            standardOutput: outputPipe.fileHandleForWriting.fileDescriptor,
-            standardError: nil
-        ) { exits.record($0) }
-        try outputPipe.fileHandleForWriting.close()
-        let pid = child.processIdentifier
-        #expect(getpgid(pid) == pid, "the child is not the leader of its own group")
+        // The background process reads an input this test holds (descriptor 3 of the
+        // shell, since a background command's own standard input is /dev/null), so it
+        // has no end of its own: it ends only when the stop reaches it, or when the
+        // test releases the input. A stop that reached only the leader leaves it there.
+        let input = HeldInput()
+        let leader = try HeldChild.start(
+            executable: "/bin/sh",
+            arguments: ["-c", "exec 3<&0; cat <&3 & echo $!; wait"],
+            standardInput: input.childEnd,
+            standardOutput: outputPipe.fileHandleForWriting.fileDescriptor
+        )
+        input.closeChildEnd()
+        let pid = leader.processIdentifier
+        // The background process, once the child has named it. Its identity is stored
+        // only after the record shows it is the leader's child and in the leader's group.
+        var descendantPid: pid_t?
+        var descendantIdentity: StoppedChildSupport.RecordedProcess?
+        // Registered right after the start, on every outcome. The input is
+        // released first, whatever the leader's state, so the background process
+        // ends by itself even when the leader is already reaped. The leader, which
+        // the shell keeps unreaped in `wait`, is ended through its held signaller.
+        // The background process is not held and nothing here signals it: its end is
+        // confirmed by read only, from its own pid and start. An end not seen, or a
+        // record that cannot be read, fails the test naming it. One never identified
+        // is named as unknown.
+        defer {
+            input.release()
+            ChildCleanup.endHeldRecordingNotConfirmed(
+                pid: pid, start: leader.birthStart, alreadyEnded: leader.hasReportedExit,
+                send: { leader.send(SIGKILL) },
+                waitForEnd: { leader.waitReaped(milliseconds: $0) },
+                waitingMilliseconds: TestChild.hangCeilingMilliseconds
+            )
+            if let identity = descendantIdentity {
+                if !DescendantCheck.requireGone(pid: identity.pid, start: identity.start, read: { readProcessTable($0) }) {
+                    Issue.record("the background process of child \(pid) (pid \(identity.pid), start \(identity.start.seconds).\(identity.start.microseconds)) was not confirmed ended, it may still be running")
+                }
+            } else {
+                Issue.record("the background process of child \(pid) (its pid \(descendantPid.map(String.init) ?? "not reported"), start not recorded) was not confirmed ended, it may still be running")
+            }
+        }
+        try? outputPipe.fileHandleForWriting.close()
+        try #require(getpgid(pid) == pid, "the child is not the leader of its own group")
 
         // The child itself reports its background process's pid, once it exists.
         let gotLine = DispatchSemaphore(value: 0)
@@ -426,23 +468,28 @@ struct RealProcessLauncherTests {
         defer { outputPipe.fileHandleForReading.readabilityHandler = nil }
         try #require(gotLine.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success, "the child never reported its background process")
         let descendantPID = try #require(pid_t(line.value.trimmingCharacters(in: .whitespacesAndNewlines)), "child reported \"\(line.value)\"")
-        let descendant = try #require(LaunchedChildSignaller.systemProcessTable(descendantPID), "no record for the child's background process \(descendantPID)")
-        #expect(descendant.parentPID == pid)
-        #expect(getpgid(descendantPID) == pid, "the background process is not in the child's group")
-
-        #expect(child.signaller.send(SIGTERM) == true)
-        try #require(exits.waitForExit(), "child \(pid) did not end after the signal")
-        #expect(exits.reported == [-SIGTERM])
-        // Gone means no process with that pid and start time any more; the
-        // wait is on the descendant's own end, which no event reports to us.
-        let deadline = ContinuousClock.now + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
-        var stillThere = true
-        while stillThere && ContinuousClock.now < deadline {
-            let now = LaunchedChildSignaller.systemProcessTable(descendantPID)
-            stillThere = now?.start == descendant.start
-            if stillThere { usleep(10_000) }
+        descendantPid = descendantPID
+        // Reads only, to check the premise of the group send; nothing is signalled by them.
+        // A record that cannot be read is not the same as none: either one fails the test, naming which.
+        let descendantRead = readProcessTable(descendantPID)
+        guard case .present(let descendant) = descendantRead else {
+            Issue.record("no record for the child's background process \(descendantPID): \(descendantRead)")
+            return
         }
-        #expect(!stillThere, "the background process \(descendantPID) was not ended by the stop")
+        try #require(descendant.parentPID == pid, "the background process \(descendantPID) is not the child's")
+        try #require(getpgid(descendantPID) == pid, "the background process \(descendantPID) is not in the child's group")
+        descendantIdentity = StoppedChildSupport.RecordedProcess(pid: descendantPID, start: descendant.start)
+
+        #expect(leader.send(SIGTERM) == true)
+        try #require(leader.waitReaped(), "child \(pid) did not end after the signal")
+        #expect(leader.watch.reported == [-SIGTERM])
+        // Gone means the kernel says no such process, or the number has another start
+        // time; a record that cannot be read is neither, and fails the test naming it.
+        // The wait is on the descendant's own end, which no event reports to us.
+        #expect(
+            DescendantCheck.requireGone(pid: descendantPID, start: descendant.start, read: { readProcessTable($0) }),
+            "the background process \(descendantPID) was not ended by the stop"
+        )
     }
 
     private final class LockedText: @unchecked Sendable {
@@ -478,7 +525,7 @@ struct RealProcessLauncherTests {
     func signalFollowsTheFactsReadAtLaunch(_ testCase: FactsCase) throws {
         let started = try startedCat()
         // Closing its input ends cat on its own if the test stops early.
-        defer { try? started.input.close() }
+        defer { endStarted(started) }
         let pid = started.child.processIdentifier
 
         // The real record of this live child gives start A; B is one microsecond later.
@@ -500,7 +547,7 @@ struct RealProcessLauncherTests {
 
         #expect(signaller.send(SIGTERM) == testCase.wantSent)
         if testCase.wantSent {
-            try #require(started.exits.waitForExit(), "child \(pid) did not end after the signal")
+            try #require(started.child.waitReaped(), "child \(pid) did not end after the signal")
             #expect(started.exits.reported == [-SIGTERM])
         } else {
             errno = 0
@@ -508,7 +555,7 @@ struct RealProcessLauncherTests {
             let probeErrno = errno
             #expect(probe == 0, "kill(\(pid), 0) returned \(probe), errno \(probeErrno): a refused send still affected the child")
             try started.input.close()
-            try #require(started.exits.waitForExit())
+            try #require(started.child.waitReaped())
             #expect(started.exits.reported == [0])
         }
     }
@@ -571,5 +618,200 @@ struct RealProcessLauncherTests {
             }
         }
         #expect(got == testCase.wantExitCode)
+    }
+
+    // MARK: A child stopped from outside
+
+    /// AnnouncedChild is a spawned perl child that has printed its ready line,
+    /// so whatever handlers it installs are in place.
+    private struct AnnouncedChild {
+        let child: HeldChild
+        let input: FileHandle
+        let exits: ExitWatch
+        var pid: Int32 { child.processIdentifier }
+    }
+
+    private func spawnAnnounced(_ script: String) async throws -> AnnouncedChild {
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let held = try HeldChild.start(
+            executable: "/usr/bin/perl",
+            arguments: ["-e", script],
+            standardInput: inputPipe.fileHandleForReading.fileDescriptor,
+            standardOutput: outputPipe.fileHandleForWriting.fileDescriptor
+        )
+        // The child is already running: nothing from here to the end of the
+        // setup may throw without ending it.
+        try? inputPipe.fileHandleForReading.close()
+        try? outputPipe.fileHandleForWriting.close()
+        let started = AnnouncedChild(child: held, input: inputPipe.fileHandleForWriting, exits: held.watch)
+        let readEnd = outputPipe.fileHandleForReading.fileDescriptor
+        let announced = await StoppedChildSupport.withinBlocking {
+            var seen = Data()
+            var byte: UInt8 = 0
+            while !seen.contains(UInt8(ascii: "\n")) {
+                let count = read(readEnd, &byte, 1)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { return false }
+                seen.append(byte)
+            }
+            return true
+        }
+        try? outputPipe.fileHandleForReading.close()
+        guard announced == true else {
+            endNow(started)
+            throw StoppedChildError.neverReady(pid: started.pid)
+        }
+        return started
+    }
+
+    private enum StoppedChildError: Error { case neverReady(pid: Int32) }
+
+    /// endNow ends the child this test started unless its holder has confirmed
+    /// the reap: it kills it through the held signaller and closes its input. The
+    /// child counts as ended only when the holder confirms the reap, which a
+    /// report of a status it could not observe is not; an end that is not
+    /// confirmed fails the test naming the child and its birth start.
+    private func endNow(_ started: AnnouncedChild) {
+        ChildCleanup.endHeldRecordingNotConfirmed(
+            pid: started.pid, start: started.child.birthStart,
+            alreadyEnded: started.child.hasReportedExit,
+            send: {
+                started.child.send(SIGKILL)
+                try? started.input.close()
+            },
+            waitForEnd: { started.child.waitReaped(milliseconds: $0) },
+            waitingMilliseconds: TestChild.hangCeilingMilliseconds
+        )
+        try? started.input.close()
+    }
+
+    private static let stopTarget = #"$|=1; print "ready\n"; my $line = <STDIN>; exit 7"#
+
+    @Test("a stopped child is not reported as exited: a send while it is stopped is delivered, and its own later exit is reported once with its code")
+    func stoppedThenContinuedChildReportsItsOwnExitOnce() async throws {
+        let started = try await spawnAnnounced(Self.stopTarget)
+        defer { endNow(started) }
+
+        #expect(started.child.signaller.send(SIGSTOP))
+        try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
+        let signaller = started.child.signaller
+        let sent = await StoppedChildSupport.withinBlocking { signaller.send(SIGCONT) }
+        try #require(sent != nil, "a send to the stopped child \(started.pid) did not return")
+        #expect(sent == true)
+
+        try started.input.close()
+        try #require(started.child.waitReaped(), "child \(started.pid) did not report its exit")
+        #expect(started.exits.reported == [7])
+        #expect(started.child.hasExited)
+        #expect(signaller.send(SIGTERM) == false)
+    }
+
+    @Test("a send to a stopped child returns without waiting for it to exit, and the signal is delivered once it runs")
+    func sendToAStoppedChildDoesNotWaitForItsExit() async throws {
+        let started = try await spawnAnnounced(#"$SIG{USR1} = sub { exit 5 }; $|=1; print "ready\n"; while (1) { sleep 30 }"#)
+        defer { endNow(started) }
+
+        #expect(started.child.signaller.send(SIGSTOP))
+        try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
+        let signaller = started.child.signaller
+        let sent = await StoppedChildSupport.withinBlocking { signaller.send(SIGUSR1) }
+        try #require(sent != nil, "a send to the stopped child \(started.pid) blocked")
+        #expect(sent == true)
+        #expect(!started.child.hasExited)
+        #expect(started.exits.reported.isEmpty)
+
+        // Only now does the child run and act on the signal it was sent.
+        #expect(started.child.signaller.send(SIGCONT))
+        try #require(started.child.waitReaped(), "child \(started.pid) did not act on the signal sent while it was stopped")
+        #expect(started.exits.reported == [5])
+    }
+
+    @Test("after a stopped child has been ended and reaped, every send is refused")
+    func sendAfterAStoppedChildWasReapedIsRefused() async throws {
+        let started = try await spawnAnnounced(Self.stopTarget)
+        defer { endNow(started) }
+
+        #expect(started.child.signaller.send(SIGSTOP))
+        try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
+        #expect(started.child.signaller.send(SIGKILL))
+        try #require(started.child.waitReaped(), "child \(started.pid) did not report its exit")
+        #expect(started.exits.reported == [-SIGKILL])
+        let signaller = started.child.signaller
+        for signal in [SIGTERM, SIGKILL, SIGCONT, 0] {
+            #expect(signaller.send(signal) == false, "send(\(signal)) after the reap")
+        }
+    }
+}
+
+@Suite("ChildSpawner holder when the exit wait fails", .noSurvivingChildren)
+struct ChildSpawnerUnobservedExitTests {
+    /// ExitReports collects what the holder hands to onExit and lets a test
+    /// wait for the first report, bounded by the hang ceiling.
+    private final class ExitReports: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [Int32] = []
+        private let arrived = DispatchSemaphore(value: 0)
+        var reported: [Int32] { lock.withLock { stored } }
+        func add(_ code: Int32) {
+            lock.withLock { stored.append(code) }
+            arrived.signal()
+        }
+        func waitForReport() -> Bool {
+            arrived.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
+        }
+    }
+
+    @Test("an exit wait that fails reports status unknown, not an exit code, and marks the child neither exited nor reported")
+    func failedExitWaitReportsStatusUnknown() async throws {
+        let input = Pipe()
+        let reports = ExitReports()
+        // The wait fails outright: the holder cannot observe the exit.
+        let child = try ChildSpawner.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/cat"),
+            arguments: [],
+            environment: ["PATH": "/usr/bin:/bin"],
+            standardInput: input.fileHandleForReading.fileDescriptor,
+            standardOutput: nil,
+            standardError: nil,
+            waitForExit: { _ in (-1, siginfo_t()) }
+        ) { reports.add($0) }
+        try? input.fileHandleForReading.close()
+        let pid = child.processIdentifier
+        defer {
+            // The holder reaps nothing on this path, so this test, the
+            // child's parent, ends it: closing its input is the whole
+            // request, and collecting it is the confirmation.
+            try? input.fileHandleForWriting.close()
+            var status: Int32 = 0
+            let collected = StoppedChildSupportBridge.collect(pid: pid, status: &status)
+            #expect(collected, "test child \(pid) may still be running, it was not confirmed ended")
+        }
+
+        try #require(reports.waitForReport(), "the holder reported nothing for a failed exit wait")
+        #expect(reports.reported == [ProcessExitCode.statusUnknown])
+        #expect(reports.reported != [ChildSpawner.exitCodeWhenUnknown])
+        #expect(!child.hasExited, "a child whose exit was never observed must not be marked exited")
+        #expect(!child.hasReportedExit, "a child whose exit was never observed must not be marked reported")
+        // The holder is done after one report.
+        #expect(reports.reported.count == 1)
+    }
+}
+
+/// StoppedChildSupportBridge collects a direct child this test holds.
+private enum StoppedChildSupportBridge {
+    /// collect waits for the held child to end and be collected, on a plain
+    /// thread, bounded by the hang ceiling. It returns false when the child
+    /// had not been collected by then.
+    static func collect(pid: Int32, status: inout Int32) -> Bool {
+        let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+        while DispatchTime.now() < deadline {
+            var s: Int32 = 0
+            let r = waitpid(pid, &s, WNOHANG)
+            if r == pid { status = s; return true }
+            if r < 0 && errno != EINTR { return false }
+            usleep(20_000)
+        }
+        return false
     }
 }

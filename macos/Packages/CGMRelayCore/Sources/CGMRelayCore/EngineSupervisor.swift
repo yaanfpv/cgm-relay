@@ -1,11 +1,14 @@
 import Foundation
 
-/// EngineSupervisor starts the engine as a child process, restarts it
-/// with backoff if it exits on its own, and guarantees no child is left
-/// running once stopped. It is an actor because every field below is
+/// EngineSupervisor starts the engine as a child process and restarts it
+/// with backoff if it exits on its own. On the stopAndWait path, the one the
+/// app uses, it ends the child it started or reports that it could not
+/// confirm that end, and starts no second engine while the first may still be
+/// running. Plain stop() only asks the engine to exit and does not wait, so a
+/// start after it is allowed while that process may still be ending. It is an
+/// actor because every field below is
 /// mutated from both the caller's own calls (start, stop) and from the
-/// child process's own termination handler, which fires on an arbitrary
-/// thread.
+/// child's exit report, which arrives from the thread that holds the child.
 public actor EngineSupervisor {
     /// RunState is the supervisor's own view of the engine, independent of
     /// anything the engine's /status endpoint reports.
@@ -70,6 +73,13 @@ public actor EngineSupervisor {
         /// status port, where the engine can never listen. Turning Tailscale
         /// HTTPS off frees the port to move, so it is retried like portInUse.
         case httpsOnStatusPort
+        /// engineStatusUnknown is the outcome of an engine whose end could not
+        /// be confirmed: its exit was reported as ProcessExitCode.statusUnknown,
+        /// or stopAndWait could not confirm the reap within its bound. It may
+        /// still be running, so no second engine is started while it may hold
+        /// the store; neither clearFailure(), fail(_:) nor stop() leaves this
+        /// state, and it lasts until the app quits.
+        case engineStatusUnknown
     }
 
     /// storeKeyMismatchExitCode is the process exit status
@@ -141,6 +151,11 @@ public actor EngineSupervisor {
     private var generation = 0
     private var attempt = 0
     private var current: (any RunningProcess)?
+    /// confirmation is the one wait for the reap of the engine a stopAndWait
+    /// ended, held while it runs so every overlapping stopAndWait joins it and a
+    /// start() cannot launch a second engine in that time.
+    private var confirmation: Task<Bool, Never>?
+    private var isConfirmingStop: Bool { confirmation != nil }
 
     public init(
         engineURL: URL,
@@ -170,7 +185,7 @@ public actor EngineSupervisor {
     /// restart does nothing: start/Stop is a two-state toggle from the
     /// caller's point of view.
     public func start(configuration: EngineConfiguration) async {
-        guard state == .stopped else { return }
+        guard state == .stopped, !isConfirmingStop else { return }
         generation += 1
         attempt = 0
         await spawn(configuration: configuration, generation: generation)
@@ -183,6 +198,8 @@ public actor EngineSupervisor {
     /// exit to complete, since the caller only needs to know no *new*
     /// process will be started.
     public func stop() {
+        // An engine whose end could not be confirmed stays reported as such.
+        if state == .failed(.engineStatusUnknown) { return }
         generation += 1
         statusSecret?.clear()
         setState(.stopped)
@@ -190,16 +207,51 @@ public actor EngineSupervisor {
         current = nil
     }
 
+    /// killReapBound is how long stopAndWait waits for the reap after it has
+    /// sent SIGKILL. SIGKILL cannot be caught or ignored and ends a stopped
+    /// child too, so the reap follows at once; this only bounds a wait that
+    /// would otherwise stay open for ever (a child that cannot be signalled).
+    static let killReapBound: Duration = .seconds(2)
+
     /// stopAndWait stops the engine like stop(), then waits for its process
     /// to be gone, killing it if it is still running after timeout, so the
-    /// caller can end its own process knowing no engine outlives it.
-    public func stopAndWait(timeout: Duration) async {
+    /// caller knows the engine it ended is gone. After the kill it waits, up to killReapBound, for the reap of that same
+    /// process. It returns true only once the engine it ended is reaped and
+    /// its exit reported (or there was none to end). If it cannot confirm
+    /// that, it returns false and the supervisor is
+    /// .failed(.engineStatusUnknown), so no second engine is started while
+    /// the first may still run. A call that arrives while another is waiting
+    /// joins that wait and returns its answer.
+    public func stopAndWait(timeout: Duration) async -> Bool {
+        // A call while a confirmation is in flight joins it: it answers what
+        // that confirmation answers, and never before it.
+        if let confirmation { return await confirmation.value }
+        if state == .failed(.engineStatusUnknown) { return false }
         let process = current
         stop()
-        guard let process else { return }
-        if await !process.waitUntilExit(timeout: timeout) {
+        guard let process else { return true }
+        let wait = Task { await self.confirmEnd(of: process, timeout: timeout) }
+        confirmation = wait
+        return await wait.value
+    }
+
+    /// confirmEnd waits for the reap of process, killing it once timeout has
+    /// passed, and frees the confirmation slot whatever the answer.
+    private func confirmEnd(of process: any RunningProcess, timeout: Duration) async -> Bool {
+        defer { confirmation = nil }
+        var reaped = await process.waitUntilExit(timeout: timeout)
+        if !reaped {
             process.kill()
+            reaped = await process.waitUntilExit(timeout: Self.killReapBound)
         }
+        if !reaped {
+            generation += 1
+            statusSecret?.clear()
+            setState(.failed(.engineStatusUnknown))
+        }
+        // An exit reported as not confirmed while this wait ran is an end that
+        // was not confirmed, whatever the wait itself saw.
+        return reaped && state != .failed(.engineStatusUnknown)
     }
 
     private func spawn(configuration: EngineConfiguration, generation: Int) async {
@@ -257,7 +309,9 @@ public actor EngineSupervisor {
         statusSecret?.arm(secret)
     }
 
-    /// handleExit reacts to the child process ending on its own. Four
+    /// handleExit reacts to the child process ending on its own. An exit
+    /// reported as ProcessExitCode.statusUnknown is a permanent failure, never
+    /// a restart. Four
     /// exit codes are recognised as permanent (storeKeyMismatchExitCode,
     /// storeInUseExitCode, storeDamagedExitCode, portInUseExitCode): those
     /// exits earn no restart at all, since the engine has already said
@@ -271,6 +325,21 @@ public actor EngineSupervisor {
         startedAt: Duration,
         exitCode: Int32
     ) async {
+        // An exit nobody observed is not a crash to restart from: the engine
+        // may still be running and holding the store. It counts whichever
+        // generation reported it, since a stop that superseded it did not
+        // end the process.
+        if exitCode == ProcessExitCode.statusUnknown {
+            if generation == self.generation {
+                current = nil
+            } else {
+                self.generation += 1
+            }
+            statusSecret?.clear()
+            setState(.failed(.engineStatusUnknown))
+            return
+        }
+
         guard generation == self.generation else { return }
         current = nil
         statusSecret?.clear()
@@ -306,9 +375,10 @@ public actor EngineSupervisor {
     /// or a recovery step that failed. A no-op unless state is currently
     /// .stopped, mirroring clearFailure()'s own guard: this only ever
     /// replaces an idle supervisor's state, never one already starting,
-    /// running, or waiting to restart.
+    /// running, or waiting to restart, nor one whose engine is still being
+    /// waited for.
     public func fail(_ reason: FailureReason) {
-        guard state == .stopped else { return }
+        guard state == .stopped, !isConfirmingStop else { return }
         generation += 1
         statusSecret?.clear()
         setState(.failed(reason))
@@ -319,8 +389,10 @@ public actor EngineSupervisor {
     /// (moving the unreadable database aside, or trying the launch
     /// again). A no-op unless state is currently `.failed`, so a
     /// caller can call it unconditionally before every recovery attempt.
+    /// It never leaves .failed(.engineStatusUnknown): that engine may still
+    /// be running.
     public func clearFailure() {
-        guard case .failed = state else { return }
+        guard case .failed(let reason) = state, reason != .engineStatusUnknown else { return }
         generation += 1
         attempt = 0
         setState(.stopped)

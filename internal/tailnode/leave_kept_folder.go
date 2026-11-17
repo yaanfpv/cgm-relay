@@ -11,6 +11,7 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
+	"tailscale.com/logtail"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
 )
@@ -192,17 +193,21 @@ func (r *signInReceipt) observe(n ipn.Notify) bool {
 	return r.settled
 }
 
-// prepareNodeEnv sets the process-wide switches every tsnet start needs, and
-// is called before each one. With tailscale's network-map cache off, only the
-// live sign-in can report the node as signed in, so a leave can trust the
+// prepareNodeEnv sets the three process-wide switches every tsnet start needs
+// (the network-map cache, port mapping and log uploads), and is called
+// before each one. With tailscale's network-map cache off, only the live
+// sign-in can report the node as signed in, so a leave can trust the
 // state it sees; a cached map would report Starting before the control server
 // has answered. Port mapping probes the local network for a router, which
 // makes macOS ask the person to allow local network access, and neither
 // Funnel nor the public listener uses it. The cache switch is "false" because
-// an empty value means on.
+// an empty value means on. The node's own logs stay on this Mac: logtail
+// would otherwise upload them to Tailscale's log service, so its uploads are
+// turned off for the whole process.
 func prepareNodeEnv() {
 	envknob.Setenv("TS_USE_CACHED_NETMAP", "false")
 	envknob.Setenv("TS_DISABLE_PORTMAPPER", "1")
+	logtail.Disable()
 }
 
 // awaitSettled waits until settled is closed, and fails when ctx ends first.

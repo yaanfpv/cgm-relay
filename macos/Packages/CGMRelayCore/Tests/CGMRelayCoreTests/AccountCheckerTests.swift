@@ -67,7 +67,7 @@ private final class RecordingLog: AccountCheckLogging, @unchecked Sendable {
     func record(_ line: String) { lock.withLock { recorded.append(line) } }
 }
 
-@Suite("RealAccountChecker")
+@Suite("RealAccountChecker", .noSurvivingChildren)
 struct RealAccountCheckerTests {
     private static let email = "person@example.test"
     private static let password = "synthetic-password-1234"
@@ -123,9 +123,9 @@ struct RealAccountCheckerTests {
         #expect(!reason.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) })
     }
 
-    /// writeEngine writes a stand-in engine script and returns its URL.
-    private func writeEngine(_ body: String) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-\(UUID().uuidString)")
+    /// writeEngine writes a stand-in engine script into a directory the test owns
+    /// and removes in its cleanup, and returns its URL.
+    private func writeEngine(_ body: String, in dir: URL) throws -> URL {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("engine")
         try Data("#!/bin/sh\n\(body)\n".utf8).write(to: url)
@@ -135,26 +135,40 @@ struct RealAccountCheckerTests {
 
     @Test("a check that outlives its timeout is ended, even if it ignores the request to stop")
     func timedOutCheckProcessIsEnded() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-pid-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let pidFile = dir.appendingPathComponent("pid").path
-        let engine = try writeEngine("trap '' TERM\necho $$ > '\(pidFile)'\nwhile :; do sleep 0.1; done")
+        // The stand-in engine ignores TERM and blocks reading a FIFO this test holds, so it
+        // outlives the timeout and has no end of its own: the test releases the FIFO on every
+        // path, and the runner's own end of it is read from the process table, not from kill.
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-hold-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        let fifo = try HeldFifo(in: fixture)
+        let launch = RunnerLaunch()
+        defer {
+            launch.endChildrenAfterRelease(removing: fixture, release: { fifo.release() })
+        }
+        let engine = try writeEngine("trap '' TERM\nread line < '\(fifo.path)'", in: fixture)
         let log = RecordingLog()
-        let checker = RealAccountChecker(engineURL: engine, timeout: .seconds(2), log: log)
+        let checker = RealAccountChecker(engineURL: engine, runner: launch.runner, timeout: .seconds(2), log: log)
 
         let outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
 
         #expect(outcome == .timedOut)
-        let pid = try #require(Int32(String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
-        #expect(kill(pid, 0) != 0, "the timed-out check process must be gone")
+        // The end oracle reads the launch's own identity, so a launch it could not
+        // identify would leave it showing nothing: that is a failure, not a pass.
+        #expect(launch.calls.count == 1 && launch.calls.first?.identity != nil, "the launch was not identified, so its end cannot be shown")
+        launch.requireEnded()
         #expect(log.lines.count == 1)
     }
 
     @Test("a real child that echoes the request it was given still leaves the log clean")
     func echoingChildLeavesLogClean() async throws {
-        let engine = try writeEngine("cat >&2\nexit 1")
+        // The stand-in engine ends when the runner closes its input; its directory goes once
+        // the run's own result shows that end, and stays, naming the call, if it does not.
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-echo-\(UUID().uuidString)")
+        let launch = RunnerLaunch()
+        defer { launch.endChildrenAfterRelease(removing: fixture, release: {}) }
+        let engine = try writeEngine("cat >&2\nexit 1", in: fixture)
         let log = RecordingLog()
-        let checker = RealAccountChecker(engineURL: engine, log: log)
+        let checker = RealAccountChecker(engineURL: engine, runner: launch.runner, log: log)
 
         let outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
 

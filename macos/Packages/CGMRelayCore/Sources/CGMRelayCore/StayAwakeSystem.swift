@@ -194,7 +194,7 @@ public struct SleepRuleAdministrator: SleepRuleManaging {
         case .exited:
             // AppleScript reports a closed prompt as error -128.
             return String(decoding: output.output, as: UTF8.self).contains("-128") ? .cancelled : .failed
-        case .timedOut, .failedToLaunch:
+        case .timedOut, .failedToLaunch, .notConfirmedEnded:
             return .failed
         }
     }

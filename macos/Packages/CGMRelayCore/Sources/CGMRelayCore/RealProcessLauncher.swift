@@ -21,11 +21,18 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
         child.signaller.send(SIGTERM)
     }
 
+    /// waitUntilExit returns true only once the child has been reaped and its
+    /// exit reported (the holder reports after the reap, under its lock), so
+    /// a caller that sees true can rely on both.
     func waitUntilExit(timeout: Duration) async -> Bool {
         let deadline = ContinuousClock.now + timeout
-        while !child.hasExited {
+        while !child.hasReportedExit {
             if ContinuousClock.now >= deadline { return false }
-            try? await Task.sleep(for: .milliseconds(25))
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                return child.hasReportedExit
+            }
         }
         return true
     }
@@ -134,8 +141,8 @@ public struct RealProcessLauncher: ProcessLauncher {
                 // The child exited or closed its stdin before the write
                 // landed. disableSIGPIPE above is what keeps this a
                 // plain thrown error rather than a fatal signal; the
-                // child's own exit still reaches onExit normally through
-                // terminationHandler, so nothing further is needed here.
+                // child's own exit still reaches onExit normally from its
+                // holder, so nothing further is needed here.
             }
         }
 

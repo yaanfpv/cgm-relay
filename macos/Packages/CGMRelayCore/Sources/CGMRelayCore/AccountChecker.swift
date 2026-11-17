@@ -224,6 +224,9 @@ public struct RealAccountChecker: AccountCheckRunning {
         case .failedToLaunch:
             log.record("check-account launch-failed: the engine could not be started")
             return .launchFailed
+        case .notConfirmedEnded:
+            log.record("check-account not-confirmed-ended: the check was asked to end and its end was not seen")
+            return .other
         }
     }
 }

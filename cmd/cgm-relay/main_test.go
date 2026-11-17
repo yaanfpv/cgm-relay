@@ -897,3 +897,33 @@ func TestLeaveTailnetCommandRefusesBadConfigBeforeAnythingStarts(t *testing.T) {
 		t.Errorf("a refused request changed the node's state file")
 	}
 }
+
+// TestLeaveTailnetCommandLeavesNoNodeLogsInTheKeptFolder protects the person's
+// node logs: the built leave child must not buffer Tailscale log entries,
+// because the buffers in the state folder are what gets uploaded to Tailscale's
+// log service. The control server is away so the folder is kept and can be
+// inspected; each buffer must be absent or empty.
+func TestLeaveTailnetCommandLeavesNoNodeLogsInTheKeptFolder(t *testing.T) {
+	ctrl := newLeaveControl(t)
+	dir := filepath.Join(t.TempDir(), "ts")
+	ctrl.loginNode(dir)
+	ctrl.down()
+
+	exit, stderr := runLeaveTailnet(t, leaveStdin(dir), ctrl.url())
+	if exit != 3 {
+		t.Fatalf("exit %d, want 3 (kept for retry); stderr: %s", exit, stderr)
+	}
+	for _, name := range []string{"tailscaled.log1.txt", "tailscaled.log2.txt"} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if fi.Size() != 0 {
+			b, _ := os.ReadFile(filepath.Join(dir, name))
+			t.Errorf("%s holds %d bytes of log entries after the leave run, want none; first bytes: %.200s", name, fi.Size(), b)
+		}
+	}
+}
