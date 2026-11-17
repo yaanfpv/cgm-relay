@@ -97,39 +97,75 @@ enum ChildSpawner {
         return child
     }
 
+    /// ReapResult is what one non-blocking reap attempt found.
+    private enum ReapResult {
+        case reaped(Int32)
+        case notYet
+        case unavailable
+    }
+
     /// hold waits for the child's exit without reaping it, refuses further
-    /// sends, then reaps.
+    /// sends, then reaps. A child that is only stopped (or continued) has not
+    /// exited: that state is consumed without reaping and the wait goes on.
     private static func hold(_ child: SpawnedChild, onExit: @Sendable (Int32) -> Void) {
         let pid = child.processIdentifier
-        var info = siginfo_t()
-        var observed: Int32
-        // An interrupted wait observed nothing: wait again.
-        repeat { observed = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) } while observed != 0 && errno == EINTR
+        while true {
+            var info = siginfo_t()
+            var observed: Int32
+            // An interrupted wait observed nothing: wait again.
+            repeat { observed = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) } while observed != 0 && errno == EINTR
 
-        guard observed == 0, info.si_pid == pid else {
-            // The exit was never observed, so its state is unknown. Nothing is
-            // reaped on that, no further signal goes out, and the caller is
-            // told the status could not be had.
-            child.signaller.markTerminated()
-            onExit(exitCodeWhenUnknown)
+            guard observed == 0, info.si_pid == pid else {
+                // The exit was never observed, so its state is unknown. Nothing is
+                // reaped on that, no further signal goes out, and the caller is
+                // told the status could not be had.
+                child.signaller.markTerminated()
+                onExit(exitCodeWhenUnknown)
+                return
+            }
+
+            let ended = info.si_code == CLD_EXITED || info.si_code == CLD_KILLED || info.si_code == CLD_DUMPED
+            guard ended else {
+                // A stop is reported again by every wait until it is consumed.
+                // WNOHANG with no WEXITED never reaps.
+                var consumed = siginfo_t()
+                repeat {
+                    observed = waitid(P_PID, id_t(pid), &consumed, WSTOPPED | WCONTINUED | WNOHANG)
+                } while observed != 0 && errno == EINTR
+                continue
+            }
+
+            // The child has ended and is a zombie, so this reap returns at
+            // once and never waits while holding the sender's lock.
+            let result: ReapResult? = child.signaller.refuseSendsWhile {
+                var status: Int32 = 0
+                var reaped: pid_t
+                repeat { reaped = waitpid(pid, &status, WNOHANG) } while reaped < 0 && errno == EINTR
+                if reaped == pid { return .reaped(status) }
+                return reaped == 0 ? nil : .unavailable
+            }
+            switch result {
+            case nil, .notYet?:
+                continue
+            case .reaped(let status)?:
+                child.markExited()
+                onExit(exitCode(fromWaitStatus: status))
+            case .unavailable?:
+                child.markExited()
+                onExit(exitCodeWhenUnknown)
+            }
             return
         }
-
-        let status: Int32? = child.signaller.refuseSendsWhile {
-            var status: Int32 = 0
-            var reaped: pid_t
-            repeat { reaped = waitpid(pid, &status, 0) } while reaped < 0 && errno == EINTR
-            return reaped == pid ? status : nil
-        }
-        child.markExited()
-        onExit(status.map(exitCode(fromWaitStatus:)) ?? exitCodeWhenUnknown)
     }
 
     /// exitCode maps a wait status: the exit code for a normal exit, the
     /// negative of the signal number for a death by signal, so every real
     /// exit code (never negative) stays distinguishable from a signal death.
     static func exitCode(fromWaitStatus status: Int32) -> Int32 {
+        // WIFEXITED / WEXITSTATUS and WIFSIGNALED / WTERMSIG as the system
+        // header defines them.
         let signal = status & 0x7f
-        return signal == 0 ? (status >> 8) & 0xff : -signal
+        if signal == 0 { return (status >> 8) & 0xff }
+        return -signal
     }
 }

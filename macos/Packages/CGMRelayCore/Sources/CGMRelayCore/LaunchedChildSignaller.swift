@@ -82,11 +82,15 @@ final class LaunchedChildSignaller: @unchecked Sendable {
     /// refuseSendsWhile refuses every later send and runs body, the reap,
     /// while holding the lock every send takes. A send that was waiting
     /// before the reap therefore finds the mark when it gets the lock and
-    /// sends nothing; none can run during or after the reap.
-    func refuseSendsWhile<T>(_ body: () -> T) -> T {
+    /// sends nothing; none can run during or after the reap. body must not
+    /// block. If it returns nil the child was not reaped: the refusal is
+    /// lifted again before the lock is released and nil is returned.
+    func refuseSendsWhile<T>(_ body: () -> T?) -> T? {
         lock.withLock {
             terminated = true
-            return body()
+            let result = body()
+            if result == nil { terminated = false }
+            return result
         }
     }
 
