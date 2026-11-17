@@ -1,8 +1,8 @@
 import Foundation
 
 /// EngineSupervisor starts the engine as a child process, restarts it
-/// with backoff if it exits on its own, and guarantees no child is left
-/// running once stopped. It is an actor because every field below is
+/// with backoff if it exits on its own, and starts no second engine while
+/// the first may still be running. It is an actor because every field below is
 /// mutated from both the caller's own calls (start, stop) and from the
 /// child process's own termination handler, which fires on an arbitrary
 /// thread.
@@ -212,8 +212,7 @@ public actor EngineSupervisor {
 
     /// stopAndWait stops the engine like stop(), then waits for its process
     /// to be gone, killing it if it is still running after timeout, so the
-    /// caller can end its own process knowing no engine outlives it. After
-    /// the kill it waits, up to killReapBound, for the reap of that same
+    /// caller knows the engine it ended is gone. After the kill it waits, up to killReapBound, for the reap of that same
     /// process. It returns true only once the engine it ended is reaped and
     /// its exit reported (or there was none to end). If it cannot confirm
     /// that, it returns false and the supervisor is
