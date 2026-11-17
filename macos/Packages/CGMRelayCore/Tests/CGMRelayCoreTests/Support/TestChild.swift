@@ -153,7 +153,7 @@ enum StoppedChildSupport {
             if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status == stoppedStatus {
                 return true
             }
-            sched_yield()
+            usleep(20_000) // a pause per round, so a wait that never ends does not spin a core
         }
         return false
     }
@@ -196,7 +196,7 @@ enum StoppedChildSupport {
                     return record(pid: pid)
                 }
             }
-            sched_yield()
+            usleep(20_000) // a pause per round, so a wait that never ends does not spin a core
         }
         return nil
     }
