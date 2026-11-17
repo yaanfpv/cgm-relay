@@ -124,8 +124,8 @@ struct RealAccountCheckerTests {
     }
 
     /// writeEngine writes a stand-in engine script and returns its URL.
-    private func writeEngine(_ body: String) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-\(UUID().uuidString)")
+    private func writeEngine(_ body: String, in existing: URL? = nil) throws -> URL {
+        let dir = existing ?? FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("engine")
         try Data("#!/bin/sh\n\(body)\n".utf8).write(to: url)
@@ -135,18 +135,25 @@ struct RealAccountCheckerTests {
 
     @Test("a check that outlives its timeout is ended, even if it ignores the request to stop")
     func timedOutCheckProcessIsEnded() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-pid-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let pidFile = dir.appendingPathComponent("pid").path
-        let engine = try writeEngine("trap '' TERM\necho $$ > '\(pidFile)'\nwhile :; do sleep 0.1; done")
+        // The stand-in engine ignores TERM and blocks reading a FIFO this test holds, so it
+        // outlives the timeout and has no end of its own: the test releases the FIFO on every
+        // path, and the runner's own end of it is read from the process table, not from kill.
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("account-checker-hold-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        let fifo = try HeldFifo(in: fixture)
+        let launch = RunnerLaunch()
+        var outcome: AccountCheckOutcome?
+        defer {
+            launch.endChildrenAfterRelease(removing: fixture, launchFailed: outcome == .launchFailed, release: { fifo.release() })
+        }
+        let engine = try writeEngine("trap '' TERM\nread line < '\(fifo.path)'", in: fixture)
         let log = RecordingLog()
-        let checker = RealAccountChecker(engineURL: engine, timeout: .seconds(2), log: log)
+        let checker = RealAccountChecker(engineURL: engine, runner: launch.runner, timeout: .seconds(2), log: log)
 
-        let outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
+        outcome = await checker.checkAccount(email: Self.email, password: Self.password, librelinkupBaseURL: nil)
 
         #expect(outcome == .timedOut)
-        let pid = try #require(Int32(String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
-        #expect(kill(pid, 0) != 0, "the timed-out check process must be gone")
+        launch.requireEnded()
         #expect(log.lines.count == 1)
     }
 

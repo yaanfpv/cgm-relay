@@ -2,69 +2,6 @@ import Testing
 import Foundation
 @testable import CGMRelayCore
 
-/// LaunchRecorder keeps the identity a launch recorded for its child.
-private final class LaunchRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: StoppedChildSupport.RecordedProcess?
-    var recorded: StoppedChildSupport.RecordedProcess? { lock.withLock { stored } }
-    func set(pid: Int32, start: ProcessStart) {
-        lock.withLock { if stored == nil { stored = StoppedChildSupport.RecordedProcess(pid: pid, start: start) } }
-    }
-}
-
-/// RunnerLaunch is a runner whose launch read is recorded: the identity the
-/// signaller took of its child while the child was necessarily unreaped. The read
-/// itself is the real one, so the runner signals and reaps as it does in the app.
-private struct RunnerLaunch {
-    let recorder = LaunchRecorder()
-    var runner: RealBoundedProcessRunner {
-        let recorder = recorder
-        return RealBoundedProcessRunner(readProcessTable: { pid in
-            let real = LaunchedChildSignaller.systemProcessTable(pid)
-            if let real, real.parentPID == getpid() { recorder.set(pid: real.pid, start: real.start) }
-            return real
-        })
-    }
-
-    /// endChild ends the child the runner launched, if it is still there, and removes
-    /// `directory` only once that is confirmed. The number is signalled only while it
-    /// still shows the start recorded at launch. A child not confirmed ended fails the test naming it.
-    /// A launch with no recorded identity counts as "nothing started" only when the runner
-    /// reported that the launch itself failed; otherwise a child may be running, so the
-    /// directory is kept and the test fails naming the unknown.
-    func endChild(removing directory: URL, launchFailed: Bool) {
-        guard let recorded = recorder.recorded else {
-            if launchFailed {
-                try? FileManager.default.removeItem(at: directory)
-            } else {
-                Issue.record("test child \(ChildCleanup.describe(pid: 0, start: nil)) was not confirmed ended, it may still be running; no identity was recorded at launch and the launch was not reported failed, so \(directory.path) was kept")
-            }
-            return
-        }
-        ChildCleanup.endRecordedRemovingOnEnd(
-            pid: recorded.pid, start: "\(recorded.start.seconds).\(recorded.start.microseconds)",
-            removingOnEnd: directory,
-            readStart: { ChildCleanup.startNow(pid: $0) },
-            exists: { !StoppedChildSupport.isGone(pid: $0) },
-            send: { _, signal in StoppedChildSupport.signal(recorded, signal) },
-            waitingMilliseconds: TestChild.hangCeilingMilliseconds
-        )
-    }
-
-    /// requireEnded fails the test, naming the child, unless the typed table read
-    /// shows it gone now: absent, or present with another start. A child still
-    /// there, or a record that cannot be read, is not an end.
-    func requireEnded() {
-        guard let recorded = recorder.recorded else {
-            Issue.record("no identity was recorded for the launched child, so its end could not be checked")
-            return
-        }
-        let read = readProcessTable(recorded.pid)
-        let verdict = DescendantCheck.verdict(read, of: recorded.start)
-        #expect(verdict == .gone, "the child \(recorded.pid) was not shown ended after the run returned: \(verdict) (read \(read))")
-    }
-}
-
 @Suite("RealBoundedProcessRunner", .noSurvivingChildren)
 struct RealBoundedProcessRunnerTests {
     @Test("reports an ordinary exit code")
@@ -132,7 +69,7 @@ struct RealBoundedProcessRunnerTests {
         // its end: the end is read from the process table, and a child left alive is ended here.
         let launch = RunnerLaunch()
         var runResult: BoundedProcessResult?
-        defer { launch.endChild(removing: dir, launchFailed: runResult == .failedToLaunch) }
+        defer { launch.endChildren(removing: dir, launchFailed: runResult == .failedToLaunch) }
         let marker = dir.appendingPathComponent("marker")
         #expect(!FileManager.default.fileExists(atPath: marker.path))
 
@@ -301,44 +238,21 @@ struct RealBoundedProcessRunnerTests {
     func unsignallableChildIsNotConfirmedEnded(_ mode: StoppedRunMode) async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-refused-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let pidFile = dir.appendingPathComponent("pid")
-        // The reader sees the launch's own read of the child first, while the
-        // child is necessarily unreaped, and keeps that identity; it then
-        // reports no record, so no identity is accepted and every send is
-        // refused.
-        let launch = LaunchRecorder()
+        // The child blocks reading a FIFO this test holds, so it has no end of its own and no
+        // signal is needed to end it: the test releases the FIFO on every path, whatever the
+        // run returned. The runner is shown no record after the launch read, so no identity is
+        // accepted and every send is refused; the launch read still names the child.
+        let fifo = try HeldFifo(in: dir)
+        let launch = RunnerLaunch(showsIdentityToRunner: false)
+        var runResult: BoundedProcessResult?
         defer {
-            // The child stopped itself, so it cannot end by its own and the
-            // runner sent it nothing. It is ended here, and only while its
-            // number still shows the start time recorded at launch. The
-            // directory with the child's own record is removed only once its end
-            // is confirmed; otherwise the test fails naming the child and the
-            // record stays.
-            if let recorded = launch.recorded {
-                ChildCleanup.endRecordedRemovingOnEnd(
-                    pid: recorded.pid, start: "\(recorded.start.seconds).\(recorded.start.microseconds)",
-                    removingOnEnd: dir,
-                    readStart: { ChildCleanup.startNow(pid: $0) },
-                    exists: { !StoppedChildSupport.isGone(pid: $0) },
-                    send: { _, signal in StoppedChildSupport.signal(recorded, signal) },
-                    waitingMilliseconds: TestChild.hangCeilingMilliseconds
-                )
-            } else {
-                // No identity means no send is licensed, so nothing here can end the
-                // child; it is named as unknown and the record is kept.
-                Issue.record("test child \(ChildCleanup.describe(pid: 0, start: nil)) was not confirmed ended, it may still be running; no identity was recorded at launch, so \(dir.path) was kept")
-            }
+            launch.endChildrenAfterRelease(removing: dir, launchFailed: runResult == .failedToLaunch, release: { fifo.release() })
         }
-        let script = "open(my $f,\">\",$ARGV[0]) or die; print $f $$; close($f) or die; kill 'STOP', $$; sleep 30"
+        let script = "open(my $r,\"<\",$ARGV[0]) or die; my $line = <$r>; exit 0"
         let executable = URL(fileURLWithPath: "/usr/bin/perl")
-        let arguments = ["-e", script, pidFile.path]
+        let arguments = ["-e", script, fifo.path]
 
-        let runner = RealBoundedProcessRunner(readProcessTable: { pid in
-            if let entry = LaunchedChildSignaller.systemProcessTable(pid), entry.parentPID == getpid() {
-                launch.set(pid: entry.pid, start: entry.start)
-            }
-            return nil
-        })
+        let runner = launch.runner
         let result: BoundedProcessResult?
         switch mode {
         case .run:
@@ -354,8 +268,9 @@ struct RealBoundedProcessRunnerTests {
                 runner.runOnCallingThread(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .milliseconds(500))
             }
         }
+        runResult = result
         try #require(result != nil, "the run did not return for a child that could not be signalled")
-        try #require(launch.recorded != nil, "no identity was recorded for the launched child")
+        try #require(!launch.recorded.isEmpty, "no identity was recorded for the launched child")
         #expect(result == .notConfirmedEnded)
     }
 }
@@ -404,7 +319,7 @@ struct RealBoundedProcessRunnerCallingThreadTests {
         // The end is read from the process table; a child left alive is ended here.
         let launch = RunnerLaunch()
         var runResult: BoundedProcessResult?
-        defer { launch.endChild(removing: dir, launchFailed: runResult == .failedToLaunch) }
+        defer { launch.endChildren(removing: dir, launchFailed: runResult == .failedToLaunch) }
         let marker = dir.appendingPathComponent("marker")
         let script = (ignoresTerminate ? "$SIG{TERM}='IGNORE'; " : "")
             + "sleep 30; open(my $m,\">\",$ARGV[0]) or die; print $m \"done\"; close($m) or die"

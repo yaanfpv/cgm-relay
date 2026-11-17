@@ -631,7 +631,7 @@ struct ObservedHelperTests {
 @Suite("ChildSurvivors names every child the suites started and left alive", .noSurvivingChildren)
 struct ChildSurvivorsTests {
     /// The census the accounting reads, set by the test. Its pids are far above any
-    /// live process's, so none has a start time to read and equal pids are equal children.
+    /// live process's; the start each shows is given to the accounting by the test.
     private final class CensusBox: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [Int32] = []
@@ -699,7 +699,7 @@ struct ChildSurvivorsTests {
         let box = CensusBox()
         let (a, b, c) = (Self.fakePid(1), Self.fakePid(2), Self.fakePid(3))
         box.current = [a]
-        let accounting = ChildSurvivors.Accounting(census: { box.census })
+        let accounting = ChildSurvivors.Accounting(census: { box.census }, startOf: { "start-\($0)" })
         accounting.enter()
         box.current = [a, b]
         accounting.enter()
@@ -711,7 +711,7 @@ struct ChildSurvivorsTests {
     @Test("children that ended before the last scope exits are not survivors, and a later round starts from a new baseline")
     func accountingSeesOnlyWhatIsStillThere() {
         let box = CensusBox()
-        let accounting = ChildSurvivors.Accounting(census: { box.census })
+        let accounting = ChildSurvivors.Accounting(census: { box.census }, startOf: { "start-\($0)" })
         accounting.enter()
         box.current = [Self.fakePid(5)]
         box.current = []
@@ -721,6 +721,74 @@ struct ChildSurvivorsTests {
         accounting.enter()
         box.current = [Self.fakePid(6), Self.fakePid(7)]
         #expect(accounting.exit().map(\.pid) == [Self.fakePid(7)])
+    }
+
+    /// StartBox is the start each pid shows to the accounting, changed by the test
+    /// between the baseline and the end. A pid with no entry shows no start: its read failed.
+    private final class StartBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var starts: [Int32: String] = [:]
+        func set(_ pid: Int32, _ start: String?) { lock.withLock { starts[pid] = start } }
+        func read(_ pid: Int32) -> String? { lock.withLock { starts[pid] } }
+    }
+
+    struct StartCase: Sendable, CustomTestStringConvertible {
+        let atBaseline: String?
+        let atEnd: String?
+        let reported: Bool
+        var testDescription: String { "baseline \(atBaseline ?? "unreadable"), end \(atEnd ?? "unreadable"): \(reported ? "reported" : "not a survivor")" }
+    }
+
+    @Test(
+        "a child whose start could not be read at either end is never taken for the same process as the one with that pid in the other census; a readable equal start is not a survivor, another start is",
+        arguments: [
+            StartCase(atBaseline: nil, atEnd: nil, reported: true),
+            StartCase(atBaseline: nil, atEnd: "t-1", reported: true),
+            StartCase(atBaseline: "t-1", atEnd: nil, reported: true),
+            StartCase(atBaseline: "t-1", atEnd: "t-1", reported: false),
+            StartCase(atBaseline: "t-1", atEnd: "t-2", reported: true),
+        ]
+    )
+    func unreadableStartIsNeverTheSameProcess(_ testCase: StartCase) {
+        let pid = Self.fakePid(11)
+        let box = CensusBox()
+        let starts = StartBox()
+        box.current = [pid]
+        starts.set(pid, testCase.atBaseline)
+        let accounting = ChildSurvivors.Accounting(census: { box.census }, startOf: { starts.read($0) })
+        accounting.enter()
+        starts.set(pid, testCase.atEnd)
+        let survivors = accounting.exit()
+        if testCase.reported {
+            #expect(survivors == [ChildSurvivors.Child(pid: pid, start: testCase.atEnd)], "survivors \(survivors)")
+        } else {
+            #expect(survivors.isEmpty, "survivors \(survivors)")
+        }
+    }
+
+    @Test("a child with no readable start that is reported is named with its pid and that its start is not recorded")
+    func unreadableSurvivorIsNamed() {
+        let pid = Self.fakePid(12)
+        let box = CensusBox()
+        box.current = [pid]
+        let accounting = ChildSurvivors.Accounting(census: { box.census }, startOf: { _ in nil })
+        accounting.enter()
+        let survivors = accounting.exit()
+        withKnownIssue(
+            "a child whose start was never readable is still a survivor",
+            { ChildSurvivors.recordSurvivors(survivors) },
+            matching: issueNames("\(pid)", "start not recorded")
+        )
+    }
+
+    @Test("a child that appears only at the end is a survivor whether or not its start can be read")
+    func newChildIsASurvivorWithOrWithoutAStart() {
+        let (withStart, withoutStart) = (Self.fakePid(13), Self.fakePid(14))
+        let box = CensusBox()
+        let accounting = ChildSurvivors.Accounting(census: { box.census }, startOf: { $0 == withStart ? "t-1" : nil })
+        accounting.enter()
+        box.current = [withStart, withoutStart]
+        #expect(accounting.exit().map(\.pid).sorted() == [withStart, withoutStart])
     }
 }
 
@@ -1291,10 +1359,16 @@ private enum SourceText {
                 problems.append("\(name): the cleanup sits behind a condition (\(guarding.trimmingCharacters(in: .whitespaces)))")
             }
         }
-        if let marker, let started = body.inner.range(of: marker), started.upperBound <= cleanup.start {
-            let between = body.inner[started.upperBound..<cleanup.start]
-            for early in ["#require", "throw ", "return"] where between.contains(early) {
-                problems.append("\(name): `\(early)` can leave the function before the cleanup is registered")
+        if let marker {
+            if let started = body.inner.range(of: marker) {
+                if started.upperBound <= cleanup.start {
+                    let between = body.inner[started.upperBound..<cleanup.start]
+                    for early in ["#require", "throw ", "return"] where between.contains(early) {
+                        problems.append("\(name): `\(early)` can leave the function before the cleanup is registered")
+                    }
+                }
+            } else {
+                problems.append("\(name): its start marker `\(marker)` is not in the function, so the early-exit check did not run")
             }
         }
         return problems
@@ -1312,6 +1386,110 @@ private enum SourceText {
     }
 }
 
+/// AllTestFiles reads every Swift file under Tests/CGMRelayCoreTests/, Support
+/// included, with comments and string contents removed, so a source rule is
+/// never limited to a list of names. A rule states how many files it read and
+/// fails below the expected minimum.
+private enum AllTestFiles {
+    /// The least number of files a full read may find; fewer means the walk missed some.
+    static let expectedMinimum = 45
+
+    /// The starters of a real child: each names a type or helper that starts a process.
+    static let realChildStarters = [
+        "RealProcessLauncher(", "RealAccountChecker(", "RealTailscaleController(", "RealBoundedProcessRunner(",
+        "ChildSpawner.spawn(", "HeldChild.start(", "HeldSleeper(", "TestChild(", "ObservedHelper.read(", "FakeTailscale(",
+    ]
+
+    static func read() throws -> [(name: String, text: String)] {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let root = directory.standardizedFileURL.path
+        let enumerator = try #require(FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil))
+        var files: [(name: String, text: String)] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            let name = String(url.standardizedFileURL.path.dropFirst(root.count + 1))
+            files.append((name, SourceText.stripped(try String(contentsOf: url, encoding: .utf8))))
+        }
+        return files.sorted { $0.name < $1.name }
+    }
+
+    /// suites lists every `@Suite` in text with its attribute and its body.
+    static func suites(in text: String) -> [(attribute: String, body: String)] {
+        var found: [(attribute: String, body: String)] = []
+        var from = text.startIndex
+        while let at = text.range(of: "@Suite(", range: from..<text.endIndex) {
+            var depth = 1
+            var cursor = at.upperBound
+            while cursor < text.endIndex, depth > 0 {
+                if text[cursor] == "(" { depth += 1 } else if text[cursor] == ")" { depth -= 1 }
+                cursor = text.index(after: cursor)
+            }
+            found.append((String(text[at.lowerBound..<cursor]), SourceText.braceBlock(in: text, from: cursor)?.inner ?? ""))
+            from = cursor
+        }
+        return found
+    }
+
+    /// suitesMissingTheSurvivorCheck names every suite in `files` whose body names a
+    /// real-child starter and whose attribute lacks `.noSurvivingChildren`.
+    static func suitesMissingTheSurvivorCheck(in files: [(name: String, text: String)]) -> [String] {
+        var missing: [String] = []
+        for file in files {
+            for suite in suites(in: file.text) {
+                guard let starter = realChildStarters.first(where: { suite.body.contains($0) }) else { continue }
+                if !suite.attribute.contains(".noSurvivingChildren") {
+                    missing.append("\(file.name): \(suite.attribute) names \(starter) and does not carry .noSurvivingChildren")
+                }
+            }
+        }
+        return missing
+    }
+}
+
+/// DescendantCleanupRule says how the descendants test must treat the background process
+/// it identifies: its identity is stored only after the record has shown it is the
+/// leader's child and in the leader's group, and the cleanup confirms its end by read
+/// only, never signalling it.
+struct DescendantCleanupRule {
+    static let function = "signalReachesTheChildsDescendants"
+
+    static func problems(in text: String) -> [String] {
+        guard let body = SourceText.functionBody(function, in: text) else { return ["\(function) was not found"] }
+        let code = body.inner
+        var found: [String] = []
+
+        // 1. The identity is assigned only after both premises have passed.
+        let premises = ["descendant.parentPID == pid", "getpgid(descendantPID) == pid"]
+        var lastPremise = code.startIndex
+        for premise in premises {
+            if let at = code.range(of: premise) {
+                if at.upperBound > lastPremise { lastPremise = at.upperBound }
+            } else {
+                found.append("\(function): the premise `\(premise)` is not checked")
+            }
+        }
+        let assignments = (try? NSRegularExpression(pattern: #"descendantIdentity\s*=[^=]"#))?
+            .matches(in: code, range: NSRange(code.startIndex..., in: code)) ?? []
+        if assignments.isEmpty { found.append("\(function): the descendant's identity is never stored") }
+        for match in assignments {
+            if let range = Range(match.range, in: code), range.lowerBound < lastPremise {
+                found.append("\(function): the identity is stored before both premises (its parent is the leader, its group is the leader's) have passed")
+            }
+        }
+
+        // 2. The cleanup confirms the end by read only and sends the descendant nothing.
+        guard let cleanup = SourceText.deferBlocks(in: code).first(where: { $0.inner.contains("input.release()") }) else {
+            return found + ["\(function): no defer block releases the input"]
+        }
+        let inner = cleanup.inner
+        if !inner.contains("DescendantCheck.requireGone(") { found.append("\(function): the cleanup does not confirm the descendant's end through DescendantCheck.requireGone") }
+        let withoutLeader = inner.replacingOccurrences(of: "leader.send(SIGKILL)", with: "")
+        for signalling in [".send(", "signal(", "kill(", "killpg(", "endRecorded"] where withoutLeader.contains(signalling) {
+            found.append("\(function): the cleanup sends something other than the leader's own kill (`\(signalling)`)")
+        }
+        return found
+    }
+}
+
 @Suite("The process suites call the cleanup on every exit path")
 struct ProcessSuiteCleanupSourceTests {
     private static let threeFiles = ["BoundedProcessRunnerTests.swift", "EngineSupervisorTests.swift", "RealProcessLauncherTests.swift"]
@@ -1326,7 +1504,7 @@ struct ProcessSuiteCleanupSourceTests {
 
     static let sites: [Site] = [
         Site(file: "BoundedProcessRunnerTests.swift", function: "stoppedChildEndsTheRunAsTimedOut", marker: "createDirectory(", helper: "ChildCleanup.endRecordedChild("),
-        Site(file: "RealProcessLauncherTests.swift", function: "signalReachesTheChildsDescendants", marker: "ChildSpawner.spawn(", helper: "ChildCleanup."),
+        Site(file: "RealProcessLauncherTests.swift", function: "signalReachesTheChildsDescendants", marker: "HeldChild.start(", helper: "ChildCleanup."),
         Site(file: "RealProcessLauncherTests.swift", function: "lineArrivesWhileEngineStillRuns", marker: "launcher.launch(", helper: "ChildCleanup."),
     ]
 
@@ -1365,11 +1543,13 @@ struct ProcessSuiteCleanupSourceTests {
         }
     }
 
-    @Test("no wait on a child and no cleanup result is thrown away with `_ =` in the three process suites")
+    @Test("no wait on a child and no cleanup result is thrown away with `_ =` in any test file")
     func nothingIsDiscarded() throws {
-        for file in Self.threeFiles {
-            let found = SourceText.discards(in: try SourceText.load(file))
-            #expect(found.isEmpty, "\(file) discards a result: \(found.joined(separator: " | "))")
+        let files = try AllTestFiles.read()
+        #expect(files.count >= AllTestFiles.expectedMinimum, "read \(files.count) test files, expected at least \(AllTestFiles.expectedMinimum)")
+        for file in files {
+            let found = SourceText.discards(in: file.text)
+            #expect(found.isEmpty, "\(file.name) discards a result: \(found.joined(separator: " | "))")
         }
     }
 
@@ -1378,11 +1558,13 @@ struct ProcessSuiteCleanupSourceTests {
         let runner = try SourceText.load("BoundedProcessRunnerTests.swift")
         let body = try #require(SourceText.functionBody("lstart", in: runner), "no lstart in the runner tests")
         #expect(body.inner.contains("ObservedHelper."), "lstart does not read through ObservedHelper")
-        for file in Self.threeFiles {
+        let files = try AllTestFiles.read()
+        #expect(files.count >= AllTestFiles.expectedMinimum, "read \(files.count) test files, expected at least \(AllTestFiles.expectedMinimum)")
+        for file in files where file.name != "Support/TestChild.swift" {
             // `Process()` with no identifier character before it, so a name that merely ends in
             // "Process" (a test called stopTerminatesRunningProcess) is not read as one.
-            let started = try SourceText.load(file).range(of: #"(?<![A-Za-z0-9_])Process\(\)"#, options: .regularExpression)
-            #expect(started == nil, "\(file) starts a Process by hand")
+            let started = file.text.range(of: #"(?<![A-Za-z0-9_])Process\(\)"#, options: .regularExpression)
+            #expect(started == nil, "\(file.name) starts a Process by hand")
         }
     }
 
@@ -1407,6 +1589,20 @@ struct ProcessSuiteCleanupSourceTests {
                 #expect(attribute.contains(".noSurvivingChildren"), "\(file): \(attribute) does not carry .noSurvivingChildren")
             }
         }
+    }
+
+    @Test("every suite in any test file whose body names a real-child starter carries the survivor check")
+    func everySuiteThatStartsAChildCarriesTheSurvivorCheck() throws {
+        let files = try AllTestFiles.read()
+        #expect(files.count >= AllTestFiles.expectedMinimum, "read \(files.count) test files, expected at least \(AllTestFiles.expectedMinimum)")
+        let missing = AllTestFiles.suitesMissingTheSurvivorCheck(in: files)
+        #expect(missing.isEmpty, "\(missing.joined(separator: "; "))")
+    }
+
+    @Test("the descendants test stores the descendant's identity only after its premises pass, and its cleanup reads the end and signals nothing")
+    func descendantsTestOrderAndNoSignal() throws {
+        let problems = DescendantCleanupRule.problems(in: try SourceText.load("RealProcessLauncherTests.swift"))
+        #expect(problems.isEmpty, "\(problems.joined(separator: "; "))")
     }
 }
 
@@ -1470,11 +1666,11 @@ struct ProcessSuiteReapFactSourceTests {
         ReapFactRule(file: "Support/HeldChild.swift", function: "endByReleasing",
                      requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit(", "kill("],
                      releasesOutsideGate: ["input.release()"]),
-        // The descendant is not held, so it is ended by the release of its input and confirmed from its own pid and
-        // birth start; a send to it goes only through the recorded identity, never to a group after the leader is reaped.
+        // The descendant is not held, so it is ended by the release of its input and confirmed by read only from its own
+        // pid and start; nothing is sent to it, and nothing to a group after the leader is reaped.
         ReapFactRule(file: "RealProcessLauncherTests.swift", function: "signalReachesTheChildsDescendants",
-                     requires: ["hasReportedExit", "waitReaped(", "send(SIGKILL)", "ChildCleanup.endRecordedRecordingNotConfirmed(", "StoppedChildSupport.signal(", "Issue.record("],
-                     forbids: ["reported.isEmpty", "waitForExit(", "kill(", "-pid", "killpg("],
+                     requires: ["hasReportedExit", "waitReaped(", "send(SIGKILL)", "DescendantCheck.requireGone(", "Issue.record("],
+                     forbids: ["reported.isEmpty", "waitForExit(", "kill(", "-pid", "killpg(", "StoppedChildSupport.signal(", "endRecorded"],
                      releasesOutsideGate: ["input.release()"]),
         ReapFactRule(file: "RealProcessLauncherTests.swift", function: "endNow",
                      requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit("]),
@@ -1482,10 +1678,19 @@ struct ProcessSuiteReapFactSourceTests {
                      requires: ["ConfirmedEnd.isReaped(", "ConfirmedEnd.wait(", "reportedStatusUnknown"], forbids: ["exited.wait(", "alreadyEnded: false"]),
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "lstart",
                      requires: ["failIfNotEnded("], forbids: []),
+        // A fixture that blocks on an input the test holds is ended by releasing it, and its end is read, never signalled.
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "unsignallableChildIsNotConfirmedEnded",
-                     requires: ["ChildCleanup.endRecordedRemovingOnEnd(", "Issue.record("], forbids: ["removeItem("]),
-        ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "endChild",
-                     requires: ["launchFailed", "Issue.record(", "ChildCleanup.endRecordedRemovingOnEnd("], forbids: []),
+                     requires: ["HeldFifo(", "endChildrenAfterRelease(", "release:"], forbids: ["removeItem(", "StoppedChildSupport.signal(", "kill("]),
+        ReapFactRule(file: "AccountCheckerTests.swift", function: "timedOutCheckProcessIsEnded",
+                     requires: ["HeldFifo(", "RunnerLaunch(", "endChildrenAfterRelease(", "requireEnded("], forbids: ["kill(", "removeItem("]),
+        ReapFactRule(file: "TailscaleServeTests.swift", function: "enableOutcomes",
+                     requires: ["RunnerLaunch(", "endChildrenAfterRelease(", "release:"], forbids: ["fake.remove()", "kill("]),
+        ReapFactRule(file: "TailscaleServeTests.swift", function: "changeRetries",
+                     requires: ["RunnerLaunch(", "endChildrenAfterRelease(", "release:"], forbids: ["fake.remove()", "kill("]),
+        ReapFactRule(file: "Support/RunnerLaunch.swift", function: "endChildren",
+                     requires: ["launchFailed", "unknownLaunch(", "ChildCleanup.endRecordedRecordingNotConfirmed("], forbids: []),
+        ReapFactRule(file: "Support/RunnerLaunch.swift", function: "endChildrenAfterRelease",
+                     requires: ["release()", "launchFailed", "unknownLaunch(", "DescendantCheck.requireGone(", "Issue.record("], forbids: ["signal(", "kill("]),
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "stoppedChildEndsTheRunAsTimedOut",
                      requires: ["launchFailed:"], forbids: []),
     ]
@@ -1507,7 +1712,7 @@ struct ProcessSuiteReapFactSourceTests {
             let started = text.range(of: #"(?<![A-Za-z0-9_])Process\(\)"#, options: .regularExpression)
             #expect(started == nil, "\(url.lastPathComponent) starts a Process by hand")
         }
-        #expect(checked > 10, "only \(checked) test files were looked at")
+        #expect(checked >= AllTestFiles.expectedMinimum - 1, "read \(checked) test files besides TestChild.swift, expected at least \(AllTestFiles.expectedMinimum - 1)")
     }
 
     @Test("every suite in this file that starts a real process carries the survivor check")
@@ -1650,6 +1855,98 @@ struct ProcessSuiteCleanupRuleControlTests {
         #expect(!violations(gated).isEmpty)
         #expect(violations(outside).isEmpty)
         #expect(!violations("// input.release() named only in a comment").isEmpty)
+    }
+
+    @Test("a site whose start marker is not in the function is a problem, not a skipped check")
+    func absentMarkerIsAProblem() {
+        let source = """
+        func f() throws {
+            let child = try launch()
+            defer { ChildCleanup.endHeld(child) }
+        }
+        """
+        let found = SourceText.problemsOnEveryPath(function: "f", in: SourceText.stripped(source), startedBy: "start(", calling: "ChildCleanup.")
+        #expect(found.contains { $0.contains("start marker") })
+    }
+
+    private static let goodDescendants = """
+    func signalReachesTheChildsDescendants() throws {
+        var descendantIdentity: Identity?
+        defer {
+            input.release()
+            ChildCleanup.endHeldRecordingNotConfirmed(pid: pid, start: nil, alreadyEnded: leader.hasReportedExit,
+                send: { leader.send(SIGKILL) }, waitForEnd: { leader.waitReaped(milliseconds: $0) }, waitingMilliseconds: bound)
+            if let identity = descendantIdentity {
+                if !DescendantCheck.requireGone(pid: identity.pid, start: identity.start, read: { readProcessTable($0) }) { Issue.record("not ended") }
+            }
+        }
+        try #require(descendant.parentPID == pid)
+        try #require(getpgid(descendantPID) == pid)
+        descendantIdentity = Identity(pid: descendantPID)
+    }
+    """
+
+    @Test("the descendant rule accepts the identity stored after both premises and a cleanup that only reads")
+    func descendantRuleAcceptsTheGoodShape() {
+        #expect(DescendantCleanupRule.problems(in: SourceText.stripped(Self.goodDescendants)).isEmpty)
+    }
+
+    @Test("the descendant rule rejects an identity stored before a premise has passed")
+    func descendantRuleRejectsAnEarlyIdentity() {
+        let early = Self.goodDescendants
+            .replacingOccurrences(of: "    try #require(descendant.parentPID == pid)\n    try #require(getpgid(descendantPID) == pid)\n    descendantIdentity = Identity(pid: descendantPID)",
+                                   with: "    descendantIdentity = Identity(pid: descendantPID)\n    try #require(descendant.parentPID == pid)\n    try #require(getpgid(descendantPID) == pid)")
+        #expect(early != Self.goodDescendants)
+        #expect(!DescendantCleanupRule.problems(in: SourceText.stripped(early)).isEmpty)
+        let afterOne = Self.goodDescendants
+            .replacingOccurrences(of: "    try #require(descendant.parentPID == pid)\n    try #require(getpgid(descendantPID) == pid)\n    descendantIdentity = Identity(pid: descendantPID)",
+                                   with: "    try #require(descendant.parentPID == pid)\n    descendantIdentity = Identity(pid: descendantPID)\n    try #require(getpgid(descendantPID) == pid)")
+        #expect(!DescendantCleanupRule.problems(in: SourceText.stripped(afterOne)).isEmpty)
+    }
+
+    @Test("the descendant rule rejects a cleanup that sends the descendant any signal, and one that does not confirm its end by read")
+    func descendantRuleRejectsASignallingCleanup() {
+        let signalling = Self.goodDescendants.replacingOccurrences(
+            of: "if let identity = descendantIdentity {",
+            with: "if let identity = descendantIdentity {\n                StoppedChildSupport.signal(identity, SIGKILL)")
+        #expect(signalling != Self.goodDescendants)
+        #expect(!DescendantCleanupRule.problems(in: SourceText.stripped(signalling)).isEmpty)
+        let killed = Self.goodDescendants.replacingOccurrences(of: "if let identity = descendantIdentity {", with: "if let identity = descendantIdentity {\n                kill(identity.pid, SIGKILL)")
+        #expect(!DescendantCleanupRule.problems(in: SourceText.stripped(killed)).isEmpty)
+        let unread = Self.goodDescendants.replacingOccurrences(of: "DescendantCheck.requireGone(", with: "somethingElse(")
+        #expect(!DescendantCleanupRule.problems(in: SourceText.stripped(unread)).isEmpty)
+    }
+
+    private static let starterFiles: [(name: String, text: String)] = [
+        ("RealProcessLauncherTests.swift", SourceText.stripped("""
+        @Suite("RealProcessLauncher", .noSurvivingChildren)
+        struct A { func f() { _ = ChildSpawner.spawn(x) } }
+        """)),
+        ("OtherTests.swift", SourceText.stripped("""
+        @Suite("RealAccountChecker")
+        struct B { func f() { let c = RealAccountChecker(engineURL: u) } }
+        """)),
+    ]
+
+    @Test("the old three-file scope misses a starter in another file; the scope over every file names it")
+    func oldScopeMissesAStarterInAnotherFile() {
+        let threeNames = ["BoundedProcessRunnerTests.swift", "EngineSupervisorTests.swift", "RealProcessLauncherTests.swift"]
+        let oldScope = AllTestFiles.suitesMissingTheSurvivorCheck(in: Self.starterFiles.filter { threeNames.contains($0.name) })
+        let everyFile = AllTestFiles.suitesMissingTheSurvivorCheck(in: Self.starterFiles)
+        #expect(oldScope.isEmpty, "the old scope was expected to miss it")
+        #expect(everyFile.count == 1 && everyFile[0].contains("OtherTests.swift") && everyFile[0].contains("RealAccountChecker("), "\(everyFile)")
+    }
+
+    @Test("a starter named only in a comment or a string is not a starter, and a suite with the trait is accepted")
+    func startersInCommentsAndStringsAreNotStarters() {
+        let files: [(name: String, text: String)] = [("QuietTests.swift", SourceText.stripped("""
+        // RealAccountChecker( is only named here
+        @Suite("starts HeldChild.start( in prose")
+        struct Quiet { let text = "TestChild(" }
+        @Suite("starts one", .noSurvivingChildren)
+        struct Loud { func f() { _ = try? TestChild(executable: "x", arguments: []) } }
+        """))]
+        #expect(AllTestFiles.suitesMissingTheSurvivorCheck(in: files).isEmpty)
     }
 
     @Test("a thrown-away wait or cleanup result is found, an ordinary discarded launch is not")
