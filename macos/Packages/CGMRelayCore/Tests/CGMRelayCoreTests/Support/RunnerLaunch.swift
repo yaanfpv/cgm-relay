@@ -88,6 +88,24 @@ enum LaunchAccount {
     }
 }
 
+extension LaunchAccount {
+    /// notShownEnded is the position of each call a check cannot show ended: a
+    /// call with an identity whose read `gone` does not show gone, whatever
+    /// the call's result, and a call with no identity and no confirmed end.
+    /// `gone` is asked once for every identified call and never for another.
+    static func notShownEnded(_ calls: [LaunchCall], gone: (StoppedChildSupport.RecordedProcess) -> Bool) -> [Int] {
+        var named: [Int] = []
+        for (index, call) in calls.enumerated() {
+            if let identity = call.identity {
+                if !gone(identity) { named.append(index) }
+            } else if call.result == nil || call.result == .notConfirmedEnded {
+                named.append(index)
+            }
+        }
+        return named
+    }
+}
+
 /// RunnerLaunch builds a bounded runner that lists every call it is given,
 /// before the child starts, with the identity that call's own launch read
 /// took while the child was necessarily unreaped and the result once the call
@@ -199,15 +217,16 @@ final class RunnerLaunch: @unchecked Sendable {
         if verdict.removeDirectory { try? FileManager.default.removeItem(at: directory) }
     }
 
-    /// requireEnded fails the test, naming each call the decision names: one
-    /// with no confirmed end whose own identity does not read gone now (absent,
-    /// or present with another start), or that has no identity.
+    /// requireEnded fails the test, naming each call it cannot show ended: one
+    /// whose own identity does not read gone now (absent, or present with
+    /// another start), whatever its result, or one with no identity and no
+    /// confirmed end.
     func requireEnded() {
         let all = calls
-        let verdict = LaunchAccount.decide(all, gone: {
+        let named = LaunchAccount.notShownEnded(all, gone: {
             DescendantCheck.verdict(readProcessTable($0.pid), of: $0.start) == .gone
         })
-        for index in verdict.named {
+        for index in named {
             Issue.record("the child of \(Self.describe(call: index, all[index])) was not shown ended after the run returned")
         }
     }
