@@ -180,27 +180,6 @@ enum StoppedChildSupport {
         return RecordedProcess(pid: pid, start: entry.start)
     }
 
-    /// recordWhenStopped waits for the child to write its pid to pidFile and
-    /// to show as stopped, and records it then. A stopped child cannot end by
-    /// itself, so the number still names it at that moment. It returns nil
-    /// when the child was not seen stopped within the hang ceiling.
-    static func recordWhenStopped(pidFile: URL) -> RecordedProcess? {
-        let stoppedStatus: UInt32 = 4 // SSTOP in <sys/proc.h>
-        let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
-        while DispatchTime.now() < deadline {
-            if let text = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(text) {
-                var info = proc_bsdinfo()
-                let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-                if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
-                   info.pbi_status == stoppedStatus, info.pbi_ppid == getpid() {
-                    return record(pid: pid)
-                }
-            }
-            usleep(20_000) // a pause per round, so a wait that never ends does not spin a core
-        }
-        return nil
-    }
-
     /// namesRecorded is false only when the recorded process is gone: no
     /// process has the number, or the number now has another start time. A
     /// process that has exited but is not yet reaped still has its number, so

@@ -635,7 +635,7 @@ struct EngineSupervisorTests {
         #expect(await supervisor.state == .stopped)
     }
 
-    /// RoundsCase names one way the engine is running when it is stopped.
+    /// ReapCase names one way the engine is running when it is stopped.
     struct ReapCase: Sendable, CustomTestStringConvertible {
         let label: String
         let stopsItself: Bool
