@@ -282,6 +282,13 @@ struct EngineSupervisorTests {
         await supervisor.start(configuration: .fixture())
         #expect(launcher.launchCount == 1, "start must not launch while the engine's status is unknown")
         #expect(await supervisor.state == .failed(.engineStatusUnknown))
+
+        // stop leaves the failure as it is, so a later start launches nothing.
+        await supervisor.stop()
+        #expect(await supervisor.state == .failed(.engineStatusUnknown), "stop must not clear a status-unknown failure")
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "start after stop must not launch while the engine's status is unknown")
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
     }
 
     @Test("the engine's own exit codes still map as before: store and port codes fail permanently, any other code restarts with backoff")
