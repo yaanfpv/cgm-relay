@@ -31,6 +31,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Stopping the relay signals only the processes CGM Relay started.
 - Stopping the relay, or retrying a Tailscale logout, no longer waits forever when something outside CGM Relay has paused one of its background processes.
 - If CGM Relay can't confirm that its relay stopped, it asks you to quit and reopen the app, and until you do it never starts a second relay or lets another of its own processes use its Tailscale folder.
+- The helper that lets the Mac sleep again after a crash no longer stops checking if the command it runs hangs.
+- The menu no longer shows a status from before a Stop or a restart when that check finishes just after it.
+- A quick second click on a slow action, such as leaving the built-in route, signing in, or turning on Tailscale HTTPS or keep-awake, no longer starts it twice, and Use My Tailscale is unavailable while a leave runs.
+- A double click on Start starts the relay once, and a settings change made while the relay is starting restarts it with the new settings.
 
 ## [1.0.2] - 2026-10-14
 
