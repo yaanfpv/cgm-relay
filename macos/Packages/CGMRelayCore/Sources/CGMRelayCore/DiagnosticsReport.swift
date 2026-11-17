@@ -116,6 +116,7 @@ public enum DiagnosticsReport {
         case .notAnswering: state = "not answering"
         case .waitingForInternet: state = "waiting for the internet"
         case .stopped: state = "stopped"
+        case .engineMayStillRun: state = "engine could not be confirmed stopped"
         case .failed: state = "failed"
         }
         return "public address (built-in), \(state)"

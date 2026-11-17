@@ -305,6 +305,11 @@ public struct MenuDisplayState: Sendable, Equatable {
         return "last reading \(age)"
     }
 
+    /// engineMayStillRunStatus and engineMayStillRunDetail are the two lines
+    /// said wherever an engine's end was never confirmed.
+    public static let engineMayStillRunStatus = "Relay may still be running"
+    public static let engineMayStillRunDetail = "Quit and reopen CGM Relay."
+
     /// statusLine renders a permanent failure's headline, in the person's
     /// own terms: never "engine", "store", "key mismatch", or an exit
     /// status, and no longer than every other state's shortStatus (this
@@ -332,7 +337,7 @@ public struct MenuDisplayState: Sendable, Equatable {
             // fuller explanation and the retry instruction.
             return "Couldn't start fresh"
         case .engineStatusUnknown:
-            return "Relay may still be running"
+            return engineMayStillRunStatus
         }
     }
 
@@ -356,7 +361,7 @@ public struct MenuDisplayState: Sendable, Equatable {
         case .recoveryMoveFailed:
             return "Check that CGM Relay can write to its own folder, then try Start Fresh again."
         case .engineStatusUnknown:
-            return "Quit and reopen CGM Relay."
+            return engineMayStillRunDetail
         }
     }
 

@@ -86,6 +86,10 @@ public enum BuiltInRouteState: Equatable, Sendable {
     /// stopped is the route while the engine is not running: there is no
     /// address to give, whatever the last report said.
     case stopped
+    /// engineMayStillRun is the route while the engine's end was never
+    /// confirmed: it offers nothing to try, since nothing can start until the
+    /// app is quit and opened again.
+    case engineMayStillRun
     case failed(String)
 
     /// from maps the engine's report to a state. No report yet is starting;
@@ -134,6 +138,7 @@ public enum BuiltInRouteState: Equatable, Sendable {
         switch engineState {
         case .stopped, .waitingToRestart: return .stopped
         case .starting: return .starting
+        case .failed(.engineStatusUnknown): return .engineMayStillRun
         case .failed: return .failed("CGM Relay couldn't start. Try Again.")
         case .running: return from(status)
         }
@@ -187,6 +192,7 @@ public enum BuiltInRouteState: Equatable, Sendable {
         case .notAnswering: return "Your address isn't answering. Reconnecting…"
         case .waitingForInternet: return "Waiting for the internet to check your address."
         case .stopped: return "Your address is stopped. It works again once CGM Relay is running."
+        case .engineMayStillRun: return "\(MenuDisplayState.engineMayStillRunStatus). \(MenuDisplayState.engineMayStillRunDetail)"
         case .failed(let message): return message
         case .ready: return ""
         }
