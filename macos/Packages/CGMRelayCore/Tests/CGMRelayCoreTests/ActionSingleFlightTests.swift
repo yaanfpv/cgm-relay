@@ -510,6 +510,158 @@ enum FlagPlant: CaseIterable, Sendable, CustomTestStringConvertible {
     }
 }
 
+// MARK: - One engine start at a time
+
+// startEngine is entered by nine callers and awaits before the supervisor
+// reports .starting, so a second entry must find the in-flight mark already
+// set. The mark is taken in startEngine's first statements, before its first
+// await, and cleared by a defer in startEngine; nothing else touches it.
+
+enum EngineStartSource {
+    static let mark = "isStartingEngine"
+
+    /// problems lists what keeps startEngine from being single-flight, over
+    /// a set of source files by name.
+    static func problems(in files: [String: String]) -> [String] {
+        guard let raw = files["AppModel.swift"] else { return ["AppModel.swift is missing"] }
+        let parsed = AppModelSource.Parsed(AppModelSource.stripped(raw))
+        let regex = SingleFlightSource.regex
+        let functions = parsed.functions()
+        guard let entry = functions.first(where: { $0.name == "startEngine" }) else {
+            return ["startEngine is not declared in AppModel.swift"]
+        }
+        var found: [String] = []
+        let whole = NSRange(location: 0, length: parsed.ns.length)
+        let body = NSRange(location: entry.open + 1, length: entry.close - entry.open - 1)
+        let limit = SingleFlightSource.firstHop(in: entry, parsed: parsed)?.position ?? entry.close
+
+        if regex(#"\bprivate\s+var\s+"# + mark + #"\s*=\s*false\b"#).firstMatch(in: parsed.text, range: whole) == nil {
+            found.append("\(mark) is not declared as private var \(mark) = false")
+        }
+
+        let guardAt = regex(#"\bguard\s+!\s*"# + mark + #"\s+else\s*\{\s*return\s*\}"#).firstMatch(in: parsed.text, range: body)?.range.location
+        if guardAt == nil || guardAt! >= limit {
+            found.append("startEngine does not check \(mark) and return before its first await")
+        }
+        let setAt = regex(#"\b"# + mark + #"\s*=\s*true\b"#).firstMatch(in: parsed.text, range: body)?.range.location
+        if setAt == nil || setAt! >= limit {
+            found.append("startEngine does not set \(mark) before its first await")
+        } else if let guardAt, guardAt > setAt! {
+            found.append("startEngine sets \(mark) before it checks it")
+        }
+
+        // Every defer in the file, with the range of its body.
+        var defers: [(at: Int, open: Int, close: Int)] = []
+        for match in regex(#"\bdefer\s*\{"#).matches(in: parsed.text, range: whole) {
+            let open = match.range.location + match.range.length - 1
+            if let close = parsed.closeOf[open] { defers.append((match.range.location, open, close)) }
+        }
+        let clearsInDefer = defers.contains { entryDefer in
+            guard parsed.innermost(functions, at: entryDefer.at)?.open == entry.open, entryDefer.at < limit else { return false }
+            let text = parsed.ns.substring(with: NSRange(location: entryDefer.open, length: entryDefer.close - entryDefer.open))
+            return regex(#"\b"# + mark + #"\s*=\s*false\b"#).firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length)) != nil
+        }
+        if !clearsInDefer {
+            found.append("startEngine does not clear \(mark) in a defer taken before its first await")
+        }
+
+        // Nothing else sets or clears it, and no clear sits outside a defer.
+        for match in regex(#"\b"# + mark + #"\s*=\s*(true|false)\b"#).matches(in: parsed.text, range: whole) {
+            let position = match.range.location
+            let before = parsed.ns.substring(to: position).trimmingCharacters(in: .whitespaces)
+            if before.hasSuffix("var") { continue }
+            let owner = parsed.innermost(functions, at: position)
+            let word = parsed.ns.substring(with: match.range(at: 1)) == "true" ? "sets" : "clears"
+            if owner?.open != entry.open {
+                found.append("\(owner?.name ?? "(none)") \(word) \(mark), though only startEngine may")
+            } else if word == "clears", !defers.contains(where: { $0.open < position && position < $0.close }) {
+                found.append("startEngine clears \(mark) outside a defer")
+            }
+        }
+        return found
+    }
+
+    static let fixtureAppModel = """
+    @MainActor
+    final class AppModel: ObservableObject {
+        private var isStartingEngine = false
+        private var stopRequested = false
+
+        func start() {
+            Task { await startEngine() }
+        }
+
+        private func startEngine() async {
+            guard !isStartingEngine else { return }
+            isStartingEngine = true
+            defer { isStartingEngine = false }
+            stopRequested = false
+            if let refusal = choosePortBeforeStart() {
+                await supervisor.fail(refusal)
+                return
+            }
+            await supervisor.start()
+        }
+
+        private func finish() {
+            stopRequested = true
+        }
+    }
+    """
+}
+
+/// EnginePlant is a fault put into an in-memory copy of AppModel's source.
+enum EnginePlant: CaseIterable, Sendable, CustomTestStringConvertible {
+    case setAfterFirstAwait
+    case guardMissing
+    case clearOutsideDefer
+    case secondSetter
+    case secondClearer
+    case clearInDeferElsewhere
+
+    var testDescription: String {
+        switch self {
+        case .setAfterFirstAwait: "the mark set after the first await"
+        case .guardMissing: "the guard missing"
+        case .clearOutsideDefer: "the clear outside a defer"
+        case .secondSetter: "a second setter in another function"
+        case .secondClearer: "a second clear in another function"
+        case .clearInDeferElsewhere: "a defer in another function clears the mark"
+        }
+    }
+
+    func apply(to text: String) -> String? {
+        let guardLine = "guard !isStartingEngine else { return }"
+        let setLine = "isStartingEngine = true"
+        let deferLine = "defer { isStartingEngine = false }"
+        var out = text
+        switch self {
+        case .setAfterFirstAwait:
+            guard let set = out.range(of: setLine) else { return nil }
+            out.replaceSubrange(set, with: "await Task.yield()\n        \(setLine)")
+            return out
+        case .guardMissing:
+            guard let range = out.range(of: guardLine) else { return nil }
+            out.replaceSubrange(range, with: "")
+            return out
+        case .clearOutsideDefer:
+            guard let range = out.range(of: deferLine) else { return nil }
+            out.replaceSubrange(range, with: "isStartingEngine = false")
+            return out
+        case .secondSetter, .secondClearer, .clearInDeferElsewhere:
+            guard out.contains(guardLine), let tail = out.range(of: "}", options: .backwards) else { return nil }
+            let extra: String
+            switch self {
+            case .secondSetter: extra = "    private func forceStart() { isStartingEngine = true }\n"
+            case .secondClearer: extra = "    private func forceStop() { isStartingEngine = false }\n"
+            default: extra = "    private func finishElsewhere() { defer { isStartingEngine = false } }\n"
+            }
+            out.replaceSubrange(tail, with: extra + "}")
+            return out
+        }
+    }
+}
+
 // MARK: - The checks
 
 @Suite("A second quick press never starts a second run")
@@ -545,6 +697,32 @@ struct ActionSingleFlightTests {
         let planted = try #require(plant.apply(to: member), "\(plant.testDescription) does not apply to \(member.name)")
         let found = SingleFlightSource.problems(member, in: planted)
         #expect(!found.isEmpty, Comment(rawValue: "\(member.name) with \(plant.testDescription) stayed green"))
+    }
+
+    @Test("the engine-start source the check is judged against conforms")
+    func engineStartFixtureConforms() {
+        #expect(EngineStartSource.problems(in: ["AppModel.swift": EngineStartSource.fixtureAppModel]) == [])
+    }
+
+    @Test("the app's own startEngine takes the in-flight mark before its first await, clears it in a defer, and nothing else touches it")
+    func appEngineStartIsSingleFlight() throws {
+        #expect(EngineStartSource.problems(in: try SingleFlightSource.sources()) == [])
+    }
+
+    @Test("each planted fault turns the engine-start check red on the conforming fixture", arguments: EnginePlant.allCases)
+    func enginePlantIsCaughtOnFixture(plant: EnginePlant) throws {
+        let planted = try #require(plant.apply(to: EngineStartSource.fixtureAppModel), "\(plant.testDescription) does not apply to the fixture")
+        let found = EngineStartSource.problems(in: ["AppModel.swift": planted])
+        #expect(!found.isEmpty, Comment(rawValue: "\(plant.testDescription) stayed green"))
+    }
+
+    @Test("each planted fault turns the engine-start check red on the app's own AppModel", arguments: EnginePlant.allCases)
+    func enginePlantIsCaughtOnApp(plant: EnginePlant) throws {
+        var files = try SingleFlightSource.sources()
+        let source = try #require(files["AppModel.swift"])
+        let planted = try #require(plant.apply(to: source), "\(plant.testDescription) does not apply to AppModel.swift")
+        files["AppModel.swift"] = planted
+        #expect(!EngineStartSource.problems(in: files).isEmpty, Comment(rawValue: "\(plant.testDescription) stayed green"))
     }
 
     @Test("a planted defer in leaveBuiltInRoute is named, not only the missing caller flag")
