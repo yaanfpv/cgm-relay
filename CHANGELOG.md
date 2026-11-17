@@ -10,12 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Keep this Mac awake, in setup and Settings. It stays awake while plugged in, lid closed too, and sleeps as usual on battery. It asks for your password once, and for Login Items approval so the Mac can sleep after a crash.
+- Keep this Mac awake while the relay runs, from setup or Settings: plugged in, it stays awake with the lid closed, and on battery it sleeps as usual. It asks for your password once, and for Login Items approval so the Mac can sleep after a crash.
 - Use the Tailscale built into CGM Relay: choose it with a button and sign in once. Your phone gets a public https address that needs your token for your readings, and nothing to install.
 - Settings warns you before your Tailscale sign-in expires. Switching to your own Tailscale or to This Mac only logs this Mac out of your Tailscale account, where it stays listed as expired until you remove it.
 - Signing out of LibreLinkUp keeps the built-in address, so it works again when you sign back in.
 - Sweet Dreams and Zukka join the follower apps in Connect. Sweet Dreams needs the built-in address, and Connect offers to switch.
-- Updating from an earlier version opens a short "What's new in this update" window with only the new steps. Later closes it until the next launch.
+- Updating from an earlier version opens a short "What's New in This Update" window with only the new steps. Later closes it until the next launch.
 
 ### Changed
 
@@ -33,7 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - If CGM Relay can't confirm that its relay stopped, it asks you to quit and reopen the app, and until you do it never starts a second relay or lets another of its own processes use its Tailscale folder.
 - The logout of the built-in Tailscale no longer sends its node's logs to Tailscale, the same as the relay itself.
 - The helper that lets the Mac sleep again after a crash now ends a command that hangs after 10 seconds instead of waiting for it forever.
-- The menu no longer shows a status from before a Stop or a restart when that check finishes just after it.
+- After a restart, a status check that finishes late no longer puts the old relay's status back in the menu.
 - A quick second click on a slow action, such as leaving the built-in route, signing in, or turning on Tailscale HTTPS or keep-awake, no longer starts it twice, and Use My Tailscale is unavailable while a leave runs.
 - A double click on Start starts the relay once, and a Stop, a sign-out, a quit or a settings change made while the relay is starting takes effect once that start has finished.
 - Turning Tailscale HTTPS on or off no longer runs its command a second time while the first may still be running.
