@@ -425,7 +425,7 @@ private enum StartEngineOrder {
     static func violation(in source: String) -> String? {
         guard let declaration = source.range(of: #"func\s+startEngine\s*\("#, options: .regularExpression),
               let open = source[declaration.upperBound...].firstIndex(of: "{"),
-              let close = AppModelSource.closing(source, from: open)
+              let close = closing(source, from: open)
         else { return "startEngine was not found" }
         let body = String(source[open...close])
         guard let discard = body.range(of: #"await\s+(?:self\.)?statusPoller\.discardPending\(\)"#, options: .regularExpression) else {
@@ -435,5 +435,20 @@ private enum StartEngineOrder {
             return "startEngine no longer clears latestStatus.builtIn, so there is nothing to order against"
         }
         return discard.lowerBound < clear.lowerBound ? nil : "discardPending() comes after the built-in status is cleared"
+    }
+
+    /// closing is the index of the brace that closes the one at `open`.
+    private static func closing(_ text: String, from open: String.Index) -> String.Index? {
+        var depth = 0
+        var index = open
+        while index < text.endIndex {
+            if text[index] == "{" { depth += 1 }
+            if text[index] == "}" {
+                depth -= 1
+                if depth == 0 { return index }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 }
