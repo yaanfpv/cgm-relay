@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A follower app that checks the connection with a wrong token now gets Nightscout's "unauthorized" answer, so a mistyped token shows up at setup.
 - Follower apps that ask for insulin and carbs on board get Nightscout's own empty answer.
 - The local network route is removed in favour of Tailscale. If you used it, the relay stays on this Mac only until you choose a Tailscale way, and the saved certificate is deleted.
-- The libraries CGM Relay is built on are up to date.
+- The libraries CGM Relay is built on are updated.
 
 ### Fixed
 
