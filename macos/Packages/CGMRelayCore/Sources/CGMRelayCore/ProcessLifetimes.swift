@@ -75,18 +75,49 @@ public final class ProcessLifetimes {
     /// uses the kept Tailscale folder.
     public var holdsTailscaleFolder: Bool { engineHoldsFolder || leaveChildHoldsFolder }
 
+    /// engineUnsettled is whether an engine may still be running that nothing
+    /// has confirmed gone: its end was not confirmed, or is still being waited
+    /// for. Every answer that lets something go reads it.
+    private var engineUnsettled: Bool { engine == .notConfirmed || engine == .confirming }
+
     /// builtInChoiceBlocked is whether Use Built-In Tailscale must wait: a
     /// leave child is, or may be, running on the folder, or an engine's end
-    /// was not confirmed.
-    public var builtInChoiceBlocked: Bool { leaveChildHoldsFolder || engine == .notConfirmed }
+    /// was not confirmed or is still being waited for.
+    public var builtInChoiceBlocked: Bool { leaveChildHoldsFolder || engineUnsettled }
 
     /// mayStartLeaveChild is whether a leave child may be launched on the kept
     /// folder.
-    public var mayStartLeaveChild: Bool { !holdsTailscaleFolder }
+    public var mayStartLeaveChild: Bool { !holdsTailscaleFolder && engine != .confirming }
 
     /// keepAwakeMayBeReleased is whether no engine may still be running, so
-    /// the keep-awake hold and the bound address may let go.
-    public var keepAwakeMayBeReleased: Bool { engine != .notConfirmed }
+    /// the keep-awake hold may let go.
+    public var keepAwakeMayBeReleased: Bool { !engineUnsettled }
+
+    /// mayReleaseBoundAddress is whether no engine may still be running, so
+    /// the address it was started on may be dropped.
+    public var mayReleaseBoundAddress: Bool { !engineUnsettled }
+
+    /// mayStartEngine is whether an engine may be started: no earlier engine
+    /// may still be running, and one that would use the kept folder waits for
+    /// a leave child that is, or may be, running on it.
+    public func mayStartEngine(onKeptFolder: Bool) -> Bool {
+        !engineUnsettled && !(onKeptFolder && leaveChildHoldsFolder)
+    }
+
+    /// engineStateReported records what the supervisor reported: a start is a
+    /// running engine, and every failure but engineStatusUnknown is a
+    /// confirmed end. A stopped report records nothing; the end a stop waits
+    /// for is recorded by engineEnded when the wait comes out.
+    public func engineStateReported(_ state: EngineSupervisor.RunState, usingKeptFolder: Bool) {
+        switch state {
+        case .starting:
+            engineStarted(usingKeptFolder: usingKeptFolder)
+        case .failed(let reason):
+            engineEnded(confirmed: reason != .engineStatusUnknown)
+        case .stopped, .running, .waitingToRestart:
+            break
+        }
+    }
 
     private func set(engine next: Lifetime, usingKeptFolder: Bool) {
         let changed = engine != next || engineUsesKeptFolder != usingKeptFolder

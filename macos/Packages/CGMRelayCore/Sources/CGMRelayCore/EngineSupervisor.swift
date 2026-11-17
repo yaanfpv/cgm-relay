@@ -1,10 +1,12 @@
 import Foundation
 
-/// EngineSupervisor starts the engine as a child process, restarts it
-/// with backoff if it exits on its own, once stopped ends the child it started
-/// or reports that it could not confirm that end (see stopAndWait), and starts
-/// no second engine while the first may still be running. It is an actor
-/// because every field below is
+/// EngineSupervisor starts the engine as a child process and restarts it
+/// with backoff if it exits on its own. On the stopAndWait path, the one the
+/// app uses, it ends the child it started or reports that it could not
+/// confirm that end, and starts no second engine while the first may still be
+/// running. Plain stop() only asks the engine to exit and does not wait, so a
+/// start after it is allowed while that process may still be ending. It is an
+/// actor because every field below is
 /// mutated from both the caller's own calls (start, stop) and from the
 /// child process's own termination handler, which fires on an arbitrary
 /// thread.

@@ -211,6 +211,10 @@ final class AppModel: ObservableObject {
         return LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: true)
     }
 
+    /// startsOnKeptFolder is whether an engine started now would use the kept
+    /// Tailscale folder, which is what the built-in route is.
+    private var startsOnKeptFolder: Bool { settings.useBuiltInTailscale }
+
     /// canStart is false while a stop is still waiting for the engine's end, since the supervisor
     /// starts nothing until that end is confirmed and a press then would do nothing.
     var canStart: Bool { credentialsConfigured && engineState == .stopped && lifetimes.engine != .confirming }
@@ -383,10 +387,12 @@ final class AppModel: ObservableObject {
         // A leave that did not reach Tailscale is tried again here whether or
         // not the engine can start: the child needs no LibreLinkUp sign-in.
         Task { await runPendingLeaveChild() }
-        async let engineStarted: Void = canStart ? startEngine() : ()
         async let pollerStarted: Void = statusPoller.start()
         async let tailscaleRead: Void = refreshTailscale()
-        _ = await (engineStarted, pollerStarted, tailscaleRead)
+        if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
+            await startEngine()
+        }
+        _ = await (pollerStarted, tailscaleRead)
     }
 
     /// removeRetiredCertificateSecrets deletes the certificate entries an
@@ -418,7 +424,7 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
-        guard canStart else { return }
+        guard canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) else { return }
         Task { await startEngine() }
     }
 
@@ -426,10 +432,8 @@ final class AppModel: ObservableObject {
         stopRequested = true
         Task {
             _ = await stopEngineAndWait()
-            if lifetimes.keepAwakeMayBeReleased {
-                stayAwake.relayStopped()
-                boundHost = nil
-            }
+            if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
+            if lifetimes.mayReleaseBoundAddress { boundHost = nil }
             await alertEngine.pauseForEngineStop()
         }
     }
@@ -459,7 +463,7 @@ final class AppModel: ObservableObject {
     func startFresh() {
         guard canStartFresh else { return }
         Task {
-            guard canStartFresh else { return }
+            guard canStartFresh, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) else { return }
             await supervisor.clearFailure()
             do {
                 try DatabaseRecovery.moveAside(databasePath: databasePath)
@@ -480,7 +484,7 @@ final class AppModel: ObservableObject {
     /// run CredentialsBootstrapper again, then start the engine. A no-op
     /// unless canTryAgain is currently true.
     func tryAgain() {
-        guard canTryAgain else { return }
+        guard canTryAgain, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) else { return }
         Task {
             await supervisor.clearFailure()
             try? CredentialsBootstrapper(store: credentialStore).ensureBootstrapped()
@@ -506,7 +510,7 @@ final class AppModel: ObservableObject {
         if !(await stopEngineAndWait()) {
             recoveryLogger.error("the engine could not be confirmed stopped at quit")
         }
-        if lifetimes.keepAwakeMayBeReleased {
+        if lifetimes.mayReleaseBoundAddress {
             boundHost = nil
         }
     }
@@ -522,7 +526,7 @@ final class AppModel: ObservableObject {
         let outcome = await accountSignIn.signIn(email: email, password: password, librelinkupBaseURL: librelinkupBaseURL)
         if outcome == .signedIn {
             refreshCredentialsConfigured()
-            if canStart {
+            if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
                 await startEngine()
             }
         }
@@ -539,10 +543,8 @@ final class AppModel: ObservableObject {
     func signOut() async -> Bool {
         stopRequested = true
         _ = await stopEngineAndWait()
-        if lifetimes.keepAwakeMayBeReleased {
-            stayAwake.relayStopped()
-            boundHost = nil
-        }
+        if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
+        if lifetimes.mayReleaseBoundAddress { boundHost = nil }
         await alertEngine.pauseForEngineStop()
         let succeeded: Bool
         do {
@@ -759,10 +761,6 @@ final class AppModel: ObservableObject {
         Task { await runPendingLeaveChild() }
     }
 
-    /// engineHoldsFolder is whether a process that is or may be running uses
-    /// the kept Tailscale folder.
-    private var engineHoldsFolder: Bool { lifetimes.holdsTailscaleFolder }
-
     /// runPendingLeaveChild tries again to log this Mac out of the person's
     /// Tailscale account after a leave that did not reach it, by running
     /// `cgm-relay leave-tailnet --config-stdin` on the kept folder. It runs
@@ -770,9 +768,7 @@ final class AppModel: ObservableObject {
     /// and one at a time. The exit code is recorded with
     /// LeaveTailnetOutcome.fromLeaveChild.
     private func runPendingLeaveChild() async {
-        guard lifetimes.mayStartLeaveChild,
-              LeaveTailnetOutcome.shouldRunLeaveChild(settings: settings, engineHoldsFolder: engineHoldsFolder)
-        else { return }
+        guard lifetimes.mayStartLeaveChild, settings.pendingLeaveRetry, !settings.useBuiltInTailscale else { return }
         let kept = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("tailscale", isDirectory: true)
         let request = ["tailscale_state_dir": kept.path, "tailscale_hostname": SettingsEngineConfigurationBuilder.builtInHostname]
         guard let input = try? JSONSerialization.data(withJSONObject: request) else { return }
@@ -818,9 +814,9 @@ final class AppModel: ObservableObject {
                 return
             case .failed:
                 await supervisor.clearFailure()
-                await startEngine()
+                if lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) { await startEngine() }
             case .stopped:
-                if canStart { await startEngine() }
+                if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) { await startEngine() }
             case .starting, .running, .waitingToRestart:
                 await restartEngineIfRunning()
             }
@@ -924,7 +920,7 @@ final class AppModel: ObservableObject {
         Task {
             // A relay that could not listen on the old port starts on the
             // new one at once; a running one restarts onto it.
-            if engineState == .failed(.portInUse) {
+            if engineState == .failed(.portInUse), lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
                 await supervisor.clearFailure()
                 await startEngine()
             } else {
@@ -1438,7 +1434,7 @@ final class AppModel: ObservableObject {
                 recoveryLogger.error("the engine could not be confirmed stopped, so no new one was started")
                 return
             }
-            if lifetimes.keepAwakeMayBeReleased {
+            if lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
                 await startEngine()
             }
         case .stopped, .failed:
@@ -1566,22 +1562,18 @@ final class AppModel: ObservableObject {
     /// crash-triggered restart (.waitingToRestart, then .starting) keeps
     /// it, since it restarts with the same configuration.
     private func handleEngineStateChange(_ state: EngineSupervisor.RunState) {
+        lifetimes.engineStateReported(state, usingKeptFolder: engineUsesKeptFolder)
         switch state {
         case .stopped:
-            if lifetimes.keepAwakeMayBeReleased, lifetimes.engine != .confirming {
+            if lifetimes.mayReleaseBoundAddress {
                 boundHost = nil
             }
-        case .failed(let reason):
-            lifetimes.engineEnded(confirmed: reason != .engineStatusUnknown)
-            if lifetimes.keepAwakeMayBeReleased {
-                boundHost = nil
-                stayAwake.relayStopped()
-            }
+        case .failed:
+            if lifetimes.mayReleaseBoundAddress { boundHost = nil }
+            if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
         case .running:
             if !stopRequested { stayAwake.relayStarted() }
-        case .starting:
-            lifetimes.engineStarted(usingKeptFolder: engineUsesKeptFolder)
-        case .waitingToRestart:
+        case .starting, .waitingToRestart:
             break
         }
         engineState = state
