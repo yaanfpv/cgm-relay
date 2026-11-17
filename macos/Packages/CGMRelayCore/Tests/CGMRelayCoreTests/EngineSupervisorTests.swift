@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import CGMRelayCore
 
-@Suite("EngineSupervisor")
+@Suite("EngineSupervisor", .noSurvivingChildren)
 struct EngineSupervisorTests {
     static let engineURL = URL(fileURLWithPath: "/usr/bin/true")
 
@@ -555,12 +555,21 @@ struct EngineSupervisorTests {
 
         /// endEngineIfLeftRunning kills the child this test started if no
         /// exit was reported, through the handle the launch returned, then
-        /// waits for the report. Once an exit was reported there is nothing
-        /// left to end or wait for.
+        /// waits for the report. Once an exit was reported, or no launch
+        /// happened, there is nothing left to end. A report that does not
+        /// come fails the test naming the engine.
         func endEngineIfLeftRunning() {
-            guard exitCodes.isEmpty else { return }
-            process?.kill()
-            _ = exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds)))
+            let process = self.process
+            ChildCleanup.endHeldRecordingNotConfirmed(
+                pid: process?.processIdentifier ?? 0,
+                start: nil,
+                alreadyEnded: process == nil || !exitCodes.isEmpty,
+                send: { process?.kill() },
+                waitForEnd: { [self] milliseconds in
+                    exited.wait(timeout: .now() + .milliseconds(Int(milliseconds))) == .success
+                },
+                waitingMilliseconds: TestChild.hangCeilingMilliseconds
+            )
         }
 
         func launch(
@@ -608,12 +617,13 @@ struct EngineSupervisorTests {
         let launcher = RecordingRealLauncher()
         let supervisor = EngineSupervisor(engineURL: engine, launcher: launcher, clock: FakeVirtualClock())
         await supervisor.start(configuration: .fixture())
-        let process = try #require(launcher.process)
-        let pid = process.processIdentifier
         defer {
-            // Only reached with the child still alive when the test failed.
+            // Registered right after the start, so no early exit below leaves
+            // the engine running. It does nothing once the exit was reported.
             launcher.endEngineIfLeftRunning()
         }
+        let process = try #require(launcher.process)
+        let pid = process.processIdentifier
         let isReady = await StoppedChildSupport.withinBlocking {
             launcher.ready.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
         }
@@ -623,8 +633,9 @@ struct EngineSupervisorTests {
         // stop sent from outside, with no signal sent by this test.
         try #require(StoppedChildSupport.waitUntilStopped(pid: pid), "engine pid \(pid) never showed as stopped")
 
-        let returned: Void? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .seconds(1)) }
+        let returned: Bool? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .seconds(1)) }
         try #require(returned != nil, "stopAndWait did not return for the stopped engine pid \(pid)")
+        #expect(returned == true, "stopAndWait did not confirm the stopped engine pid \(pid) ended")
 
         let reaped = await StoppedChildSupport.withinBlocking {
             launcher.exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
