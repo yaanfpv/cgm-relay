@@ -21,9 +21,12 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
         child.signaller.send(SIGTERM)
     }
 
+    /// waitUntilExit returns true only once the child has been reaped and its
+    /// exit reported (the holder reports after the reap, under its lock), so
+    /// a caller that sees true can rely on both.
     func waitUntilExit(timeout: Duration) async -> Bool {
         let deadline = ContinuousClock.now + timeout
-        while !child.hasExited {
+        while !child.hasReportedExit {
             if ContinuousClock.now >= deadline { return false }
             try? await Task.sleep(for: .milliseconds(25))
         }

@@ -7,6 +7,7 @@ final class SpawnedChild: @unchecked Sendable {
     let signaller: LaunchedChildSignaller
     private let lock = NSLock()
     private var exited = false
+    private var reported = false
 
     fileprivate init(processIdentifier: pid_t, signaller: LaunchedChildSignaller) {
         self.processIdentifier = processIdentifier
@@ -16,7 +17,12 @@ final class SpawnedChild: @unchecked Sendable {
     /// hasExited is true once the child has ended and been reaped.
     var hasExited: Bool { lock.withLock { exited } }
 
+    /// hasReportedExit is true once the child has been reaped and its exit
+    /// handed to onExit, which returned. It is never true before the reap.
+    var hasReportedExit: Bool { lock.withLock { reported } }
+
     fileprivate func markExited() { lock.withLock { exited = true } }
+    fileprivate func markReported() { lock.withLock { reported = true } }
 }
 
 /// ChildSpawner starts every child this package launches and owns it from
@@ -154,9 +160,11 @@ enum ChildSpawner {
             case .reaped(let status)?:
                 child.markExited()
                 onExit(exitCode(fromWaitStatus: status))
+                child.markReported()
             case .unavailable?:
                 child.markExited()
                 onExit(exitCodeWhenUnknown)
+                child.markReported()
             }
             return
         }

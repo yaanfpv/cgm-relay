@@ -190,15 +190,25 @@ public actor EngineSupervisor {
         current = nil
     }
 
+    /// killReapBound is how long stopAndWait waits for the reap after it has
+    /// sent SIGKILL. SIGKILL cannot be caught or ignored and ends a stopped
+    /// child too, so the reap follows at once; this only bounds a wait that
+    /// something unforeseen would otherwise leave open for ever.
+    static let killReapBound: Duration = .seconds(2)
+
     /// stopAndWait stops the engine like stop(), then waits for its process
     /// to be gone, killing it if it is still running after timeout, so the
-    /// caller can end its own process knowing no engine outlives it.
+    /// caller can end its own process knowing no engine outlives it. After
+    /// the kill it waits, up to killReapBound, for the reap of that same
+    /// process; if that runs out it returns without claiming the engine is
+    /// gone.
     public func stopAndWait(timeout: Duration) async {
         let process = current
         stop()
         guard let process else { return }
         if await !process.waitUntilExit(timeout: timeout) {
             process.kill()
+            _ = await process.waitUntilExit(timeout: Self.killReapBound)
         }
     }
 
