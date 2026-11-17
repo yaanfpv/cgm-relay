@@ -234,17 +234,128 @@ private struct TableBinder: PortBinding {
     }
 }
 
-/// Answers as the real binder does and keeps every answer, so a test can
-/// check what the search saw without asking the system again later.
+/// Answers as the real binder does and keeps every answer it was given by
+/// the system, so a test can judge a verdict by what the product's own call
+/// saw instead of asking the system again later. A distortion hands the
+/// product the opposite of what the record shows, to plant a wrong decision.
 private final class RecordingBinder: PortBinding, @unchecked Sendable {
+    enum Distortion { case none, refuseFree, acceptInUse }
+
     let inner: any PortBinding
+    let distortion: Distortion
     private(set) var answers: [(host: String, port: Int, free: Bool)] = []
-    init(inner: any PortBinding) { self.inner = inner }
+    init(inner: any PortBinding, distortion: Distortion = .none) {
+        self.inner = inner
+        self.distortion = distortion
+    }
     func canBind(host: String, port: Int) -> Bool {
         let free = inner.canBind(host: host, port: port)
         answers.append((host, port, free))
-        return free
+        switch distortion {
+        case .none: return free
+        case .refuseFree: return false
+        case .acceptInUse: return true
+        }
     }
+}
+
+private typealias Answer = (host: String, port: Int, free: Bool)
+
+/// What a pass found: a verdict the record backs, a wrong one, or a pass in
+/// which nothing could be proved because every candidate got an in-use answer.
+private enum PassOutcome: Equatable {
+    case correct
+    case inconclusive(String)
+    case wrong(String)
+}
+
+/// Ends a pass the way the suite reports it: a wrong verdict fails, an
+/// inconclusive pass is cancelled with its reason, a correct one just ends.
+private func conclude(_ outcome: PassOutcome) throws {
+    switch outcome {
+    case .correct: return
+    case .wrong(let message): Issue.record("\(message)")
+    case .inconclusive(let reason): try Test.cancel("\(reason)")
+    }
+}
+
+private func describe(port: Int, _ answers: [Answer]) -> String {
+    let mine = answers.filter { $0.port == port }
+    guard !mine.isEmpty else { return "port \(port): no answer" }
+    return "port \(port): " + mine.map { "\($0.host) \($0.free ? "free" : "in use")" }.joined(separator: ", ")
+}
+
+/// Judges one typed-port verdict only by the answers its own call received.
+/// A refusal is wrong only when every recorded answer said free; an
+/// acceptance is wrong when any answer said in use or a host was not asked.
+private func judgeTyped(port: Int, bindHost: String, localIPv4s: [String] = [], refusal: String?, answers: [Answer]) -> (wrong: String?, acceptedFree: Bool, note: String) {
+    let mine = answers.filter { $0.port == port }
+    let note = describe(port: port, mine)
+    let anyInUse = mine.contains { !$0.free }
+    if let refusal {
+        if !anyInUse { return ("port \(port) was refused (\(refusal)) though every recorded answer said free; \(note)", false, note) }
+        if refusal != PortAvailability.inUseMessage(port: port) { return ("port \(port) was refused with \(refusal), not the in-use message; \(note)", false, note) }
+        return (nil, false, note)
+    }
+    if anyInUse { return ("port \(port) was accepted though a recorded answer said in use; \(note)", false, note) }
+    let missing = Set(PortAvailability.hostsToCheck(bindHost: bindHost, localIPv4s: localIPv4s)).subtracting(mine.map { $0.host })
+    if !missing.isEmpty { return ("port \(port) was accepted without asking \(missing.sorted()); \(note)", false, note) }
+    return (nil, true, note)
+}
+
+private func typedOutcome(ports: [Int], bindHost: String, inner: any PortBinding, distortion: RecordingBinder.Distortion = .none) -> PassOutcome {
+    var wrong: [String] = []
+    var accepted = 0
+    var notes: [String] = []
+    for port in ports {
+        let recorder = RecordingBinder(inner: inner, distortion: distortion)
+        let refusal = PortAvailability.typedPortRefusal(port: port, bindHost: bindHost, binder: recorder, reserved: nil)
+        let judged = judgeTyped(port: port, bindHost: bindHost, refusal: refusal, answers: recorder.answers)
+        if let message = judged.wrong { wrong.append(message) }
+        if judged.acceptedFree { accepted += 1 }
+        notes.append(judged.note)
+    }
+    if !wrong.isEmpty { return .wrong(wrong.joined(separator: "; ")) }
+    if accepted == 0 { return .inconclusive("no candidate was answered free: " + notes.joined(separator: "; ")) }
+    return .correct
+}
+
+private func searchOutcome(start: Int, bindHost: String, inner: any PortBinding, distortion: RecordingBinder.Distortion = .none, candidates: Int = PortAvailability.candidateCount) -> PassOutcome {
+    let recorder = RecordingBinder(inner: inner, distortion: distortion)
+    let choice = PortAvailability.firstFreePort(from: start, bindHost: bindHost, binder: recorder, candidates: candidates)
+    let last = min(start + candidates - 1, 65535)
+    let range = start <= last ? Array(start...last) : []
+    let answers = recorder.answers
+    func gotInUse(_ port: Int) -> Bool { answers.contains { $0.port == port && !$0.free } }
+    switch choice {
+    case .free(let chosen):
+        guard range.contains(chosen) else { return .wrong("chose \(chosen), outside \(start)...\(last)") }
+        var problems: [String] = []
+        for port in range where port < chosen && !gotInUse(port) {
+            problems.append("skipped a candidate with no in-use answer; \(describe(port: port, answers))")
+        }
+        let mine = answers.filter { $0.port == chosen }
+        if mine.contains(where: { !$0.free }) { problems.append("chose a port a recorded answer said in use; \(describe(port: chosen, answers))") }
+        let missing = Set(PortAvailability.hostsToCheck(bindHost: bindHost)).subtracting(mine.map { $0.host })
+        if !missing.isEmpty { problems.append("chose \(chosen) without asking \(missing.sorted())") }
+        return problems.isEmpty ? .correct : .wrong(problems.joined(separator: "; "))
+    case .exhausted(let first, let end):
+        if first != start || end != last { return .wrong("exhausted named \(first)...\(end), the range was \(start)...\(last)") }
+        let unproved = range.filter { !gotInUse($0) }
+        if !unproved.isEmpty { return .wrong("gave up though no in-use answer was recorded for \(unproved.map { describe(port: $0, answers) })") }
+        return .inconclusive("every candidate got an in-use answer: " + range.map { describe(port: $0, answers) }.joined(separator: "; "))
+    }
+}
+
+/// Distinct ports the system handed out a moment ago, used only as
+/// candidates: how the product treats them is judged by its own record.
+private func ephemeralCandidates(count: Int) -> [Int]? {
+    var listeners: [HeldListener] = []
+    for _ in 0..<count {
+        guard let next = HeldListener(host: "127.0.0.1") else { return nil }
+        listeners.append(next)
+    }
+    return listeners.map { $0.port }
 }
 
 // Serialized: tests that hold a run of 50 neighbouring ports would otherwise
@@ -421,5 +532,150 @@ struct PortAvailabilityTests {
         #expect(!PortAvailability.isFree(port: 4000, bindHost: "127.0.0.1", binder: table), "a loopback reach is blocked by an all-addresses holder too")
         #expect(PortAvailability.isFree(port: 4001, bindHost: "127.0.0.1", binder: table), "a local address not asked about is not")
         #expect(!PortAvailability.isFree(port: 4001, bindHost: "127.0.0.1", binder: table, localIPv4s: ["192.168.1.5"]))
+    }
+
+    // MARK: Decisions over fixed answers
+
+    @Test("a typed port every address answers free is accepted, after every address was asked", arguments: ["127.0.0.1", "0.0.0.0", "100.101.102.103"])
+    func typedPortAnsweredFreeIsAccepted(_ bindHost: String) {
+        let recorder = RecordingBinder(inner: TableBinder())
+        #expect(PortAvailability.typedPortRefusal(port: 4000, bindHost: bindHost, binder: recorder, reserved: nil, localIPv4s: ["192.168.1.5"]) == nil)
+        #expect(Set(recorder.answers.map { $0.host }) == Set(PortAvailability.hostsToCheck(bindHost: bindHost, localIPv4s: ["192.168.1.5"])))
+    }
+
+    @Test("a typed port any one address answers in use is refused with the in-use message", arguments: ["127.0.0.1", "0.0.0.0", "100.101.102.103"])
+    func typedPortAnsweredInUseOnAnyAddressIsRefused(_ bindHost: String) {
+        let localIPv4s = ["192.168.1.5"]
+        for holder in PortAvailability.hostsToCheck(bindHost: bindHost, localIPv4s: localIPv4s) {
+            let table = TableBinder(taken: [holder: [4000]])
+            #expect(
+                PortAvailability.typedPortRefusal(port: 4000, bindHost: bindHost, binder: table, reserved: nil, localIPv4s: localIPv4s) == PortAvailability.inUseMessage(port: 4000),
+                "in use on \(holder) for reach \(bindHost)"
+            )
+            #expect(PortAvailability.typedPortRefusal(port: 4001, bindHost: bindHost, binder: table, reserved: nil, localIPv4s: localIPv4s) == nil, "another port stays free")
+        }
+    }
+
+    @Test("the reserved status port is refused as the relay's own, without asking any address")
+    func reservedPortIsRefusedWithoutAsking() {
+        for inner in [TableBinder(), TableBinder(allTaken: true)] {
+            let recorder = RecordingBinder(inner: inner)
+            #expect(PortAvailability.typedPortRefusal(port: 4001, bindHost: "127.0.0.1", binder: recorder, reserved: 4001) == PortAvailability.reservedMessage(port: 4001))
+            #expect(recorder.answers.isEmpty)
+        }
+    }
+
+    @Test("the search skips every in-use candidate and returns the first free one", arguments: [0, 1, 2, 10, 48, 49])
+    func firstFreeSkipsInUsePrefix(_ skipped: Int) {
+        let hosts = PortAvailability.hostsToCheck(bindHost: "127.0.0.1")
+        var taken: [String: Set<Int>] = [:]
+        // Every candidate but the one at offset `skipped` is in use, each on
+        // a different address in turn, so that one is the only right answer.
+        for offset in 0..<PortAvailability.candidateCount where offset != skipped {
+            taken[hosts[offset % hosts.count], default: []].insert(4000 + offset)
+        }
+        #expect(PortAvailability.firstFreePort(from: 4000, bindHost: "127.0.0.1", binder: TableBinder(taken: taken)) == .free(4000 + skipped))
+    }
+
+    @Test("when every candidate is in use the search names the first and last")
+    func firstFreeExhausted() {
+        let hosts = PortAvailability.hostsToCheck(bindHost: "127.0.0.1")
+        var taken: [String: Set<Int>] = [:]
+        for offset in 0..<PortAvailability.candidateCount { taken[hosts[offset % hosts.count], default: []].insert(4000 + offset) }
+        #expect(PortAvailability.firstFreePort(from: 4000, bindHost: "127.0.0.1", binder: TableBinder(taken: taken)) == .exhausted(first: 4000, last: 4049))
+        #expect(PortAvailability.firstFreePort(from: 4000, bindHost: "127.0.0.1", binder: TableBinder(allTaken: true)) == .exhausted(first: 4000, last: 4049))
+    }
+
+    // MARK: Real passes, judged by the answers their own call received
+
+    @Test("a free port is accepted, judged by what the call was answered")
+    func realPassFreePort() throws {
+        let ports = try #require(ephemeralCandidates(count: 5))
+        try conclude(typedOutcome(ports: ports, bindHost: "0.0.0.0", inner: binder))
+    }
+
+    @Test("a port whose connections are only closing is accepted, judged by what the call was answered")
+    func realPassClosingPort() throws {
+        let ports = (0..<5).compactMap { _ in portInTimeWait() }
+        try #require(!ports.isEmpty)
+        try conclude(typedOutcome(ports: ports, bindHost: "0.0.0.0", inner: binder))
+    }
+
+    @Test("a free default port is chosen, judged by what the search was answered")
+    func realPassDefaultFree() throws {
+        let start = try #require(ephemeralCandidates(count: 1)).first!
+        try conclude(searchOutcome(start: start, bindHost: "127.0.0.1", inner: binder))
+    }
+
+    @Test("a held default port is skipped, judged by what the search was answered")
+    func realPassDefaultHeld() throws {
+        let held = try #require(HeldListener.run(host: "127.0.0.1", count: 2))
+        try conclude(searchOutcome(start: held[0].port, bindHost: "127.0.0.1", inner: binder))
+    }
+
+    // MARK: A pass with nothing to prove is cancelled
+
+    @Test("a typed pass in which every candidate got an in-use answer is inconclusive and ends cancelled with the candidates named")
+    func inconclusiveTypedPassIsCancelled() throws {
+        let held = try #require(HeldListener.run(host: "127.0.0.1", count: 2))
+        let outcome = typedOutcome(ports: held.map { $0.port }, bindHost: "127.0.0.1", inner: binder)
+        guard case .inconclusive(let reason) = outcome else {
+            Issue.record("expected an inconclusive pass, got \(outcome)")
+            return
+        }
+        for listener in held { #expect(reason.contains("port \(listener.port): 127.0.0.1 in use")) }
+        try conclude(outcome)
+    }
+
+    @Test("a search pass in which every candidate got an in-use answer is inconclusive and ends cancelled with the candidates named")
+    func inconclusiveSearchPassIsCancelled() throws {
+        let held = try #require(HeldListener.run(host: "127.0.0.1", count: 3))
+        let outcome = searchOutcome(start: held[0].port, bindHost: "127.0.0.1", inner: binder, candidates: 3)
+        guard case .inconclusive(let reason) = outcome else {
+            Issue.record("expected an inconclusive pass, got \(outcome)")
+            return
+        }
+        for listener in held { #expect(reason.contains("port \(listener.port): 127.0.0.1 in use")) }
+        try conclude(outcome)
+    }
+
+    // MARK: A planted wrong decision turns the pass red
+
+    private func expectWrong(_ outcome: PassOutcome, _ what: String) {
+        guard case .wrong = outcome else {
+            Issue.record("\(what): expected the pass to fail, got \(outcome)")
+            return
+        }
+    }
+
+    @Test("a binder that makes the product refuse a port its record shows free fails the typed pass")
+    func plantedRefusalOfFreePortFailsTypedPass() {
+        let free = TableBinder()
+        #expect(typedOutcome(ports: [4000, 4001], bindHost: "127.0.0.1", inner: free) == .correct, "control: the honest product passes")
+        expectWrong(typedOutcome(ports: [4000, 4001], bindHost: "127.0.0.1", inner: free, distortion: .refuseFree), "refusing a port recorded free")
+    }
+
+    @Test("a binder that makes the product accept a port its record shows in use fails the typed pass")
+    func plantedAcceptanceOfInUsePortFailsTypedPass() throws {
+        let held = try #require(HeldListener(host: "127.0.0.1"))
+        guard case .inconclusive = typedOutcome(ports: [held.port], bindHost: "127.0.0.1", inner: binder) else {
+            Issue.record("control: the honest product refusing a held port should leave the pass inconclusive")
+            return
+        }
+        expectWrong(typedOutcome(ports: [held.port], bindHost: "127.0.0.1", inner: binder, distortion: .acceptInUse), "accepting a port recorded in use")
+    }
+
+    @Test("a binder that makes the search skip a candidate its record shows free fails the search pass")
+    func plantedSkipOfFreeCandidateFailsSearchPass() {
+        let free = TableBinder()
+        #expect(searchOutcome(start: 4000, bindHost: "127.0.0.1", inner: free) == .correct, "control: the honest search passes")
+        expectWrong(searchOutcome(start: 4000, bindHost: "127.0.0.1", inner: free, distortion: .refuseFree), "skipping candidates recorded free")
+    }
+
+    @Test("a binder that makes the search choose a candidate its record shows in use fails the search pass")
+    func plantedChoiceOfInUseCandidateFailsSearchPass() {
+        let taken = TableBinder(taken: ["127.0.0.1": [4000]])
+        #expect(searchOutcome(start: 4000, bindHost: "127.0.0.1", inner: taken) == .correct, "control: the honest search passes")
+        expectWrong(searchOutcome(start: 4000, bindHost: "127.0.0.1", inner: taken, distortion: .acceptInUse), "choosing a candidate recorded in use")
     }
 }
