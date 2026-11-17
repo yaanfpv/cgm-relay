@@ -169,15 +169,70 @@ struct ChildEndingTests {
 //
 //     enum ChildSurvivors {
 //         struct Child: Equatable, Sendable { let pid: Int32; let start: String? }
-//         static func liveChildren() -> [Child]                       // direct children of this process, read from the kernel
+//         static func census(parent: pid_t, listPids: ListPids = system) -> Census   // typed read, below
 //         static func new(since before: [Child], now: [Child]) -> [Child]
 //         static func recordSurvivors(_ survivors: [Child])           // one failure per survivor naming its pid and start
 //         final class Accounting: @unchecked Sendable {
-//             init(census: @escaping @Sendable () -> [Child])
-//             func enter()                                            // the first enter takes the baseline census
-//             func exit() -> [Child]                                  // the last exit returns the children new since the baseline, others return []
+//             init(census: @escaping @Sendable () -> Census)
+//             func enter()                                            // the first enter takes the baseline census; a failed one fails the test naming it
+//             func exit() -> [Child]                                  // the last exit returns the children new since the baseline, others return []; a failed census fails the test naming it
 //         }
 //     }
+//
+// The typed reads (Support/ChildSurvivors.swift) the failed-read checks below are written against:
+//
+//     enum Census: Equatable, Sendable { case listed([pid_t]); case failed(Int32) }   // failed carries errno
+//     // ListPids has proc_listpids's own shape and sets errno the way libproc does: 0 with errno set is a failure.
+//     typealias ListPids = @Sendable (_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer?, _ byteCount: Int32) -> Int32
+//
+//     enum TableRead: Equatable { case present(ProcessRecord); case absent; case unreadable(Int32) }
+//     // ProcPidInfo has proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buffer, size)'s shape; 0 with errno ESRCH is absent.
+//     typealias ProcPidInfo = @Sendable (_ pid: pid_t, _ buffer: UnsafeMutableRawPointer, _ byteCount: Int32) -> Int32
+//     func readProcessTable(_ pid: pid_t, pidInfo: ProcPidInfo = system) -> TableRead
+//
+//     enum DescendantCheck {
+//         enum Verdict: Equatable { case stillThere, gone, unreadable(Int32) }
+//         static func verdict(_ read: TableRead, of start: ProcessStart) -> Verdict
+//         // Polls `read` until the descendant with `start` is gone. Returns at the first unreadable read without
+//         // reading again, recording a failure that names the pid and "errno <code>". Returns true only for gone.
+//         @discardableResult
+//         static func requireGone(pid: pid_t, start: ProcessStart, read: (pid_t) -> TableRead, milliseconds: Int32 = TestChild.hangCeilingMilliseconds) -> Bool
+//     }
+//
+// The sweep this story owes (every observation that can fail and every control whose verdict rests on a child's own
+// timer, in the three process suites, this file and Tests/Support), as lines at head a76733a. Each member is fixed in the
+// same change; the four controls and the three readers below are checked by the cases in this file and in RealProcessLauncherTests.swift, the rest by reading.
+//
+//   Observations read as an end or as no survivors:
+//     Support/ChildSurvivors.swift:20-36   liveChildren: the failure branch (L25) is unreachable, libproc returns 0 on failure,
+//                                          so a failed census is an empty list. Becomes ChildSurvivors.census(parent:).
+//     Support/ChildSurvivors.swift:62-88   Accounting: census is () -> [Child], so a failed baseline (L74) or exit (L85) reads
+//                                          as empty. Takes the typed census.
+//     Support/ChildSurvivors.swift:91      shared: built from liveChildren().
+//     ChildEndingTests.swift:616-623       censusSeesAHeldChild: its `!contains` (L622) passes on a failed census.
+//     RealProcessLauncherTests.swift:449   the descendant's record is required, so nil fails; reads the typed table read.
+//     RealProcessLauncherTests.swift:458-465  the descendants poll: nil (unreadable or absent) made stillThere false.
+//     Sources/.../LaunchedChildSignaller.swift:122-131  systemProcessTable: returns nil for absent and unreadable alike. The
+//                                          product reader is not changed here; a test-support readProcessTable(_:) sits beside it.
+//     Support/ChildSurvivors.swift:38-43   startText: nil for a failed read and for a zombie; a name only, not a verdict (recorded, low).
+//     Support/TestChild.swift:178-181, 187-193, 199-203, Support/ChildCleanup.swift:40-42  read systemProcessTable: a nil read
+//                                          gives no record, a kill(pid, 0) fallback, or no send. They fail closed; checked, not members.
+//   Controls that rest on a child's own timer:
+//     ChildEndingTests.swift:535-568       unboundIdentityIsNeverSignalled (three cases): /bin/sleep 2 (L540-541), verdict L567.
+//     ChildEndingTests.swift:817-837       refusedSendIsNotConfirmed: /bin/sleep 2 (L823), verdict L836.
+//     ChildEndingTests.swift:469-480       realHeldChildThatStaysIsNotConfirmed: HeldSleeper's sleep 30 (L216), verdict L479.
+//     RealProcessLauncherTests.swift:411-466  signalReachesTheChildsDescendants: the descendant is `sleep 30 &` (L415), so a
+//                                          leader-only send would still end it inside the poll's window.
+//     BoundedProcessRunnerTests.swift:75-97 and 340-360  timeoutEndsTheProcess (both): perl sleep 30 then a marker; the
+//                                          marker's absence holds for 30 s whether or not the runner ended the child. It needs
+//                                          the child's end confirmed as well. Not made executable here: the runner boundary
+//                                          gives the test no handle on the child to read its end from.
+//   Checked and left (not members): BoundedProcessRunnerTests.swift:230-239 lstart (nil fails closed through ChildCleanup.endRecorded
+//     L98); :163-215 and :245-300 (end the child through a recorded identity; not timer-bound); ChildEndingTests.swift:494-503
+//     (the helper is ended by TERM and KILL); :681-694 endAsParent; RealProcessLauncherTests.swift:143-190, 720-789.
+//   Recorded as leads, not this story: EngineSupervisorTests.swift:204, 222, 240, 277 (30 ms negative windows),
+//     RealProcessLauncherTests.swift:215 and :235 (the 3 s ready window), RealProcessLauncherTests.swift:576-594
+//     launcherStopsReachARunningChild (no ceiling of its own).
 //
 // plus a suite trait, `.noSurvivingChildren`, built on Accounting, that every
 // suite in the three process test files carries.
@@ -468,15 +523,18 @@ struct HeldChildCleanupTests {
 
     @Test("a real held child that is sent nothing is not confirmed ended and is still alive afterwards")
     func realHeldChildThatStaysIsNotConfirmed() throws {
-        let sleeper = try HeldSleeper()
-        defer { #expect(sleeper.endNow(), "test child \(sleeper.pid) may still be running, it was not confirmed ended") }
+        // A child blocked on input this test holds: it has no end of its own, so it
+        // is still there however late the caller reads it. The test ends it by releasing the input.
+        let input = HeldInput()
+        let held = try HeldChild.startBlocked(on: input)
+        defer { held.endByReleasing(input) }
         let outcome = ChildCleanup.endHeld(
-            pid: sleeper.pid, start: Self.start, alreadyEnded: false,
-            send: {}, waitForEnd: { sleeper.waitForEnd(milliseconds: $0) },
+            pid: held.processIdentifier, start: Self.start, alreadyEnded: false,
+            send: {}, waitForEnd: { held.waitReaped(milliseconds: $0) },
             waitingMilliseconds: Self.shortBound
         )
-        #expect(outcome == .notConfirmed(pid: sleeper.pid, start: Self.start))
-        #expect(sleeper.isRunning)
+        #expect(outcome == .notConfirmed(pid: held.processIdentifier, start: Self.start))
+        #expect(!held.hasExited, "a child that was sent nothing ended")
     }
 }
 
@@ -516,15 +574,13 @@ struct ObservedHelperTests {
     private final class IdentityGate: @unchecked Sendable {
         private let lock = NSLock()
         private var reads = 0
-        private var other = true
         func read(_ pid: pid_t, real: ProcessRecord?) -> ProcessRecord? {
             lock.withLock {
                 reads += 1
-                guard reads > 1, other, let real else { return real }
+                guard reads > 1, let real else { return real }
                 return ProcessRecord(pid: real.pid, parentPID: real.parentPID, start: ProcessStart(seconds: real.start.seconds, microseconds: real.start.microseconds + 1))
             }
         }
-        func showRealAgain() { lock.withLock { other = false } }
     }
 
     enum UnboundIdentity: String, Sendable, CaseIterable, CustomTestStringConvertible {
@@ -532,13 +588,15 @@ struct ObservedHelperTests {
         var testDescription: String { rawValue }
     }
 
-    @Test("a helper whose identity does not hold is sent nothing and is not confirmed ended, and its sleep is ended through the test's own handle", arguments: UnboundIdentity.allCases)
+    @Test("a helper whose identity does not hold is sent nothing and is not confirmed ended, and it is ended by the test releasing its input", arguments: UnboundIdentity.allCases)
     func unboundIdentityIsNeverSignalled(_ identity: UnboundIdentity) {
         let gate = IdentityGate()
-        // The sleep ends by itself after 2 seconds, so it cannot outlive the test
-        // whatever happens here, and the short bound below always expires first.
+        // The helper reads an input this test holds, so it has no end of its own: it
+        // stays alive however late the caller reads it, and ends only when the test
+        // releases the input. Its signaller refuses every send here, so release is the way out.
+        let input = HeldInput()
         let observation = ObservedHelper.read(
-            executable: "/bin/sleep", arguments: ["2"], waitingMilliseconds: 100,
+            executable: "/bin/cat", arguments: [], waitingMilliseconds: 100, standardInput: input.childEnd,
             readProcessTable: { pid in
                 let real = LaunchedChildSignaller.systemProcessTable(pid)
                 switch identity {
@@ -548,19 +606,14 @@ struct ObservedHelperTests {
                 }
             }
         )
+        input.closeChildEnd()
         let helper = observation.helper
-        // Ended through the test's own handle on every path from here.
+        // Ended by releasing the input on every path from here.
         defer {
-            if let helper {
-                gate.showRealAgain()
-                ChildCleanup.endHeldRecordingNotConfirmed(
-                    pid: helper.processIdentifier, start: helper.birthStart, alreadyEnded: helper.hasReportedExit,
-                    send: { helper.send(SIGKILL) },
-                    waitForEnd: { helper.waitReaped(milliseconds: $0) },
-                    waitingMilliseconds: TestChild.hangCeilingMilliseconds
-                )
-            }
+            if let helper { helper.endByReleasing(input) } else { input.release() }
         }
+        // The caller is held past the lifetime the old two-second child had, then reads.
+        CallerHold.pastTheOldTwoSecondChild()
         #expect(helper != nil && observation.helperPid == helper?.processIdentifier)
         #expect(observation.output == nil)
         #expect(!observation.helperEnded, "a helper whose end was not seen was reported ended")
@@ -577,16 +630,20 @@ struct ObservedHelperTests {
 
 @Suite("ChildSurvivors names every child the suites started and left alive", .noSurvivingChildren)
 struct ChildSurvivorsTests {
-    private final class Census: @unchecked Sendable {
+    /// The census the accounting reads, set by the test. Its pids are far above any
+    /// live process's, so none has a start time to read and equal pids are equal children.
+    private final class CensusBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var stored: [ChildSurvivors.Child] = []
-        var current: [ChildSurvivors.Child] {
+        private var stored: [Int32] = []
+        var current: [Int32] {
             get { lock.withLock { stored } }
             set { lock.withLock { stored = newValue } }
         }
+        var census: Census { .listed(current) }
     }
 
     private static func child(_ pid: Int32) -> ChildSurvivors.Child { ChildSurvivors.Child(pid: pid, start: "start-\(pid)") }
+    private static func fakePid(_ n: Int32) -> Int32 { 90_000 + n }
 
     @Test("children new since the baseline are survivors, ones that were there before are not")
     func newChildrenAreSurvivors() {
@@ -617,37 +674,53 @@ struct ChildSurvivorsTests {
     func censusSeesAHeldChild() throws {
         let sleeper = try HeldSleeper()
         defer { #expect(sleeper.endNow(), "test child \(sleeper.pid) may still be running, it was not confirmed ended") }
-        #expect(ChildSurvivors.liveChildren().contains { $0.pid == sleeper.pid }, "held child \(sleeper.pid) is not in the census")
+        func listed(_ when: String) -> [pid_t] {
+            switch ChildSurvivors.census(parent: getpid()) {
+            case .listed(let pids): return pids
+            case .failed(let code):
+                Issue.record("the census could not be read (errno \(code)) \(when), so child \(sleeper.pid) could not be counted")
+                return []
+            }
+        }
+        let whileLive = listed("while the child lives")
+        #expect(whileLive.contains(sleeper.pid), "held child \(sleeper.pid) is not in the census")
         #expect(sleeper.endNow())
-        #expect(!ChildSurvivors.liveChildren().contains { $0.pid == sleeper.pid }, "ended child \(sleeper.pid) is still in the census")
+        // An empty answer from a failed read must not stand for "not in the census".
+        let afterEnd = ChildSurvivors.census(parent: getpid())
+        guard case .listed(let pids) = afterEnd else {
+            Issue.record("the census could not be read after the end (\(afterEnd)), so the ended child \(sleeper.pid) could not be counted gone")
+            return
+        }
+        #expect(!pids.contains(sleeper.pid), "ended child \(sleeper.pid) is still in the census")
     }
 
     @Test("the check runs when the last scope exits, against the baseline the first scope took")
     func accountingChecksWhenTheLastScopeExits() {
-        let census = Census()
-        census.current = [Self.child(1)]
-        let accounting = ChildSurvivors.Accounting(census: { census.current })
+        let box = CensusBox()
+        let (a, b, c) = (Self.fakePid(1), Self.fakePid(2), Self.fakePid(3))
+        box.current = [a]
+        let accounting = ChildSurvivors.Accounting(census: { box.census })
         accounting.enter()
-        census.current = [Self.child(1), Self.child(2)]
+        box.current = [a, b]
         accounting.enter()
-        census.current = [Self.child(1), Self.child(2), Self.child(3)]
+        box.current = [a, b, c]
         #expect(accounting.exit().isEmpty, "the check ran while another suite was still running")
-        #expect(accounting.exit() == [Self.child(2), Self.child(3)])
+        #expect(accounting.exit().map(\.pid) == [b, c])
     }
 
     @Test("children that ended before the last scope exits are not survivors, and a later round starts from a new baseline")
     func accountingSeesOnlyWhatIsStillThere() {
-        let census = Census()
-        let accounting = ChildSurvivors.Accounting(census: { census.current })
+        let box = CensusBox()
+        let accounting = ChildSurvivors.Accounting(census: { box.census })
         accounting.enter()
-        census.current = [Self.child(5)]
-        census.current = []
+        box.current = [Self.fakePid(5)]
+        box.current = []
         #expect(accounting.exit().isEmpty)
 
-        census.current = [Self.child(6)]
+        box.current = [Self.fakePid(6)]
         accounting.enter()
-        census.current = [Self.child(6), Self.child(7)]
-        #expect(accounting.exit() == [Self.child(7)])
+        box.current = [Self.fakePid(6), Self.fakePid(7)]
+        #expect(accounting.exit().map(\.pid) == [Self.fakePid(7)])
     }
 }
 
@@ -819,21 +892,285 @@ struct HeldChildSendGuardTests {
     @Test("a held child whose identity does not hold is sent nothing by end, and says so with its pid and birth start")
     func refusedSendIsNotConfirmed() throws {
         // A replacement shown at birth: the signaller accepts no identity and refuses every send.
-        let held = try HeldChild.start(
-            executable: "/bin/sleep", arguments: ["2"],
+        // The child reads an input this test holds, so it has no end of its own; the test ends it by releasing the input.
+        let input = HeldInput()
+        let held = try HeldChild.startBlocked(
+            on: input,
             readProcessTable: { pid in ProcessRecord(pid: pid, parentPID: getpid() + 1, start: ProcessStart(seconds: 1, microseconds: 0)) }
         )
-        // The sleep ends by itself after 2 seconds; its reap is confirmed here on every path.
-        defer {
-            ChildCleanup.endHeldRecordingNotConfirmed(
-                pid: held.processIdentifier, start: held.birthStart, alreadyEnded: held.hasReportedExit,
-                send: {}, waitForEnd: { held.waitReaped(milliseconds: $0) },
-                waitingMilliseconds: TestChild.hangCeilingMilliseconds
-            )
-        }
+        defer { held.endByReleasing(input) }
         let outcome = held.end(signals: [SIGTERM, SIGKILL], waitingMilliseconds: 100)
+        // The caller is held past the lifetime the old two-second child had, then reads.
+        CallerHold.pastTheOldTwoSecondChild()
         #expect(outcome == .notConfirmed(pid: held.processIdentifier, start: held.birthStart))
         #expect(!held.hasExited, "a child whose identity did not hold was ended anyway")
+    }
+}
+
+// MARK: - A read that could not be taken is never an end
+
+/// issueNames matches a recorded failure whose comment contains every piece.
+private func issueNames(_ pieces: String...) -> @Sendable (Issue) -> Bool {
+    { issue in
+        issue.comments.contains { comment in
+            let text = String(describing: comment)
+            return pieces.allSatisfy { text.contains($0) }
+        }
+    }
+}
+
+/// KernelList stands in for proc_listpids(PROC_PPID_ONLY, parent, ...) the way
+/// libproc behaves: a call with no buffer is a size query that answers with
+/// room to spare, a call with a buffer fills it with as many pids as fit, and a
+/// failure returns 0 with errno set. A success leaves errno exactly as it was.
+private final class KernelList: @unchecked Sendable {
+    struct Call: Equatable { let type: UInt32; let typeinfo: UInt32; let hadBuffer: Bool }
+
+    private let lock = NSLock()
+    private var recorded: [Call] = []
+    let pids: [pid_t]
+    /// An errno to fail the size query with, or nil.
+    var failSizeQuery: Int32?
+    /// An errno to fail a read into a buffer with, or nil.
+    var failRead: Int32?
+    /// True when the size query answers with room for only four pids, so a
+    /// reader that trusts it fills its buffer and must read again, larger.
+    var sizeQueryRunsShort = false
+
+    init(pids: [pid_t]) { self.pids = pids }
+
+    var calls: [Call] { lock.withLock { recorded } }
+
+    var listPids: ChildSurvivors.ListPids {
+        { [self] type, typeinfo, buffer, byteCount in call(type, typeinfo, buffer, byteCount) }
+    }
+
+    private func call(_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer?, _ byteCount: Int32) -> Int32 {
+        lock.withLock { recorded.append(Call(type: type, typeinfo: typeinfo, hadBuffer: buffer != nil)) }
+        let width = Int32(MemoryLayout<pid_t>.size)
+        guard let buffer else {
+            if let code = failSizeQuery { errno = code; return 0 }
+            return sizeQueryRunsShort ? 4 * width : Int32(pids.count + 20) * width
+        }
+        if let code = failRead { errno = code; return 0 }
+        let fits = min(Int(byteCount / width), pids.count)
+        let out = buffer.bindMemory(to: pid_t.self, capacity: max(fits, 1))
+        for index in 0..<fits { out[index] = pids[index] }
+        return Int32(fits) * width
+    }
+}
+
+/// KernelRecord stands in for proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buffer, size).
+private enum KernelRecord {
+    static let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+
+    /// a record for pid that fills the buffer and answers with its full size.
+    static func answering(pid: pid_t, parent: pid_t, seconds: UInt64, microseconds: UInt64) -> ProcPidInfo {
+        { _, buffer, _ in
+            var info = proc_bsdinfo()
+            info.pbi_pid = UInt32(pid)
+            info.pbi_ppid = UInt32(parent)
+            info.pbi_start_tvsec = seconds
+            info.pbi_start_tvusec = microseconds
+            buffer.bindMemory(to: proc_bsdinfo.self, capacity: 1).pointee = info
+            return size
+        }
+    }
+
+    /// a failed read: 0 with errno set.
+    static func failing(errno code: Int32) -> ProcPidInfo { { _, _, _ in errno = code; return 0 } }
+
+    /// 0 with errno untouched.
+    static let silentZero: ProcPidInfo = { _, _, _ in 0 }
+
+    /// a positive count short of the record.
+    static let shortRead: ProcPidInfo = { _, _, _ in size - 8 }
+}
+
+/// ScriptedTable gives a descendant's process-table reads one by one and counts
+/// them. Past the end of the script it says the process is absent, so a
+/// consumer that reads on after an unreadable answer sees the end it must not
+/// have gone looking for.
+private final class ScriptedTable: @unchecked Sendable {
+    private let lock = NSLock()
+    private let script: [TableRead]
+    private var next = 0
+    init(_ script: [TableRead]) { self.script = script }
+    var reads: Int { lock.withLock { next } }
+    func read(_ pid: pid_t) -> TableRead {
+        lock.withLock {
+            defer { next += 1 }
+            return next < script.count ? script[next] : .absent
+        }
+    }
+}
+
+/// CensusScript answers one census per call, in order.
+private final class CensusScript: @unchecked Sendable {
+    private let lock = NSLock()
+    private let script: [Census]
+    private var position = 0
+    init(_ script: [Census]) { self.script = script }
+    func next() -> Census {
+        lock.withLock {
+            defer { position += 1 }
+            return position < script.count ? script[position] : .listed([])
+        }
+    }
+}
+
+@Suite("A failed read is never counted as an end or as no survivors")
+struct FailedReadsAreNotEndsTests {
+    private static let parent: pid_t = 4_242
+    private static let unreadableCode: Int32 = 4_243
+
+    // MARK: The census
+
+    @Test("a census whose read failed after the size query is failed with the errno, never listed empty")
+    func censusFailedOnTheSizeQuery() {
+        let kernel = KernelList(pids: [90_001])
+        kernel.failSizeQuery = EPERM
+        #expect(ChildSurvivors.census(parent: Self.parent, listPids: kernel.listPids) == .failed(EPERM))
+    }
+
+    @Test("a census whose read failed when the buffer was read is failed with the errno, never listed empty")
+    func censusFailedOnTheRead() {
+        let kernel = KernelList(pids: [90_001, 90_002])
+        kernel.failRead = ENOMEM
+        #expect(ChildSurvivors.census(parent: Self.parent, listPids: kernel.listPids) == .failed(ENOMEM))
+    }
+
+    @Test("a genuine empty list is listed empty, even with an old errno left in the thread")
+    func genuineEmptyCensusIsListedEmpty() {
+        let kernel = KernelList(pids: [])
+        errno = EPERM
+        #expect(ChildSurvivors.census(parent: Self.parent, listPids: kernel.listPids) == .listed([]))
+        errno = 0
+        #expect(ChildSurvivors.census(parent: Self.parent, listPids: kernel.listPids) == .listed([]))
+    }
+
+    @Test("a census lists the children it was given and asks the kernel for the children of the parent named")
+    func censusListsTheChildrenOfTheParentNamed() {
+        let kernel = KernelList(pids: [90_001, 90_002, 90_003])
+        #expect(ChildSurvivors.census(parent: Self.parent, listPids: kernel.listPids) == .listed([90_001, 90_002, 90_003]))
+        #expect(!kernel.calls.isEmpty)
+        for call in kernel.calls {
+            #expect(call.type == UInt32(PROC_PPID_ONLY))
+            #expect(call.typeinfo == UInt32(Self.parent))
+        }
+    }
+
+    @Test("a read that fills its buffer is read again larger, so a long list is listed whole")
+    func censusFillingTheBufferIsReadAgainLarger() {
+        let many = (1...100).map { pid_t(90_000 + $0) }
+        let kernel = KernelList(pids: many)
+        kernel.sizeQueryRunsShort = true
+        #expect(ChildSurvivors.census(parent: Self.parent, listPids: kernel.listPids) == .listed(many))
+    }
+
+    @Test("an accounting whose baseline census failed fails the test naming the failed read")
+    func failedBaselineIsNamed() {
+        let accounting = ChildSurvivors.Accounting(census: { .failed(Self.unreadableCode) })
+        withKnownIssue(
+            "the baseline census could not be read",
+            { accounting.enter() },
+            matching: issueNames("errno \(Self.unreadableCode)", "could not be read")
+        )
+    }
+
+    @Test("an accounting whose census at the last exit failed fails the test naming the failed read, and reports no survivors only from a census it could read")
+    func failedExitCensusIsNamed() {
+        // The baseline reads; the census at the last exit fails.
+        let script = CensusScript([.listed([90_001]), .failed(Self.unreadableCode)])
+        let accounting = ChildSurvivors.Accounting(census: { script.next() })
+        accounting.enter()
+        withKnownIssue(
+            "the census at the last exit could not be read",
+            { _ = accounting.exit() },
+            matching: issueNames("errno \(Self.unreadableCode)", "could not be read")
+        )
+    }
+
+    @Test("an accounting whose censuses are genuinely empty reports no survivors and records nothing")
+    func genuineEmptyCensusesAreNoSurvivors() {
+        let accounting = ChildSurvivors.Accounting(census: { .listed([]) })
+        accounting.enter()
+        #expect(accounting.exit().isEmpty)
+    }
+
+    // MARK: The process-table read
+
+    @Test("a full record is present, whatever errno an earlier call left in the thread")
+    func fullRecordIsPresent() {
+        errno = ESRCH
+        let read = readProcessTable(9_001, pidInfo: KernelRecord.answering(pid: 9_001, parent: 77, seconds: 1_700_000_000, microseconds: 5))
+        #expect(read == .present(ProcessRecord(pid: 9_001, parentPID: 77, start: ProcessStart(seconds: 1_700_000_000, microseconds: 5))))
+    }
+
+    @Test("no such process is absent")
+    func noSuchProcessIsAbsent() {
+        #expect(readProcessTable(9_001, pidInfo: KernelRecord.failing(errno: ESRCH)) == .absent)
+    }
+
+    @Test("any other failure is unreadable with its errno, never absent", arguments: [EPERM, ENOMEM, EINVAL])
+    func otherFailuresAreUnreadable(_ code: Int32) {
+        #expect(readProcessTable(9_001, pidInfo: KernelRecord.failing(errno: code)) == .unreadable(code))
+    }
+
+    @Test("a short read is unreadable, never present and never absent")
+    func shortReadIsUnreadable() {
+        guard case .unreadable = readProcessTable(9_001, pidInfo: KernelRecord.shortRead) else {
+            Issue.record("a short read was not reported unreadable")
+            return
+        }
+    }
+
+    @Test("a 0 with no errno of its own is unreadable even when an old ESRCH is left in the thread")
+    func silentZeroIsNotAbsent() {
+        errno = ESRCH
+        guard case .unreadable = readProcessTable(9_001, pidInfo: KernelRecord.silentZero) else {
+            Issue.record("a 0 that set no errno was read as absent from an old errno")
+            return
+        }
+    }
+
+    // MARK: The descendants check
+
+    private static let descendantPID: pid_t = 98_765
+    private static let descendantStart = ProcessStart(seconds: 1_700_000_000, microseconds: 5)
+    private static func record(_ start: ProcessStart) -> ProcessRecord { ProcessRecord(pid: descendantPID, parentPID: 1, start: start) }
+
+    @Test("the verdict on one read: the same start is still there, another start or no process is gone, an unreadable read is never gone")
+    func verdictOnOneRead() {
+        let same = Self.descendantStart
+        let other = ProcessStart(seconds: same.seconds, microseconds: same.microseconds + 1)
+        #expect(DescendantCheck.verdict(.present(Self.record(same)), of: same) == .stillThere)
+        #expect(DescendantCheck.verdict(.present(Self.record(other)), of: same) == .gone)
+        #expect(DescendantCheck.verdict(.absent, of: same) == .gone)
+        #expect(DescendantCheck.verdict(.unreadable(EPERM), of: same) == .unreadable(EPERM))
+        #expect(DescendantCheck.verdict(.unreadable(0), of: same) == .unreadable(0))
+    }
+
+    @Test("a descendant that is still there and then absent is counted gone, and nothing is recorded")
+    func absentDescendantIsGone() {
+        let table = ScriptedTable([.present(Self.record(Self.descendantStart)), .present(Self.record(Self.descendantStart)), .absent])
+        let gone = DescendantCheck.requireGone(pid: Self.descendantPID, start: Self.descendantStart, read: table.read)
+        #expect(gone)
+        #expect(table.reads == 3)
+    }
+
+    @Test("a descendant whose record cannot be read is not counted gone: the check stops at that read, names the pid and the errno")
+    func unreadableDescendantIsNotGone() {
+        // After the unreadable read the script says absent. A check that reads on would count the descendant gone.
+        let table = ScriptedTable([.present(Self.record(Self.descendantStart)), .unreadable(EPERM)])
+        var gone: Bool?
+        withKnownIssue(
+            "the descendant's record could not be read",
+            { gone = DescendantCheck.requireGone(pid: Self.descendantPID, start: Self.descendantStart, read: table.read) },
+            matching: issueNames("\(Self.descendantPID)", "errno \(EPERM)")
+        )
+        #expect(gone == false, "an unreadable record was counted as an end")
+        #expect(table.reads == 2, "the check read on after a record it could not read")
     }
 }
 

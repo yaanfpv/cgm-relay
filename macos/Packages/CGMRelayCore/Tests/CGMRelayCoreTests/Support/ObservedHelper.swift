@@ -47,6 +47,8 @@ enum ObservedHelper {
         }
     }
 
+    /// `standardInput` is a descriptor the caller holds (a HeldInput's read end)
+    /// for a helper that must stay alive until the caller releases it.
     /// `readProcessTable` is the read the helper's signaller binds its
     /// identity with; tests pass one that shows a replacement or nothing, to
     /// check that no signal is sent on an identity that does not hold.
@@ -54,6 +56,7 @@ enum ObservedHelper {
         executable: String,
         arguments: [String],
         waitingMilliseconds: Int32,
+        standardInput: Int32? = nil,
         readProcessTable: @escaping LaunchedChildSignaller.ProcessTableReader = LaunchedChildSignaller.systemProcessTable
     ) -> Observation {
         let pipe = Pipe()
@@ -61,6 +64,7 @@ enum ObservedHelper {
         do {
             helper = try HeldChild.start(
                 executable: executable, arguments: arguments,
+                standardInput: standardInput,
                 standardOutput: pipe.fileHandleForWriting.fileDescriptor,
                 readProcessTable: readProcessTable
             )

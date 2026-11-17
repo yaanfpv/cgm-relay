@@ -410,11 +410,18 @@ struct RealProcessLauncherTests {
     @Test("a stop ends what the child started as well: it leads its own group and the signal goes to the group")
     func signalReachesTheChildsDescendants() throws {
         let outputPipe = Pipe()
+        // The background process reads an input this test holds (descriptor 3 of the
+        // shell, since a background command's own standard input is /dev/null), so it
+        // has no end of its own: it ends only when the stop reaches it, or when the
+        // test releases the input. A stop that reached only the leader leaves it there.
+        let input = HeldInput()
         let leader = try HeldChild.start(
             executable: "/bin/sh",
-            arguments: ["-c", "sleep 30 & echo $!; wait"],
+            arguments: ["-c", "exec 3<&0; cat <&3 & echo $!; wait"],
+            standardInput: input.childEnd,
             standardOutput: outputPipe.fileHandleForWriting.fileDescriptor
         )
+        input.closeChildEnd()
         let pid = leader.processIdentifier
         // Registered right after the start, on every outcome. The shell blocks in
         // `wait`, so the leader stays unreaped and the group, which ChildSpawner
@@ -425,7 +432,7 @@ struct RealProcessLauncherTests {
         defer {
             ChildCleanup.endHeldRecordingNotConfirmed(
                 pid: pid, start: leader.birthStart, alreadyEnded: leader.hasReportedExit,
-                send: { leader.send(SIGKILL) },
+                send: { leader.send(SIGKILL); input.release() },
                 waitForEnd: { leader.waitReaped(milliseconds: $0) },
                 waitingMilliseconds: TestChild.hangCeilingMilliseconds
             )
@@ -446,23 +453,25 @@ struct RealProcessLauncherTests {
         try #require(gotLine.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success, "the child never reported its background process")
         let descendantPID = try #require(pid_t(line.value.trimmingCharacters(in: .whitespacesAndNewlines)), "child reported \"\(line.value)\"")
         // Reads only, to check the premise of the group send; nothing is signalled by them.
-        let descendant = try #require(LaunchedChildSignaller.systemProcessTable(descendantPID), "no record for the child's background process \(descendantPID)")
+        // A record that cannot be read is not the same as none: either one fails the test, naming which.
+        let descendantRead = readProcessTable(descendantPID)
+        guard case .present(let descendant) = descendantRead else {
+            Issue.record("no record for the child's background process \(descendantPID): \(descendantRead)")
+            return
+        }
         try #require(descendant.parentPID == pid, "the background process \(descendantPID) is not the child's")
         try #require(getpgid(descendantPID) == pid, "the background process \(descendantPID) is not in the child's group")
 
         #expect(leader.send(SIGTERM) == true)
         try #require(leader.waitReaped(), "child \(pid) did not end after the signal")
         #expect(leader.watch.reported == [-SIGTERM])
-        // Gone means no process with that pid and start time any more; the
-        // wait is on the descendant's own end, which no event reports to us.
-        let deadline = ContinuousClock.now + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
-        var stillThere = true
-        while stillThere && ContinuousClock.now < deadline {
-            let now = LaunchedChildSignaller.systemProcessTable(descendantPID)
-            stillThere = now?.start == descendant.start
-            if stillThere { usleep(10_000) }
-        }
-        #expect(!stillThere, "the background process \(descendantPID) was not ended by the stop")
+        // Gone means the kernel says no such process, or the number has another start
+        // time; a record that cannot be read is neither, and fails the test naming it.
+        // The wait is on the descendant's own end, which no event reports to us.
+        #expect(
+            DescendantCheck.requireGone(pid: descendantPID, start: descendant.start, read: { readProcessTable($0) }),
+            "the background process \(descendantPID) was not ended by the stop"
+        )
     }
 
     private final class LockedText: @unchecked Sendable {
