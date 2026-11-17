@@ -142,6 +142,8 @@ final class AppModel: ObservableObject {
     /// engineUsesKeptFolder is whether the engine startEngine last started
     /// was given the kept Tailscale folder.
     private var engineUsesKeptFolder = false
+    /// isStartingEngine is whether a startEngine run is in flight, so a second call returns at once.
+    private var isStartingEngine = false
     private let engineURL: URL
     private let leaveRunner: any BoundedProcessRunning
     private let databasePath: String
@@ -1470,6 +1472,9 @@ final class AppModel: ObservableObject {
     /// Start Fresh itself reports keeps that recovery path the only way
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
+        guard !isStartingEngine else { return }
+        isStartingEngine = true
+        defer { isStartingEngine = false }
         stopRequested = false
         if DatabaseRecovery.hasSplitMove(databasePath: databasePath) {
             boundHost = nil
