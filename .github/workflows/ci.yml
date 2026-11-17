@@ -1,14 +1,16 @@
 name: CI
 
 on:
-  # A pull request is checked once per commit, through its pull_request run; a push run of the same
-  # commit would repeat every job. Label changes start no run here: the one check a label affects, the
-  # changelog entry, lives in changelog.yml. Pushes to main still run, so main's own state is checked.
-  push:
-    branches: [main]
+  # A pull request is checked once per commit, and runs only the jobs its change can reach: the plan
+  # job asks .github/checks/ci-legs.sh which ones. Nothing runs on a push to main, because the merged
+  # tree was already checked as the pull request's merge result. Label changes start no run here: the
+  # one check a label affects, the changelog entry, lives in changelog.yml.
   pull_request:
     types: [opened, synchronize, reopened]
-  # Lets a maintainer run the checks on any branch or commit by hand.
+  # Once a day every job runs, unless main has not moved since an earlier nightly already ran it.
+  schedule:
+    - cron: "41 2 * * *"
+  # Lets a maintainer run every job on any branch or commit by hand.
   workflow_dispatch:
 
 permissions:
@@ -18,12 +20,89 @@ defaults:
   run:
     shell: bash
 
+# A pull request's newer commit cancels its older run. The nightly has a group of its own that nothing
+# cancels, so a dispatch or a pull request can never stop it.
+concurrency:
+  group: ${{ github.event_name == 'schedule' && 'ci-nightly' || format('ci-{0}', github.event.pull_request.number || github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Every check is a step named for what it checks, and the work lives in .github/checks, which is what
-# a contributor runs too. The last job, gate, passes only when every other job passed; branch
-# protection requires it and the changelog job in changelog.yml.
+# a contributor runs too. The first job, plan, decides which of the other jobs a run needs; each of
+# them runs only when its own flag from plan is set. The last job, gate, passes only when plan passed,
+# every planned job passed and every other job was skipped; branch protection requires it and the
+# changelog job in changelog.yml.
 jobs:
-  go-checks:
-    name: Go checks
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      legs: ${{ steps.plan.outputs.legs }}
+      skip: ${{ steps.plan.outputs.skip }}
+      verdict: ${{ steps.plan.outputs.verdict }}
+      run: ${{ steps.plan.outputs.run }}
+      checks: ${{ steps.plan.outputs.checks }}
+      go_checks: ${{ steps.plan.outputs.go_checks }}
+      go_test_macos: ${{ steps.plan.outputs.go_test_macos }}
+      swift_test: ${{ steps.plan.outputs.swift_test }}
+      mac_app_build: ${{ steps.plan.outputs.mac_app_build }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUNS_URL: ${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&event=schedule
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            plan="$(bash .github/checks/ci-legs.sh --legs-for "$BASE_SHA")"
+            echo "$plan"
+            legs="$(sed -n 's/^leg //p' <<< "$plan" | tr '\n' ' ')"
+            skip=false
+            verdict=
+            run=
+          else
+            decision="$(bash .github/checks/ci-legs.sh nightly --event "$EVENT" --head "$HEAD_SHA" --run-id "$RUN_ID" --runs-url "$RUNS_URL")"
+            echo "$decision"
+            legs="$(sed -n 's/^legs=//p' <<< "$decision")"
+            skip="$(sed -n 's/^skip=//p' <<< "$decision")"
+            verdict="$(sed -n 's/^verdict=//p' <<< "$decision")"
+            run="$(sed -n 's/^run=//p' <<< "$decision")"
+          fi
+          legs="${legs% }"
+          if [ "$skip" != true ] && [ -z "$legs" ]; then
+            echo "::error::the plan named no legs"
+            exit 1
+          fi
+          {
+            echo "legs=$legs"
+            echo "skip=$skip"
+            echo "verdict=$verdict"
+            echo "run=$run"
+            for leg in checks go-checks go-test-macos swift-test mac-app-build; do
+              case " $legs " in
+                *" $leg "*) echo "${leg//-/_}=true" ;;
+                *) echo "${leg//-/_}=false" ;;
+              esac
+            done
+          } >> "$GITHUB_OUTPUT"
+          echo "planned: ${legs:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+  checks:
+    name: Checks
+    needs: [plan]
+    if: ${{ needs.plan.outputs.checks == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -42,6 +121,28 @@ jobs:
           - name: Go formatting
             run: bash .github/checks/go-format.sh
 
+          - name: Selector tests
+            run: python3 -m unittest discover -s .github/checks/tests
+
+  go-checks:
+    name: Go checks
+    needs: [plan]
+    if: ${{ needs.plan.outputs.go_checks == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The checks share one checkout and one Go setup and run side by side; each reports under its
+      # own name, and a red one fails the job.
+      - parallel:
           - name: Go vet
             run: bash .github/checks/go-vet.sh
 
@@ -53,6 +154,8 @@ jobs:
 
   go-test-macos:
     name: Go tests (macOS)
+    needs: [plan]
+    if: ${{ needs.plan.outputs.go_test_macos == 'true' }}
     # The Go engine ships inside the Mac app, so its tests run on macOS as well as Linux.
     runs-on: xcode-27
     steps:
@@ -74,6 +177,8 @@ jobs:
 
   swift-test:
     name: Swift tests
+    needs: [plan]
+    if: ${{ needs.plan.outputs.swift_test == 'true' }}
     # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
     runs-on: xcode-27
     steps:
@@ -95,6 +200,8 @@ jobs:
 
   mac-app-build:
     name: Mac app build
+    needs: [plan]
+    if: ${{ needs.plan.outputs.mac_app_build == 'true' }}
     # The app ships from the macOS 27 SDK, and its code uses APIs that only that SDK has.
     runs-on: xcode-27
     steps:
@@ -126,37 +233,38 @@ jobs:
     name: gate
     if: always()
     needs:
+      - plan
+      - checks
       - go-checks
       - go-test-macos
       - swift-test
       - mac-app-build
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
     steps:
-      - name: every check passed
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/checks
+
+      - name: planned jobs ran and passed
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
         run: |
-          total="$(jq -e 'if type == "object" and length > 0 then length else empty end' <<< "$NEEDS" 2>/dev/null)" || total=0
-          case "$total" in
-            '' | *[!0-9]* | 0)
-              echo "::error::gate received no results to check"
-              exit 1
-              ;;
-          esac
-          bad="$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key) \(.value.result)"' <<< "$NEEDS")"
           {
-            echo "| Check | Result |"
+            echo "| Job | Result |"
             echo "| --- | --- |"
-            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$NEEDS"
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          if [ -n "$bad" ]; then
-            count=0
-            while read -r id result; do
-              echo "::error::${id} did not pass (${result})"
-              count=$((count + 1))
-            done <<< "$bad"
-            echo "gate failed: ${count} of ${total} checks did not pass"
-            exit 1
-          fi
-          echo "All ${total} checks passed."
+            jq -r 'to_entries[]? | "| \(.key) | \(.value.result) |"' <<< "$NEEDS" 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          printf '%s' "$NEEDS" | bash .github/checks/ci-legs.sh gate --event "$EVENT" > gate-result.txt || status=$?
+          cat gate-result.txt
+          while read -r line; do
+            case "$line" in
+              red:*) echo "::error::${line#red: }" ;;
+            esac
+          done < gate-result.txt
+          exit "$status"
