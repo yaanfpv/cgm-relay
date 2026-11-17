@@ -432,11 +432,15 @@ struct EngineSupervisorTests {
         let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: FakeVirtualClock())
         await supervisor.start(configuration: .fixture())
 
-        await supervisor.stopAndWait(timeout: .seconds(1))
+        let confirmed = await supervisor.stopAndWait(timeout: .seconds(1))
 
         #expect(launcher.wasTerminated(at: 0))
         #expect(launcher.wasKilled(at: 0) == testCase.killed)
-        #expect(await supervisor.state == .stopped)
+        // The fake process that ignores terminate is never reaped after the
+        // kill either, so its end cannot be confirmed: stopAndWait says so,
+        // and the supervisor refuses to start another engine.
+        #expect(confirmed == testCase.exits)
+        #expect(await supervisor.state == (testCase.exits ? .stopped : .failed(.engineStatusUnknown)))
     }
 
     /// armedSecret is the secret a request would carry right now, nil while
