@@ -306,12 +306,14 @@ class SelectorTests(unittest.TestCase):
         # docs -> Go source: the new side alone would plan Go legs, the old side alone checks only;
         # the plan is the union either way, so rename a Go file into docs as well.
         def into_docs(repo):
+            (repo.dir / "docs").mkdir(exist_ok=True)
             repo.git("mv", "internal/x.go", "docs/x.go.md")
 
         r, _, _ = select(self, base_files=["internal/x.go"], change=into_docs)
         self.assert_plan(r, GO)
 
         def out_of_docs(repo):
+            (repo.dir / "macos" / "App").mkdir(parents=True, exist_ok=True)
             repo.git("mv", "docs/x.md", "macos/App/x.swift")
 
         r, _, _ = select(self, base_files=["docs/x.md"], change=out_of_docs)
@@ -319,6 +321,7 @@ class SelectorTests(unittest.TestCase):
 
     def test_rename_across_unknown_side_plans_every_leg(self):
         def change(repo):
+            (repo.dir / "elsewhere").mkdir(exist_ok=True)
             repo.git("mv", "docs/x.md", "elsewhere/x.md")
 
         r, _, _ = select(self, base_files=["docs/x.md"], change=change)
@@ -437,6 +440,35 @@ class SelectorTests(unittest.TestCase):
         d = Path(tempfile.mkdtemp(prefix="ci-legs-norepo-"))
         self.addCleanup(shutil.rmtree, d, True)
         r = run_script(["--legs-for", "main"], cwd=d, env_extra={"GIT_CEILING_DIRECTORIES": str(d.parent)})
+        self.assert_all_with_reason(r)
+
+    def test_union_does_not_depend_on_path_order(self):
+        # "aaa-unknown.txt" sorts before docs/: the last path's legs must not win.
+        def change(repo):
+            repo.write("aaa-unknown.txt", "x\n")
+            repo.write("docs/a.md", "x\n")
+
+        r, _, _ = select(self, change=change)
+        self.assert_plan(r, EVERY)
+
+    def test_two_merge_bases_plan_every_leg_with_a_reason(self):
+        repo = Repo(self)
+        repo.write("seed.txt")
+        repo.commit("a")
+        repo.git("branch", "x")
+        repo.git("branch", "y")
+        repo.git("checkout", "-q", "x")
+        repo.write("docs/x.md", "x\n")
+        repo.commit("bx")
+        repo.git("checkout", "-q", "y")
+        repo.write("docs/y.md", "y\n")
+        repo.commit("by")
+        repo.git("checkout", "-q", "-b", "mx", "x")
+        repo.git("merge", "-q", "--no-edit", "y")
+        repo.git("checkout", "-q", "-b", "my", "y")
+        repo.git("merge", "-q", "--no-edit", "x")
+        self.assertEqual(len(repo.git("merge-base", "--all", "mx", "my").split()), 2)
+        r = run_script(["--legs-for", "mx"], cwd=repo.dir)
         self.assert_all_with_reason(r)
 
 
@@ -659,6 +691,15 @@ class GateTests(unittest.TestCase):
     def test_red_over_a_skip_where_a_leg_ran(self):
         needs = needs_fixture([], skip=True, verdict="success", run="42", results={"checks": "success"})
         self.red(needs, "checks", event="schedule")
+
+    def test_red_over_a_skip_whose_verdict_is_not_exactly_success(self):
+        for verdict in ("", "cancelled", "skipped", "Success"):
+            with self.subTest(verdict=verdict):
+                self.red(needs_fixture([], skip=True, verdict=verdict, run="42"), event="schedule")
+
+    def test_red_for_a_plan_that_names_no_legs_without_a_skip(self):
+        # Every job skipped and nothing planned: nothing ran, so it must not read as green.
+        self.red(needs_fixture([]), event="pull_request")
 
 
 # ---------------------------------------------------------------- nightly skip
@@ -909,6 +950,38 @@ class NightlySkipTests(unittest.TestCase):
         r, out, _ = nightly([page(run_obj(90))])
         self.assert_skips(r, out, "success", 90)
         self.assertEqual(self.gate_over(out, event="workflow_dispatch").returncode, 1)
+
+    def test_only_a_full_lowercase_hex_head_is_read(self):
+        # The run list carries a run on exactly the odd head, so only the head check can refuse it.
+        for head in (HEAD[:39], HEAD + "a", "A" * 40, "z" * 40, ""):
+            with self.subTest(head=head):
+                r, out, _ = nightly([page(run_obj(90, head=head))], head=head)
+                self.assert_runs_everything(r, out)
+
+    def test_an_unreadable_run_id_runs_every_leg(self):
+        r, out, _ = nightly([page(run_obj(90))], run_id="abc")
+        self.assert_runs_everything(r, out)
+
+    def test_a_read_cut_at_the_page_bound_runs_every_leg(self):
+        # Every page holds a run on this head and none is empty, so the end of the list is never seen.
+        endless = {"workflow_runs": [run_obj(90), run_obj(50, head=OTHER)]}
+        r, out, api = nightly(endless=endless)
+        self.assert_runs_everything(r, out)
+        self.assertLessEqual(len(api.requests), 50)
+
+    def test_a_run_with_a_conclusion_but_not_completed_is_not_counted(self):
+        r, out, _ = nightly([page(run_obj(90, status="in_progress", conclusion="success"))])
+        self.assert_runs_everything(r, out)
+
+    def test_a_malformed_run_beside_a_matching_one_runs_every_leg(self):
+        bad = {"id": "x", "head_sha": OTHER, "status": "in_progress", "conclusion": None}
+        r, out, _ = nightly([page(run_obj(90), bad)])
+        self.assert_runs_everything(r, out)
+
+    def test_a_later_page_whose_runs_are_not_a_list_runs_every_leg(self):
+        r, out, _ = nightly([page(run_obj(90)), (200, {"workflow_runs": {}})])
+        self.assert_runs_everything(r, out)
+
 
 
 if __name__ == "__main__":
