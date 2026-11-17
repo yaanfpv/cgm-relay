@@ -619,6 +619,105 @@ struct SleepResetHelperTests {
     }
 }
 
+@Suite("SleepResetHelper bounded reset")
+struct SleepResetHelperBoundedResetTests {
+    @Test("the reset is done only for an exit with status 0", arguments: [
+        (BoundedProcessResult.exited(0), SleepResetHelper.ResetOutcome.done),
+        (.exited(1), .notDone),
+        (.exited(-9), .notDone),
+        (.timedOut, .notDone),
+        (.failedToLaunch, .notDone),
+        (.notConfirmedEnded, .mayStillRun),
+    ])
+    func outcomeFollowsTheRunnersResult(result: BoundedProcessResult, expected: SleepResetHelper.ResetOutcome) {
+        let runner = CountingRunner(syncResult: result)
+        #expect(SleepResetHelper.runReset(using: runner) == expected, "result \(result)")
+    }
+
+    @Test("the fixed command, an empty stdin and the named timeout go to the runner's calling-thread entry, once")
+    func commandAndTimeoutPassedOn() {
+        let runner = CountingRunner()
+        _ = SleepResetHelper.runReset(using: runner)
+        #expect(SleepResetHelper.resetTimeout == .seconds(10))
+        #expect(runner.fullCalls == [
+            .init(
+                executableURL: URL(fileURLWithPath: SleepResetHelper.command[0]),
+                arguments: Array(SleepResetHelper.command.dropFirst()),
+                standardInputData: Data(),
+                timeout: SleepResetHelper.resetTimeout
+            ),
+        ])
+        #expect(runner.asyncRuns == 0, "the reset went through the async run")
+    }
+
+    private func looks(firstResult: SleepResetHelper.ResetOutcome, sleepDisabled: Bool?) -> Int {
+        var look = SleepResetHelper.Look()
+        var count = 0
+        let command: () -> SleepResetHelper.ResetOutcome = {
+            count += 1
+            return count == 1 ? firstResult : .done
+        }
+        for _ in 0..<2 {
+            look.run(appRunning: false, onBattery: true, sleepDisabled: sleepDisabled, runCommand: command)
+        }
+        look.powerSourceChanged()
+        look.run(appRunning: false, onBattery: true, sleepDisabled: sleepDisabled, runCommand: command)
+        // The app starting and stopping again does not clear it either.
+        look.run(appRunning: true, onBattery: true, sleepDisabled: sleepDisabled, runCommand: command)
+        look.run(appRunning: false, onBattery: true, sleepDisabled: sleepDisabled, runCommand: command)
+        return count
+    }
+
+    @Test("after a run that may still be running, no further reset command is started on any later look",
+          arguments: [true, false] as [Bool?])
+    func noSecondCommandAfterMayStillRun(sleepDisabled: Bool?) {
+        // sleepDisabled false never writes, so only the first two cases reach the command at all.
+        let expected = (sleepDisabled == false) ? 0 : 1
+        #expect(looks(firstResult: .mayStillRun, sleepDisabled: sleepDisabled) == expected)
+    }
+
+    @Test("a reset that is not done is tried again on the next look")
+    func notDoneRetries() {
+        #expect(looks(firstResult: .notDone, sleepDisabled: true) == 4)
+    }
+
+    @Test("a done reset with the sleep setting known does not stop later looks from writing")
+    func doneKeepsLooking() {
+        #expect(looks(firstResult: .done, sleepDisabled: true) == 4)
+    }
+}
+
+@Suite("SleepResetHelper main.swift")
+struct SleepResetHelperMainSourceTests {
+    private static func strippingComments(_ source: String) -> String {
+        var text = source
+        while let open = text.range(of: "/*"), let close = text.range(of: "*/", range: open.upperBound..<text.endIndex) {
+            text.removeSubrange(open.lowerBound..<close.upperBound)
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                guard let slashes = line.range(of: "//") else { return line }
+                return line[line.startIndex..<slashes.lowerBound]
+            }
+            .joined(separator: "\n")
+    }
+
+    private static func helperSource() throws -> String {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        let main = url.appendingPathComponent("Helper/main.swift")
+        return strippingComments(try String(contentsOf: main, encoding: .utf8))
+    }
+
+    @Test("the helper waits on no child without a bound, and runs its reset through the bounded runner")
+    func helperUsesTheBoundedRunner() throws {
+        let source = try Self.helperSource()
+        #expect(!source.contains("waitUntilExit"), "an unbounded wait is left in the helper")
+        #expect(!source.contains("Process()"), "the helper starts a process of its own")
+        #expect(source.contains("SleepResetHelper.runReset(using: RealBoundedProcessRunner())"))
+    }
+}
+
 @Suite("SleepResetHelper process list")
 struct SleepResetHelperProcessListTests {
     private static let appName = SleepResetHelper.appExecutableName
@@ -650,7 +749,7 @@ struct SleepResetHelperProcessListTests {
         for _ in 0..<3 {
             look.run(
                 appRunning: SleepResetHelper.appIsRunning(using: listing),
-                onBattery: true, sleepDisabled: true, runCommand: { count += 1; return true }
+                onBattery: true, sleepDisabled: true, runCommand: { count += 1; return .done }
             )
         }
         return count
