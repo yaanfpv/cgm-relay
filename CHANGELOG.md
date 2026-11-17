@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The menu no longer shows a status from before a Stop or a restart when that check finishes just after it.
 - A quick second click on a slow action, such as leaving the built-in route, signing in, or turning on Tailscale HTTPS or keep-awake, no longer starts it twice, and Use My Tailscale is unavailable while a leave runs.
 - A double click on Start starts the relay once, and a Stop, a sign-out, a quit or a settings change made while the relay is starting takes effect once that start has finished.
+- Turning Tailscale HTTPS on or off no longer runs its command a second time while the first may still be running.
 
 ## [1.0.2] - 2026-10-14
 

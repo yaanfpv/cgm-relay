@@ -361,7 +361,9 @@ public enum TailscaleServeOutcome: Sendable, Equatable {
     case httpsNotEnabled
     case stopped
     /// timedOut: Tailscale did not finish, ordinarily because it is
-    /// waiting for HTTPS certificates to be turned on.
+    /// waiting for HTTPS certificates to be turned on. It also covers a
+    /// command whose end was not confirmed after its bound and that may
+    /// still be running; TailscaleChange runs no second command after it.
     case timedOut
     /// settingsChanged: the re-read just before the command no longer shows
     /// what the screen offered (the port is not free, or the entry is no
@@ -407,9 +409,9 @@ public enum TailscaleServeOutcome: Sendable, Equatable {
     /// read here and nowhere else, only for the words that name a cause.
     static func from(_ run: BoundedProcessOutput) -> TailscaleServeOutcome {
         switch run.result {
-        case .timedOut:
+        case .timedOut, .notConfirmedEnded:
             return .timedOut
-        case .failedToLaunch, .notConfirmedEnded:
+        case .failedToLaunch:
             return .other
         case .exited(0):
             return .succeeded

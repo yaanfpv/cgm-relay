@@ -75,7 +75,9 @@ enum ChildSurvivors {
         }
     }
 
-    private static func startText(pid: Int32) -> String? {
+    /// startText reads the start time the kernel shows for pid, or nil when it
+    /// cannot be read (the read failed, or the child ended but was not collected).
+    static func startText(pid: Int32) -> String? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
@@ -83,9 +85,14 @@ enum ChildSurvivors {
     }
 
     /// new lists the children in `now` that were not in `before`. The same
-    /// number with another start time is another process.
+    /// number with another start time is another process. A child whose start
+    /// could not be read is never the same process as the one with its pid in
+    /// the other list, so it is listed: an unread start cannot show that it is
+    /// the child that was there before.
     static func new(since before: [Child], now: [Child]) -> [Child] {
-        now.filter { !before.contains($0) }
+        now.filter { child in
+            !before.contains { $0.pid == child.pid && $0.start != nil && $0.start == child.start }
+        }
     }
 
     /// recordSurvivors fails the test once per survivor, naming its pid and start.
@@ -101,16 +108,22 @@ enum ChildSurvivors {
     /// by side never see each other's children as survivors.
     final class Accounting: @unchecked Sendable {
         private let census: @Sendable () -> Census
+        private let startOf: @Sendable (pid_t) -> String?
         private let lock = NSLock()
         private var active = 0
         private var baseline: [Child]?
 
-        init(census: @escaping @Sendable () -> Census) {
+        /// startOf reads one child's start time; it defaults to the kernel's.
+        init(
+            census: @escaping @Sendable () -> Census,
+            startOf: @escaping @Sendable (pid_t) -> String? = { ChildSurvivors.startText(pid: $0) }
+        ) {
             self.census = census
+            self.startOf = startOf
         }
 
-        private static func children(_ pids: [pid_t]) -> [Child] {
-            pids.map { Child(pid: $0, start: ChildSurvivors.startText(pid: $0)) }
+        private func children(_ pids: [pid_t]) -> [Child] {
+            pids.map { Child(pid: $0, start: startOf($0)) }
         }
 
         /// enter takes the baseline when it is the first. A baseline that could
@@ -122,7 +135,7 @@ enum ChildSurvivors {
                 if active == 0 {
                     switch census() {
                     case .listed(let pids):
-                        baseline = Self.children(pids)
+                        baseline = children(pids)
                     case .failed(let code):
                         baseline = nil
                         Issue.record("the census of this process's children at the start could not be read (errno \(code)), so survivors could not be counted")
@@ -142,7 +155,7 @@ enum ChildSurvivors {
                 switch census() {
                 case .listed(let pids):
                     guard let baseline else { return [] }
-                    return ChildSurvivors.new(since: baseline, now: Self.children(pids))
+                    return ChildSurvivors.new(since: baseline, now: children(pids))
                 case .failed(let code):
                     Issue.record("the census of this process's children at the end could not be read (errno \(code)), so survivors could not be counted")
                     return []

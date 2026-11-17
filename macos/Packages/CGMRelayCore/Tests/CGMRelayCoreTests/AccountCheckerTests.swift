@@ -67,7 +67,7 @@ private final class RecordingLog: AccountCheckLogging, @unchecked Sendable {
     func record(_ line: String) { lock.withLock { recorded.append(line) } }
 }
 
-@Suite("RealAccountChecker")
+@Suite("RealAccountChecker", .noSurvivingChildren)
 struct RealAccountCheckerTests {
     private static let email = "person@example.test"
     private static let password = "synthetic-password-1234"

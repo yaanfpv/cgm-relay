@@ -76,7 +76,7 @@ private actor WaitLog {
     func record(_ wait: Duration) { values.append(wait) }
 }
 
-@Suite("Tailscale HTTPS")
+@Suite("Tailscale HTTPS", .noSurvivingChildren)
 struct TailscaleServeTests {
     @Test("the commands are exactly the two serve invocations, and the shown text is the text that runs")
     func commands() {
