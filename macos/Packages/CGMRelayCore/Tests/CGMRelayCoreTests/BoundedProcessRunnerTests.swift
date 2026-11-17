@@ -12,6 +12,52 @@ private final class LaunchRecorder: @unchecked Sendable {
     }
 }
 
+/// RunnerLaunch is a runner whose launch read is recorded: the identity the
+/// signaller took of its child while the child was necessarily unreaped. The read
+/// itself is the real one, so the runner signals and reaps as it does in the app.
+private struct RunnerLaunch {
+    let recorder = LaunchRecorder()
+    var runner: RealBoundedProcessRunner {
+        let recorder = recorder
+        return RealBoundedProcessRunner(readProcessTable: { pid in
+            let real = LaunchedChildSignaller.systemProcessTable(pid)
+            if let real, real.parentPID == getpid() { recorder.set(pid: real.pid, start: real.start) }
+            return real
+        })
+    }
+
+    /// endChild ends the child the runner launched, if it is still there, and removes
+    /// `directory` only once that is confirmed. The number is signalled only while it
+    /// still shows the start recorded at launch. A child not confirmed ended fails the test naming it.
+    func endChild(removing directory: URL) {
+        guard let recorded = recorder.recorded else {
+            try? FileManager.default.removeItem(at: directory)
+            return
+        }
+        ChildCleanup.endRecordedRemovingOnEnd(
+            pid: recorded.pid, start: "\(recorded.start.seconds).\(recorded.start.microseconds)",
+            removingOnEnd: directory,
+            readStart: { ChildCleanup.startNow(pid: $0) },
+            exists: { !StoppedChildSupport.isGone(pid: $0) },
+            send: { _, signal in StoppedChildSupport.signal(recorded, signal) },
+            waitingMilliseconds: TestChild.hangCeilingMilliseconds
+        )
+    }
+
+    /// requireEnded fails the test, naming the child, unless the typed table read
+    /// shows it gone now: absent, or present with another start. A child still
+    /// there, or a record that cannot be read, is not an end.
+    func requireEnded() {
+        guard let recorded = recorder.recorded else {
+            Issue.record("no identity was recorded for the launched child, so its end could not be checked")
+            return
+        }
+        let read = readProcessTable(recorded.pid)
+        let verdict = DescendantCheck.verdict(read, of: recorded.start)
+        #expect(verdict == .gone, "the child \(recorded.pid) was not shown ended after the run returned: \(verdict) (read \(read))")
+    }
+}
+
 @Suite("RealBoundedProcessRunner", .noSurvivingChildren)
 struct RealBoundedProcessRunnerTests {
     @Test("reports an ordinary exit code")
@@ -75,11 +121,14 @@ struct RealBoundedProcessRunnerTests {
     func timeoutEndsTheProcess(_ testCase: TimeoutCase) async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-timeout-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        // The child's own timer is 30 s, so its absence of a marker proves nothing about
+        // its end: the end is read from the process table, and a child left alive is ended here.
+        let launch = RunnerLaunch()
+        defer { launch.endChild(removing: dir) }
         let marker = dir.appendingPathComponent("marker")
         #expect(!FileManager.default.fileExists(atPath: marker.path))
 
-        let runner = RealBoundedProcessRunner()
+        let runner = launch.runner
         let result = await runner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/perl"),
             arguments: ["-e", Self.perlScript(ignoringTerminate: testCase.ignoresTerminate), marker.path],
@@ -87,12 +136,10 @@ struct RealBoundedProcessRunnerTests {
             timeout: .seconds(3)
         )
 
-        // The runner returns only after it has observed the child's own exit,
-        // which the launcher's real-child tests cover, so a number read back
-        // from a file is not probed here: it could name someone else by then.
         // A runner that waited for the child to finish by itself would
         // write the marker.
         #expect(result == .timedOut)
+        launch.requireEnded()
         #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
     }
 
@@ -341,12 +388,14 @@ struct RealBoundedProcessRunnerCallingThreadTests {
     func timeoutEndsTheProcess(ignoresTerminate: Bool) async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-sync-timeout-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        // The end is read from the process table; a child left alive is ended here.
+        let launch = RunnerLaunch()
+        defer { launch.endChild(removing: dir) }
         let marker = dir.appendingPathComponent("marker")
         let script = (ignoresTerminate ? "$SIG{TERM}='IGNORE'; " : "")
             + "sleep 30; open(my $m,\">\",$ARGV[0]) or die; print $m \"done\"; close($m) or die"
 
-        let runner = RealBoundedProcessRunner()
+        let runner = launch.runner
         let result = await onPlainThread {
             runner.runOnCallingThread(
                 executableURL: URL(fileURLWithPath: "/usr/bin/perl"),
@@ -356,6 +405,7 @@ struct RealBoundedProcessRunnerCallingThreadTests {
             )
         }
         #expect(result == .timedOut)
+        launch.requireEnded()
         #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
     }
 }
