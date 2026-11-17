@@ -226,6 +226,61 @@ private func portInTimeWait() -> Int? {
     return Int(UInt16(bigEndian: address.sin_port))
 }
 
+/// ClosingSetup is the result of making a port whose only use is a closing
+/// connection: ready with the port, or the step that could not be proved.
+private enum ClosingSetup {
+    case ready(port: Int)
+    case unproven(String)
+}
+
+/// closingConnectionPort makes its own connection on a port it chose and ends
+/// it from the server side first, so the closing state (TIME_WAIT) is on that
+/// port, then releases its listener. Every step must report success: a call
+/// that fails, a client that does not see the server's close as end of file,
+/// or a reset instead of an orderly close leaves the setup unproven.
+private func closingConnectionPort() -> ClosingSetup {
+    let listener = socket(AF_INET, SOCK_STREAM, 0)
+    guard listener >= 0 else { return .unproven("no listener socket (errno \(errno))") }
+    var listenerOpen = true
+    defer { if listenerOpen { close(listener) } }
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+    let bound = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard bound == 0 else { return .unproven("bind failed (errno \(errno))") }
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listener, $0, &length) }
+    }
+    guard named == 0, listen(listener, 1) == 0 else { return .unproven("listener setup failed (errno \(errno))") }
+    let port = Int(UInt16(bigEndian: address.sin_port))
+
+    let client = socket(AF_INET, SOCK_STREAM, 0)
+    guard client >= 0 else { return .unproven("no client socket (errno \(errno))") }
+    var clientOpen = true
+    defer { if clientOpen { close(client) } }
+    let connected = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard connected == 0 else { return .unproven("connect to port \(port) failed (errno \(errno))") }
+    let accepted = accept(listener, nil, nil)
+    guard accepted >= 0 else { return .unproven("accept on port \(port) failed (errno \(errno))") }
+    // The server side closes first: its end is the one that waits out the time.
+    guard close(accepted) == 0 else { return .unproven("closing the server side failed (errno \(errno))") }
+    var byte: UInt8 = 0
+    var count: Int
+    repeat { count = read(client, &byte, 1) } while count < 0 && errno == EINTR
+    guard count == 0 else { return .unproven("the client did not see an orderly close from the server side (read returned \(count), errno \(errno))") }
+    clientOpen = false
+    guard close(client) == 0 else { return .unproven("closing the client side failed (errno \(errno))") }
+    listenerOpen = false
+    guard close(listener) == 0 else { return .unproven("releasing the listener failed (errno \(errno))") }
+    return .ready(port: port)
+}
+
 private struct TableBinder: PortBinding {
     var taken: [String: Set<Int>] = [:]
     var allTaken = false
@@ -561,6 +616,16 @@ struct PortAvailabilityTests {
         let ports = (0..<5).compactMap { _ in portInTimeWait() }
         try #require(!ports.isEmpty)
         try conclude(typedOutcome(ports: ports, bindHost: "0.0.0.0", inner: binder))
+    }
+
+    @Test("the real binder accepts a port whose only use is a closing connection, on every address a start asks", arguments: ["127.0.0.1", "0.0.0.0"])
+    func realBinderAcceptsAClosingPort(_ host: String) throws {
+        switch closingConnectionPort() {
+        case .unproven(let reason):
+            try Test.cancel("the closing connection could not be set up, so nothing is proved: \(reason)")
+        case .ready(let port):
+            #expect(binder.canBind(host: host, port: port), "the binder refused \(host):\(port), whose only use is a closing connection the test made")
+        }
     }
 
     @Test("a free default port is chosen, judged by what the search was answered")
