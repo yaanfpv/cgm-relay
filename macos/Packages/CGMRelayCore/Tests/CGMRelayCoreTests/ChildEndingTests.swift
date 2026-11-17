@@ -1419,6 +1419,12 @@ struct ReapFactRule: Sendable, CustomTestStringConvertible {
     let function: String
     let requires: [String]
     let forbids: [String]
+    /// Each of these must appear in the function outside the argument list of
+    /// every `ChildCleanup.endHeldRecordingNotConfirmed(` call: a release of the
+    /// child's input inside the call's `send:` closure runs only when the child
+    /// was not already reported ended, so a child whose leader ended first would
+    /// keep a process blocked on that input.
+    var releasesOutsideGate: [String] = []
     var testDescription: String { "\(file) \(function)" }
 
     func violations(in text: String) -> [String] {
@@ -1426,7 +1432,30 @@ struct ReapFactRule: Sendable, CustomTestStringConvertible {
         var found: [String] = []
         for needed in requires where !body.inner.contains(needed) { found.append("\(function) does not use \(needed)") }
         for banned in forbids where body.inner.contains(banned) { found.append("\(function) still uses \(banned)") }
+        if !releasesOutsideGate.isEmpty {
+            let outside = Self.removingGatedCalls(from: body.inner)
+            for needle in releasesOutsideGate where !outside.contains(needle) {
+                found.append("\(function) releases the input (\(needle)) only inside the cleanup call, so it is skipped when the child was already reported ended")
+            }
+        }
         return found
+    }
+
+    /// removingGatedCalls drops every `ChildCleanup.endHeldRecordingNotConfirmed(...)`
+    /// call, its whole argument list, from text.
+    private static func removingGatedCalls(from text: String) -> String {
+        var rest = text
+        let marker = "ChildCleanup.endHeldRecordingNotConfirmed("
+        while let call = rest.range(of: marker) {
+            var depth = 1
+            var cursor = call.upperBound
+            while cursor < rest.endIndex, depth > 0 {
+                if rest[cursor] == "(" { depth += 1 } else if rest[cursor] == ")" { depth -= 1 }
+                cursor = rest.index(after: cursor)
+            }
+            rest.removeSubrange(call.lowerBound..<cursor)
+        }
+        return rest
     }
 }
 
@@ -1436,10 +1465,17 @@ struct ProcessSuiteReapFactSourceTests {
         ReapFactRule(file: "EngineSupervisorTests.swift", function: "endEngineIfLeftRunning",
                      requires: ["ConfirmedEnd.isReaped(", "ConfirmedEnd.wait(", "reportedStatusUnknown"], forbids: ["exitCodes.isEmpty", "exited.wait("]),
         ReapFactRule(file: "RealProcessLauncherTests.swift", function: "endStarted",
-                     requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit("]),
+                     requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit("],
+                     releasesOutsideGate: ["started.input.close()"]),
+        ReapFactRule(file: "Support/HeldChild.swift", function: "endByReleasing",
+                     requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit(", "kill("],
+                     releasesOutsideGate: ["input.release()"]),
+        // The descendant is not held, so it is ended by the release of its input and confirmed from its own pid and
+        // birth start; a send to it goes only through the recorded identity, never to a group after the leader is reaped.
         ReapFactRule(file: "RealProcessLauncherTests.swift", function: "signalReachesTheChildsDescendants",
-                     requires: ["hasReportedExit", "waitReaped(", "send(SIGKILL)"],
-                     forbids: ["reported.isEmpty", "waitForExit(", "kill(", "endRecorded", "RecordedDescendant", "descendantRecord"]),
+                     requires: ["hasReportedExit", "waitReaped(", "send(SIGKILL)", "ChildCleanup.endRecordedRecordingNotConfirmed(", "StoppedChildSupport.signal(", "Issue.record("],
+                     forbids: ["reported.isEmpty", "waitForExit(", "kill(", "-pid", "killpg("],
+                     releasesOutsideGate: ["input.release()"]),
         ReapFactRule(file: "RealProcessLauncherTests.swift", function: "endNow",
                      requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit("]),
         ReapFactRule(file: "RealProcessLauncherTests.swift", function: "lineArrivesWhileEngineStillRuns",
@@ -1447,7 +1483,9 @@ struct ProcessSuiteReapFactSourceTests {
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "lstart",
                      requires: ["failIfNotEnded("], forbids: []),
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "unsignallableChildIsNotConfirmedEnded",
-                     requires: ["ChildCleanup.endRecordedRemovingOnEnd("], forbids: ["removeItem("]),
+                     requires: ["ChildCleanup.endRecordedRemovingOnEnd(", "Issue.record("], forbids: ["removeItem("]),
+        ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "endChild",
+                     requires: ["launchFailed", "Issue.record(", "ChildCleanup.endRecordedRemovingOnEnd("], forbids: []),
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "stoppedChildEndsTheRunAsTimedOut",
                      requires: ["launchFailed:"], forbids: []),
     ]
@@ -1584,6 +1622,34 @@ struct ProcessSuiteCleanupRuleControlTests {
         #expect(!violations("ChildCleanup.endHeldRecordingNotConfirmed(alreadyEnded: !x.exits.reported.isEmpty)").isEmpty)
         #expect(!violations("let ended = x.child.hasReportedExit; kill(-pid, SIGKILL)").isEmpty)
         #expect(!violations("// x.child.hasReportedExit named only in a comment").isEmpty)
+    }
+
+    @Test("a release of the child's input that sits only inside the cleanup call is rejected, one outside it is accepted")
+    func releaseOutsideTheGateIsRequired() {
+        let rule = ReapFactRule(file: "none", function: "end", requires: [], forbids: [], releasesOutsideGate: ["input.release()"])
+        func violations(_ body: String) -> [String] {
+            rule.violations(in: SourceText.stripped("func end(_ x: X) {\n\(body)\n}"))
+        }
+        let gated = """
+        defer {
+            ChildCleanup.endHeldRecordingNotConfirmed(
+                pid: pid, start: leader.birthStart, alreadyEnded: leader.hasReportedExit,
+                send: { leader.send(SIGKILL); input.release() },
+                waitForEnd: { leader.waitReaped(milliseconds: $0) }, waitingMilliseconds: bound)
+        }
+        """
+        let outside = """
+        defer {
+            input.release()
+            ChildCleanup.endHeldRecordingNotConfirmed(
+                pid: pid, start: leader.birthStart, alreadyEnded: leader.hasReportedExit,
+                send: { leader.send(SIGKILL) },
+                waitForEnd: { leader.waitReaped(milliseconds: $0) }, waitingMilliseconds: bound)
+        }
+        """
+        #expect(!violations(gated).isEmpty)
+        #expect(violations(outside).isEmpty)
+        #expect(!violations("// input.release() named only in a comment").isEmpty)
     }
 
     @Test("a thrown-away wait or cleanup result is found, an ordinary discarded launch is not")

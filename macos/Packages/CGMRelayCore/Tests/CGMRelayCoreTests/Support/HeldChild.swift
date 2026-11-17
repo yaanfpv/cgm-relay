@@ -209,13 +209,15 @@ extension HeldChild {
 
     /// endByReleasing ends a child blocked on `input` by releasing the input,
     /// and confirms the reap. It sends no signal, so it ends the child even
-    /// when its signaller refuses every send. A reap not confirmed fails the
-    /// test naming the child and its birth start.
+    /// when its signaller refuses every send. The input is released whatever
+    /// the child's state, so a process that shares it is released too. A reap
+    /// not confirmed fails the test naming the child and its birth start.
     @discardableResult
     func endByReleasing(_ input: HeldInput) -> ChildCleanup.Outcome {
-        ChildCleanup.endHeldRecordingNotConfirmed(
+        input.release()
+        return ChildCleanup.endHeldRecordingNotConfirmed(
             pid: processIdentifier, start: birthStart, alreadyEnded: hasReportedExit,
-            send: { input.release() },
+            send: {},
             waitForEnd: { waitReaped(milliseconds: $0) },
             waitingMilliseconds: TestChild.hangCeilingMilliseconds
         )

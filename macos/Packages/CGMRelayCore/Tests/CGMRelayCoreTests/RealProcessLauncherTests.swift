@@ -309,14 +309,16 @@ struct RealProcessLauncherTests {
 
     /// endStarted ends a child started with `spawn`. Closing its input is the
     /// whole request (cat ends on end of input and /usr/bin/true is already
-    /// ending). The child counts as ended only when its holder confirms the
-    /// reap; a status the holder could not observe is not that, and fails the
-    /// test naming the child and its birth start.
+    /// ending), and it is made whatever the child's state. The child counts as
+    /// ended only when its holder confirms the reap; a status the holder could
+    /// not observe is not that, and fails the test naming the child and its
+    /// birth start.
     private func endStarted(_ started: (child: HeldChild, input: FileHandle, exits: ExitWatch)) {
+        try? started.input.close()
         ChildCleanup.endHeldRecordingNotConfirmed(
             pid: started.child.processIdentifier, start: started.child.birthStart,
             alreadyEnded: started.child.hasReportedExit,
-            send: { try? started.input.close() },
+            send: {},
             waitForEnd: { started.child.waitReaped(milliseconds: $0) },
             waitingMilliseconds: TestChild.hangCeilingMilliseconds
         )
@@ -423,19 +425,36 @@ struct RealProcessLauncherTests {
         )
         input.closeChildEnd()
         let pid = leader.processIdentifier
-        // Registered right after the start, on every outcome. The shell blocks in
-        // `wait`, so the leader stays unreaped and the group, which ChildSpawner
-        // made for this work, is ended through the leader's held signaller: it
-        // sends only while the leader is unreaped and its start still matches.
-        // What the shell started is in that group, so it ends with it. Nothing
-        // here signals the background process by its number.
+        // The background process, once the child has named it and its record has been read.
+        var descendantPid: pid_t?
+        var descendantIdentity: StoppedChildSupport.RecordedProcess?
+        // Registered right after the start, on every outcome. The input is
+        // released first, whatever the leader's state, so the background process
+        // ends by itself even when the leader is already reaped. The leader, which
+        // the shell keeps unreaped in `wait`, is ended through its held signaller.
+        // The background process is not held: it is confirmed ended from its own
+        // pid and birth start, and signalled only through that recorded identity,
+        // after a fresh read shows the same start. No send goes to the group, since
+        // the leader may be reaped by then. One never identified is named as unknown.
         defer {
+            input.release()
             ChildCleanup.endHeldRecordingNotConfirmed(
                 pid: pid, start: leader.birthStart, alreadyEnded: leader.hasReportedExit,
-                send: { leader.send(SIGKILL); input.release() },
+                send: { leader.send(SIGKILL) },
                 waitForEnd: { leader.waitReaped(milliseconds: $0) },
                 waitingMilliseconds: TestChild.hangCeilingMilliseconds
             )
+            if let identity = descendantIdentity {
+                ChildCleanup.endRecordedRecordingNotConfirmed(
+                    pid: identity.pid, start: "\(identity.start.seconds).\(identity.start.microseconds)",
+                    readStart: { ChildCleanup.startNow(pid: $0) },
+                    exists: { !StoppedChildSupport.isGone(pid: $0) },
+                    send: { _, signal in StoppedChildSupport.signal(identity, signal) },
+                    waitingMilliseconds: TestChild.hangCeilingMilliseconds
+                )
+            } else {
+                Issue.record("the background process of child \(pid) (its pid \(descendantPid.map(String.init) ?? "not reported"), start not recorded) was not confirmed ended, it may still be running")
+            }
         }
         try? outputPipe.fileHandleForWriting.close()
         try #require(getpgid(pid) == pid, "the child is not the leader of its own group")
@@ -452,6 +471,7 @@ struct RealProcessLauncherTests {
         defer { outputPipe.fileHandleForReading.readabilityHandler = nil }
         try #require(gotLine.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success, "the child never reported its background process")
         let descendantPID = try #require(pid_t(line.value.trimmingCharacters(in: .whitespacesAndNewlines)), "child reported \"\(line.value)\"")
+        descendantPid = descendantPID
         // Reads only, to check the premise of the group send; nothing is signalled by them.
         // A record that cannot be read is not the same as none: either one fails the test, naming which.
         let descendantRead = readProcessTable(descendantPID)
@@ -459,6 +479,7 @@ struct RealProcessLauncherTests {
             Issue.record("no record for the child's background process \(descendantPID): \(descendantRead)")
             return
         }
+        descendantIdentity = StoppedChildSupport.RecordedProcess(pid: descendantPID, start: descendant.start)
         try #require(descendant.parentPID == pid, "the background process \(descendantPID) is not the child's")
         try #require(getpgid(descendantPID) == pid, "the background process \(descendantPID) is not in the child's group")
 

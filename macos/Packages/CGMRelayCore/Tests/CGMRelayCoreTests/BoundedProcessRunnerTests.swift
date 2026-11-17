@@ -29,9 +29,16 @@ private struct RunnerLaunch {
     /// endChild ends the child the runner launched, if it is still there, and removes
     /// `directory` only once that is confirmed. The number is signalled only while it
     /// still shows the start recorded at launch. A child not confirmed ended fails the test naming it.
-    func endChild(removing directory: URL) {
+    /// A launch with no recorded identity counts as "nothing started" only when the runner
+    /// reported that the launch itself failed; otherwise a child may be running, so the
+    /// directory is kept and the test fails naming the unknown.
+    func endChild(removing directory: URL, launchFailed: Bool) {
         guard let recorded = recorder.recorded else {
-            try? FileManager.default.removeItem(at: directory)
+            if launchFailed {
+                try? FileManager.default.removeItem(at: directory)
+            } else {
+                Issue.record("test child \(ChildCleanup.describe(pid: 0, start: nil)) was not confirmed ended, it may still be running; no identity was recorded at launch and the launch was not reported failed, so \(directory.path) was kept")
+            }
             return
         }
         ChildCleanup.endRecordedRemovingOnEnd(
@@ -124,7 +131,8 @@ struct RealBoundedProcessRunnerTests {
         // The child's own timer is 30 s, so its absence of a marker proves nothing about
         // its end: the end is read from the process table, and a child left alive is ended here.
         let launch = RunnerLaunch()
-        defer { launch.endChild(removing: dir) }
+        var runResult: BoundedProcessResult?
+        defer { launch.endChild(removing: dir, launchFailed: runResult == .failedToLaunch) }
         let marker = dir.appendingPathComponent("marker")
         #expect(!FileManager.default.fileExists(atPath: marker.path))
 
@@ -135,6 +143,7 @@ struct RealBoundedProcessRunnerTests {
             standardInputData: Data(),
             timeout: .seconds(3)
         )
+        runResult = result
 
         // A runner that waited for the child to finish by itself would
         // write the marker.
@@ -314,6 +323,10 @@ struct RealBoundedProcessRunnerTests {
                     send: { _, signal in StoppedChildSupport.signal(recorded, signal) },
                     waitingMilliseconds: TestChild.hangCeilingMilliseconds
                 )
+            } else {
+                // No identity means no send is licensed, so nothing here can end the
+                // child; it is named as unknown and the record is kept.
+                Issue.record("test child \(ChildCleanup.describe(pid: 0, start: nil)) was not confirmed ended, it may still be running; no identity was recorded at launch, so \(dir.path) was kept")
             }
         }
         let script = "open(my $f,\">\",$ARGV[0]) or die; print $f $$; close($f) or die; kill 'STOP', $$; sleep 30"
@@ -390,7 +403,8 @@ struct RealBoundedProcessRunnerCallingThreadTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // The end is read from the process table; a child left alive is ended here.
         let launch = RunnerLaunch()
-        defer { launch.endChild(removing: dir) }
+        var runResult: BoundedProcessResult?
+        defer { launch.endChild(removing: dir, launchFailed: runResult == .failedToLaunch) }
         let marker = dir.appendingPathComponent("marker")
         let script = (ignoresTerminate ? "$SIG{TERM}='IGNORE'; " : "")
             + "sleep 30; open(my $m,\">\",$ARGV[0]) or die; print $m \"done\"; close($m) or die"
@@ -404,6 +418,7 @@ struct RealBoundedProcessRunnerCallingThreadTests {
                 timeout: .milliseconds(300)
             )
         }
+        runResult = result
         #expect(result == .timedOut)
         launch.requireEnded()
         #expect(!FileManager.default.fileExists(atPath: marker.path), "the child ran to its natural end")
