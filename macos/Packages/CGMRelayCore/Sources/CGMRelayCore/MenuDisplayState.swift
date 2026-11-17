@@ -332,7 +332,7 @@ public struct MenuDisplayState: Sendable, Equatable {
             // fuller explanation and the retry instruction.
             return "Couldn't start fresh"
         case .engineStatusUnknown:
-            return "Couldn't confirm it stopped"
+            return "Relay may still be running"
         }
     }
 
@@ -356,7 +356,7 @@ public struct MenuDisplayState: Sendable, Equatable {
         case .recoveryMoveFailed:
             return "Check that CGM Relay can write to its own folder, then try Start Fresh again."
         case .engineStatusUnknown:
-            return "CGM Relay's background process may still be running. Quit and reopen CGM Relay."
+            return "Quit and reopen CGM Relay."
         }
     }
 
