@@ -647,6 +647,192 @@ struct ChildSurvivorsTests {
     }
 }
 
+// MARK: - An end that the holder could not observe is never an end
+
+@Suite("A child whose exit the holder could not observe is not counted as ended", .noSurvivingChildren)
+struct UnobservedExitCleanupTests {
+    /// The wait fails outright: the holder cannot observe the exit, reaps
+    /// nothing and reports ProcessExitCode.statusUnknown. The child is a real
+    /// /bin/cat that this test ends itself, as its parent, by closing its input.
+    private static let failingWait: ChildSpawner.WaitForExit = { _ in (-1, siginfo_t()) }
+
+    private struct Started {
+        let held: HeldChild
+        let input: Pipe
+    }
+
+    private static func start() throws -> Started {
+        let input = Pipe()
+        let held = try HeldChild.start(
+            executable: "/bin/cat",
+            standardInput: input.fileHandleForReading.fileDescriptor,
+            waitForExit: failingWait
+        )
+        try? input.fileHandleForReading.close()
+        return Started(held: held, input: input)
+    }
+
+    /// endAsParent closes the child's input and collects it with a bounded
+    /// waitpid: the holder reaped nothing, so this test, its parent, still holds it.
+    private static func endAsParent(_ started: Started) {
+        try? started.input.fileHandleForWriting.close()
+        let pid = started.held.processIdentifier
+        let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+        var collected = false
+        while DispatchTime.now() < deadline {
+            var status: Int32 = 0
+            let result = waitpid(pid, &status, WNOHANG)
+            if result == pid { collected = true; break }
+            if result < 0 && errno != EINTR { break }
+            usleep(20_000)
+        }
+        #expect(collected, "test child \(ChildCleanup.describe(pid: pid, start: started.held.birthStart)) may still be running, it was not confirmed ended")
+    }
+
+    @Test("an unknown report is a report but not a reap: nothing is confirmed, no send is accepted, and the failure names the pid and the birth start")
+    func unknownReportIsNotAnEnd() throws {
+        let started = try Self.start()
+        defer { Self.endAsParent(started) }
+        let held = started.held
+        let start = try #require(held.birthStart, "no birth start was recorded")
+
+        #expect(!held.waitReaped(milliseconds: TestChild.hangCeilingMilliseconds), "an unobserved exit was confirmed")
+        #expect(held.watch.reportedStatusUnknown)
+        // What the earlier decisions read: a report arrived. It is not a reap.
+        #expect(!held.watch.reported.isEmpty)
+        #expect(!held.hasReportedExit)
+        #expect(!held.hasExited)
+        #expect(!held.send(SIGKILL), "a send was accepted after the holder gave up")
+
+        withKnownIssue(
+            "the end of the child cannot be confirmed",
+            {
+                ChildCleanup.endHeldRecordingNotConfirmed(
+                    pid: held.processIdentifier, start: held.birthStart, alreadyEnded: held.hasReportedExit,
+                    send: { held.send(SIGKILL) },
+                    waitForEnd: { held.waitReaped(milliseconds: $0) },
+                    waitingMilliseconds: TestChild.hangCeilingMilliseconds
+                )
+            },
+            matching: namesPidAndStart(pid: held.processIdentifier, start: start)
+        )
+    }
+
+    @Test("a process known through RunningProcess is confirmed reaped only by the holder's own word, and an unknown report is not that")
+    func launchedProcessIsConfirmedOnlyByTheReap() throws {
+        let started = try Self.start()
+        defer { Self.endAsParent(started) }
+        let process = RealProcess(child: started.held.child, stdinHandle: FileHandle.nullDevice)
+        #expect(!ConfirmedEnd.isReaped(process))
+        #expect(!ConfirmedEnd.wait(process, milliseconds: 100))
+
+        let ended = try HeldChild.start(executable: "/usr/bin/true")
+        #expect(ended.waitReaped())
+        #expect(ConfirmedEnd.isReaped(RealProcess(child: ended.child, stdinHandle: FileHandle.nullDevice)))
+    }
+
+    @Test("an observing helper that is not confirmed ended fails the test naming its pid and birth start, and one that is stays quiet")
+    func unresolvedHelperIsNamed() {
+        withKnownIssue(
+            "the helper's end was not seen",
+            { ObservedHelper.Observation(output: nil, helperPid: 4243, birthStart: "born-4243", helperEnded: false, helper: nil).failIfNotEnded() },
+            matching: namesPidAndStart(pid: 4243, start: "born-4243")
+        )
+        ObservedHelper.Observation(output: "x", helperPid: 4243, birthStart: "born-4243", helperEnded: true, helper: nil).failIfNotEnded()
+    }
+}
+
+@Suite("A record directory is kept unless the end of its child is confirmed or the launch is said to have failed")
+struct RecordDirectoryTests {
+    private func makeDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("record-directory-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    @Test("a directory with no pid file is not proof that nothing was started: it is not confirmed, the failure says so and the directory stays")
+    func absentRecordIsNotConfirmed() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = CallLog()
+        var outcome: ChildCleanup.Outcome?
+        withKnownIssue(
+            "no record exists and the launch was not reported failed",
+            { outcome = ChildCleanup.endRecordedChild(
+                pidFile: directory.appendingPathComponent("pid"), removingOnEnd: directory,
+                readStart: { _ in nil }, exists: { _ in false },
+                send: { log.send($0, $1) }, waitingMilliseconds: 100
+            ) }
+        )
+        #expect(outcome == .notConfirmed(pid: 0, start: nil))
+        #expect(FileManager.default.fileExists(atPath: directory.path), "the directory was deleted without proof that no child was started")
+        #expect(log.sends.isEmpty)
+    }
+
+    @Test("a directory with no pid file is removed when the caller says the launch itself failed")
+    func absentRecordAfterAFailedLaunchIsEnded() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outcome = ChildCleanup.endRecordedChild(
+            pidFile: directory.appendingPathComponent("pid"), removingOnEnd: directory, launchFailed: true,
+            readStart: { _ in nil }, exists: { _ in false },
+            send: { _, _ in }, waitingMilliseconds: 100
+        )
+        #expect(outcome == .ended)
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    @Test("a record kept by identity alone is removed only on a confirmed end, and an unconfirmed one fails naming the child and keeps it")
+    func identityRecordIsRemovedOnlyOnEnd() throws {
+        let kept = try makeDirectory()
+        let removed = try makeDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: kept)
+            try? FileManager.default.removeItem(at: removed)
+        }
+        withKnownIssue(
+            "the identity cannot be read",
+            { ChildCleanup.endRecordedRemovingOnEnd(
+                pid: 70_003, start: "born", removingOnEnd: kept,
+                readStart: { _ in nil }, exists: { _ in true },
+                send: { _, _ in }, waitingMilliseconds: 100
+            ) },
+            matching: namesPidAndStart(pid: 70_003, start: "born")
+        )
+        #expect(FileManager.default.fileExists(atPath: kept.path), "the record was deleted although the end was not confirmed")
+        let outcome = ChildCleanup.endRecordedRemovingOnEnd(
+            pid: 70_003, start: "born", removingOnEnd: removed,
+            readStart: { _ in nil }, exists: { _ in false },
+            send: { _, _ in }, waitingMilliseconds: 100
+        )
+        #expect(outcome == .ended)
+        #expect(!FileManager.default.fileExists(atPath: removed.path))
+    }
+}
+
+@Suite("A held child is ended only through its held signaller", .noSurvivingChildren)
+struct HeldChildSendGuardTests {
+    @Test("a held child whose identity does not hold is sent nothing by end, and says so with its pid and birth start")
+    func refusedSendIsNotConfirmed() throws {
+        // A replacement shown at birth: the signaller accepts no identity and refuses every send.
+        let held = try HeldChild.start(
+            executable: "/bin/sleep", arguments: ["2"],
+            readProcessTable: { pid in ProcessRecord(pid: pid, parentPID: getpid() + 1, start: ProcessStart(seconds: 1, microseconds: 0)) }
+        )
+        // The sleep ends by itself after 2 seconds; its reap is confirmed here on every path.
+        defer {
+            ChildCleanup.endHeldRecordingNotConfirmed(
+                pid: held.processIdentifier, start: held.birthStart, alreadyEnded: held.hasReportedExit,
+                send: {}, waitForEnd: { held.waitReaped(milliseconds: $0) },
+                waitingMilliseconds: TestChild.hangCeilingMilliseconds
+            )
+        }
+        let outcome = held.end(signals: [SIGTERM, SIGKILL], waitingMilliseconds: 100)
+        #expect(outcome == .notConfirmed(pid: held.processIdentifier, start: held.birthStart))
+        #expect(!held.hasExited, "a child whose identity did not hold was ended anyway")
+    }
+}
+
 // MARK: - The suites call the cleanup on every exit path
 
 /// SourceText reads a test file with its comments and the contents of its
@@ -883,6 +1069,93 @@ struct ProcessSuiteCleanupSourceTests {
     }
 }
 
+/// ReapFactRule says what a cleanup site must read and must not read to decide
+/// that its child has ended: the holder's confirmed reap, never the fact that an
+/// exit was reported (a report can be status unknown, which reaps nothing) or a
+/// semaphore a callback signals for any code.
+struct ReapFactRule: Sendable, CustomTestStringConvertible {
+    let file: String
+    let function: String
+    let requires: [String]
+    let forbids: [String]
+    var testDescription: String { "\(file) \(function)" }
+
+    func violations(in text: String) -> [String] {
+        guard let body = SourceText.functionBody(function, in: text) else { return ["\(function) was not found"] }
+        var found: [String] = []
+        for needed in requires where !body.inner.contains(needed) { found.append("\(function) does not use \(needed)") }
+        for banned in forbids where body.inner.contains(banned) { found.append("\(function) still uses \(banned)") }
+        return found
+    }
+}
+
+@Suite("Every cleanup site decides on the confirmed reap and names what it could not confirm")
+struct ProcessSuiteReapFactSourceTests {
+    static let rules: [ReapFactRule] = [
+        ReapFactRule(file: "EngineSupervisorTests.swift", function: "endEngineIfLeftRunning",
+                     requires: ["ConfirmedEnd.isReaped(", "ConfirmedEnd.wait(", "reportedStatusUnknown"], forbids: ["exitCodes.isEmpty", "exited.wait("]),
+        ReapFactRule(file: "RealProcessLauncherTests.swift", function: "endStarted",
+                     requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit("]),
+        ReapFactRule(file: "RealProcessLauncherTests.swift", function: "signalReachesTheChildsDescendants",
+                     requires: ["hasReportedExit", "waitReaped(", "send(SIGKILL)"],
+                     forbids: ["reported.isEmpty", "waitForExit(", "kill(", "endRecorded", "RecordedDescendant", "descendantRecord"]),
+        ReapFactRule(file: "RealProcessLauncherTests.swift", function: "endNow",
+                     requires: ["hasReportedExit", "waitReaped("], forbids: ["reported.isEmpty", "waitForExit("]),
+        ReapFactRule(file: "RealProcessLauncherTests.swift", function: "lineArrivesWhileEngineStillRuns",
+                     requires: ["ConfirmedEnd.isReaped(", "ConfirmedEnd.wait(", "reportedStatusUnknown"], forbids: ["exited.wait(", "alreadyEnded: false"]),
+        ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "lstart",
+                     requires: ["failIfNotEnded("], forbids: []),
+        ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "unsignallableChildIsNotConfirmedEnded",
+                     requires: ["ChildCleanup.endRecordedRemovingOnEnd("], forbids: ["removeItem("]),
+        ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "stoppedChildEndsTheRunAsTimedOut",
+                     requires: ["launchFailed:"], forbids: []),
+    ]
+
+    @Test("a cleanup site reads the confirmed reap, never that an exit was reported", arguments: rules)
+    func siteReadsTheConfirmedReap(_ rule: ReapFactRule) throws {
+        let found = rule.violations(in: try SourceText.load(rule.file))
+        #expect(found.isEmpty, "\(found.joined(separator: "; "))")
+    }
+
+    @Test("no test starts a process with Foundation's Process except TestChild, which never signals")
+    func onlyTestChildStartsAProcessByHand() throws {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let enumerator = try #require(FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil))
+        var checked = 0
+        for case let url as URL in enumerator where url.pathExtension == "swift" && url.lastPathComponent != "TestChild.swift" {
+            checked += 1
+            let text = SourceText.stripped(try String(contentsOf: url, encoding: .utf8))
+            let started = text.range(of: #"(?<![A-Za-z0-9_])Process\(\)"#, options: .regularExpression)
+            #expect(started == nil, "\(url.lastPathComponent) starts a Process by hand")
+        }
+        #expect(checked > 10, "only \(checked) test files were looked at")
+    }
+
+    @Test("every suite in this file that starts a real process carries the survivor check")
+    func suitesThatStartProcessesCarryTheSurvivorCheck() throws {
+        let text = try SourceText.load("ChildEndingTests.swift")
+        let starters = ["HeldChild.start(", "HeldSleeper(", "TestChild(", "ObservedHelper.read(", "ChildSpawner.spawn("]
+        var from = text.startIndex
+        var suites = 0
+        while let found = text.range(of: "@Suite(", range: from..<text.endIndex) {
+            var depth = 1
+            var cursor = found.upperBound
+            while cursor < text.endIndex, depth > 0 {
+                if text[cursor] == "(" { depth += 1 } else if text[cursor] == ")" { depth -= 1 }
+                cursor = text.index(after: cursor)
+            }
+            let attribute = String(text[found.lowerBound..<cursor])
+            let body = SourceText.braceBlock(in: text, from: cursor)?.inner ?? ""
+            suites += 1
+            from = cursor
+            if starters.contains(where: { body.contains($0) }) {
+                #expect(attribute.contains(".noSurvivingChildren"), "\(attribute) starts a process and does not carry .noSurvivingChildren")
+            }
+        }
+        #expect(suites > 5)
+    }
+}
+
 @Suite("The source rules reject what they are there to reject")
 struct ProcessSuiteCleanupRuleControlTests {
     private func problems(_ source: String) -> [String] {
@@ -958,6 +1231,18 @@ struct ProcessSuiteCleanupRuleControlTests {
         }
         """
         #expect(!problems(source).isEmpty)
+    }
+
+    @Test("a site that decides on a reported exit, a callback semaphore or a bare kill is rejected, one that reads the confirmed reap is accepted")
+    func reapFactRuleSeparatesTheShapes() {
+        let rule = ReapFactRule(file: "none", function: "end", requires: ["hasReportedExit"], forbids: ["reported.isEmpty", "kill("])
+        func violations(_ body: String) -> [String] {
+            rule.violations(in: SourceText.stripped("func end(_ x: X) {\n\(body)\n}"))
+        }
+        #expect(violations("ChildCleanup.endHeldRecordingNotConfirmed(alreadyEnded: x.child.hasReportedExit)").isEmpty)
+        #expect(!violations("ChildCleanup.endHeldRecordingNotConfirmed(alreadyEnded: !x.exits.reported.isEmpty)").isEmpty)
+        #expect(!violations("let ended = x.child.hasReportedExit; kill(-pid, SIGKILL)").isEmpty)
+        #expect(!violations("// x.child.hasReportedExit named only in a comment").isEmpty)
     }
 
     @Test("a thrown-away wait or cleanup result is found, an ordinary discarded launch is not")

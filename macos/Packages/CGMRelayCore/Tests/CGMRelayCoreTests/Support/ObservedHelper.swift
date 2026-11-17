@@ -37,6 +37,14 @@ enum ObservedHelper {
         let helperEnded: Bool
         /// The held helper, nil when none was started.
         let helper: HeldChild?
+
+        /// failIfNotEnded fails the test, naming the helper by pid and birth
+        /// start, when its end was not confirmed. A caller that uses the output
+        /// calls it first, so an unresolved helper is never read as "no answer".
+        func failIfNotEnded() {
+            guard !helperEnded else { return }
+            Issue.record("observing helper \(ChildCleanup.describe(pid: helperPid ?? 0, start: birthStart)) was not confirmed ended, it may still be running")
+        }
     }
 
     /// `readProcessTable` is the read the helper's signaller binds its
