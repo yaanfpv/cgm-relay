@@ -469,9 +469,11 @@ struct EngineSupervisorTests {
         var exitCodes: [Int32] { lock.withLock { codes } }
 
         /// endEngineIfLeftRunning kills the child this test started if no
-        /// exit was reported, then waits for the report.
+        /// exit was reported, then waits for the report. Once an exit was
+        /// reported there is nothing left to end or wait for.
         func endEngineIfLeftRunning(pid: Int32) {
-            if exitCodes.isEmpty { kill(pid, SIGKILL) }
+            guard exitCodes.isEmpty else { return }
+            kill(pid, SIGKILL)
             _ = exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds)))
         }
 
