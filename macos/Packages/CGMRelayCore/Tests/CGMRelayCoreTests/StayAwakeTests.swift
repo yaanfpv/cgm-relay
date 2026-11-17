@@ -711,13 +711,84 @@ struct SleepResetHelperProcessListTests {
 
 @Suite("StayAwakeCopy")
 struct StayAwakeCopyTests {
-    @Test("the permission note says it stays once granted and offers no way to remove it")
+    /// Every keep-awake string a person can see: the laptop and desktop
+    /// explanation, the password line and the approval line.
+    private static let shown: [(name: String, text: String)] = [
+        ("explanation laptop", StayAwakeCopy.explanation(isLaptop: true)),
+        ("explanation desktop", StayAwakeCopy.explanation(isLaptop: false)),
+        ("permissionNote", StayAwakeCopy.permissionNote),
+        ("approvalNeeded", StayAwakeCopy.approvalNeeded),
+    ]
+
+    private static func sentences(_ text: String) -> [String] {
+        var out: [String] = []
+        var current = ""
+        for ch in text {
+            current.append(ch)
+            if ch == "." || ch == "!" || ch == "?" {
+                out.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            }
+        }
+        let rest = current.trimmingCharacters(in: .whitespaces)
+        if !rest.isEmpty { out.append(rest) }
+        return out
+    }
+
+    @Test("each keep-awake string is at most two sentences", arguments: shown.map(\.name))
+    func atMostTwoSentences(name: String) {
+        let text = Self.shown.first { $0.name == name }!.text
+        let count = Self.sentences(text).count
+        #expect(count >= 1 && count <= 2, "\(name) has \(count) sentences")
+    }
+
+    @Test("each sentence of each keep-awake string is at most 90 characters", arguments: shown.map(\.name))
+    func sentencesAreShort(name: String) {
+        let text = Self.shown.first { $0.name == name }!.text
+        for sentence in Self.sentences(text) {
+            #expect(sentence.count <= 90, "\(name): \(sentence.count) characters in \"\(sentence)\"")
+        }
+    }
+
+    // The Settings footer is composed in the app target (GeneralPaneView),
+    // which joins explanation and permissionNote with one space; the setup
+    // caption uses the same package strings. So the footer is pinned here by
+    // the package strings it joins.
+    @Test("the Settings footer with keep-awake off is exactly the explanation then the password line")
+    func footerText() {
+        let footer = StayAwakeCopy.explanation(isLaptop: true) + " " + StayAwakeCopy.permissionNote
+        #expect(footer == "Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. Asks for your password once.")
+        #expect(StayAwakeCopy.approvalNeeded == "Allow CGM Relay in Login Items so this Mac can sleep after a crash.")
+        #expect(!footer.contains(StayAwakeCopy.approvalNeeded))
+    }
+
+    @Test("the laptop explanation says plugged in, lid closed and sleeping on battery")
+    func laptopExplanationClaims() {
+        let text = StayAwakeCopy.explanation(isLaptop: true).lowercased()
+        #expect(text.contains("plugged in"))
+        #expect(text.contains("lid closed"))
+        #expect(text.contains("battery"))
+        #expect(text.contains("sleeps"))
+    }
+
+    @Test("the desktop explanation says the Mac won't sleep while CGM Relay runs")
+    func desktopExplanationClaim() {
+        #expect(StayAwakeCopy.explanation(isLaptop: false) == "This Mac won't sleep while CGM Relay runs.")
+    }
+
+    @Test("the permission note says the password is asked once and offers no way to remove it")
     func permissionNote() {
         let note = StayAwakeCopy.permissionNote.lowercased()
-        #expect(note.contains("stays"))
-        #expect(note.contains("granted"))
+        #expect(note.contains("password"))
+        #expect(note.contains("once"))
         #expect(!note.contains("remove"))
         #expect(!note.contains("revoke"))
         #expect(!note.contains("take that permission away"))
+    }
+
+    @Test("the approval line names Login Items and the crash case")
+    func approvalClaims() {
+        #expect(StayAwakeCopy.approvalNeeded.contains("Login Items"))
+        #expect(StayAwakeCopy.approvalNeeded.lowercased().contains("crash"))
     }
 }
