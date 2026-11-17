@@ -143,6 +143,55 @@ struct RealBoundedProcessRunnerTests {
         #expect(text.hasPrefix("out\nerr\n"))
         #expect(run.output.count == 8 + 200_000)
     }
+
+    /// StoppedRunMode names which of the runner's entry points runs the child.
+    enum StoppedRunMode: String, Sendable, CaseIterable, CustomTestStringConvertible {
+        case run, runCapturingOutput, runOnCallingThread
+        var testDescription: String { rawValue }
+    }
+
+    @Test("a child stopped while it runs ends the run as timedOut and is reaped", arguments: StoppedRunMode.allCases)
+    func stoppedChildEndsTheRunAsTimedOut(_ mode: StoppedRunMode) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-stopped-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pidFile = dir.appendingPathComponent("pid")
+        var hung = false
+        defer {
+            // Only a run that never returned leaves its child behind.
+            if hung, let text = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(text) {
+                kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: dir)
+        }
+        // The child records its pid, then stops itself: the same state as a
+        // stop sent from outside, with no pid this test did not start.
+        let script = "open(my $f,\">\",$ARGV[0]) or die; print $f $$; close($f) or die; kill 'STOP', $$; sleep 30"
+        let executable = URL(fileURLWithPath: "/usr/bin/perl")
+        let arguments = ["-e", script, pidFile.path]
+
+        let runner = RealBoundedProcessRunner()
+        let result: BoundedProcessResult?
+        switch mode {
+        case .run:
+            result = await StoppedChildSupport.withinAsync {
+                await runner.run(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .seconds(1))
+            }
+        case .runCapturingOutput:
+            result = await StoppedChildSupport.withinAsync {
+                await runner.runCapturingOutput(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .seconds(1)).result
+            }
+        case .runOnCallingThread:
+            result = await StoppedChildSupport.withinBlocking {
+                runner.runOnCallingThread(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .seconds(1))
+            }
+        }
+        hung = result == nil
+        try #require(result != nil, "the run did not end for a stopped child")
+        #expect(result == .timedOut)
+
+        let pid = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8)))
+        #expect(StoppedChildSupport.isGone(pid: pid), "child \(pid) was not reaped")
+    }
 }
 
 @Suite("RealBoundedProcessRunner on the calling thread")

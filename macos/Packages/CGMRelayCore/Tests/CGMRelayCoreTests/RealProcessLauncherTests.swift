@@ -572,4 +572,118 @@ struct RealProcessLauncherTests {
         }
         #expect(got == testCase.wantExitCode)
     }
+
+    // MARK: A child stopped from outside
+
+    /// AnnouncedChild is a spawned perl child that has printed its ready line,
+    /// so whatever handlers it installs are in place.
+    private struct AnnouncedChild {
+        let child: SpawnedChild
+        let input: FileHandle
+        let exits: ExitRecord
+        var pid: Int32 { child.processIdentifier }
+    }
+
+    private func spawnAnnounced(_ script: String) async throws -> AnnouncedChild {
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let exits = ExitRecord()
+        let child = try ChildSpawner.spawn(
+            executableURL: URL(fileURLWithPath: "/usr/bin/perl"),
+            arguments: ["-e", script],
+            environment: ["PATH": "/usr/bin:/bin"],
+            standardInput: inputPipe.fileHandleForReading.fileDescriptor,
+            standardOutput: outputPipe.fileHandleForWriting.fileDescriptor,
+            standardError: nil
+        ) { exits.record($0) }
+        try inputPipe.fileHandleForReading.close()
+        try outputPipe.fileHandleForWriting.close()
+        let started = AnnouncedChild(child: child, input: inputPipe.fileHandleForWriting, exits: exits)
+        let readEnd = outputPipe.fileHandleForReading.fileDescriptor
+        let announced = await StoppedChildSupport.withinBlocking {
+            var seen = Data()
+            var byte: UInt8 = 0
+            while !seen.contains(UInt8(ascii: "\n")) {
+                let count = read(readEnd, &byte, 1)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { return false }
+                seen.append(byte)
+            }
+            return true
+        }
+        try? outputPipe.fileHandleForReading.close()
+        guard announced == true else {
+            endNow(started)
+            throw StoppedChildError.neverReady(pid: started.pid)
+        }
+        return started
+    }
+
+    private enum StoppedChildError: Error { case neverReady(pid: Int32) }
+
+    /// endNow leaves no child behind: it kills the child this test started if
+    /// its exit was not reported, closes its input and waits for the report.
+    private func endNow(_ started: AnnouncedChild) {
+        let alreadyReported = !started.exits.reported.isEmpty
+        if !alreadyReported && !started.child.hasExited { kill(started.pid, SIGKILL) }
+        try? started.input.close()
+        if !alreadyReported { _ = started.exits.waitForExit() }
+    }
+
+    private static let stopTarget = #"$|=1; print "ready\n"; my $line = <STDIN>; exit 7"#
+
+    @Test("a stopped child is not reported as exited: a send while it is stopped is delivered, and its own later exit is reported once with its code")
+    func stoppedThenContinuedChildReportsItsOwnExitOnce() async throws {
+        let started = try await spawnAnnounced(Self.stopTarget)
+        defer { endNow(started) }
+
+        #expect(kill(started.pid, SIGSTOP) == 0)
+        try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
+        let signaller = started.child.signaller
+        let sent = await StoppedChildSupport.withinBlocking { signaller.send(SIGCONT) }
+        try #require(sent != nil, "a send to the stopped child \(started.pid) did not return")
+        #expect(sent == true)
+
+        try started.input.close()
+        try #require(started.exits.waitForExit(), "child \(started.pid) did not report its exit")
+        #expect(started.exits.reported == [7])
+        #expect(started.child.hasExited)
+        #expect(signaller.send(SIGTERM) == false)
+    }
+
+    @Test("a send to a stopped child returns without waiting for it to exit, and the signal is delivered once it runs")
+    func sendToAStoppedChildDoesNotWaitForItsExit() async throws {
+        let started = try await spawnAnnounced(#"$SIG{USR1} = sub { exit 5 }; $|=1; print "ready\n"; while (1) { sleep 30 }"#)
+        defer { endNow(started) }
+
+        #expect(kill(started.pid, SIGSTOP) == 0)
+        try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
+        let signaller = started.child.signaller
+        let sent = await StoppedChildSupport.withinBlocking { signaller.send(SIGUSR1) }
+        try #require(sent != nil, "a send to the stopped child \(started.pid) blocked")
+        #expect(sent == true)
+        #expect(!started.child.hasExited)
+        #expect(started.exits.reported.isEmpty)
+
+        // Only now does the child run and act on the signal it was sent.
+        #expect(kill(started.pid, SIGCONT) == 0)
+        try #require(started.exits.waitForExit(), "child \(started.pid) did not act on the signal sent while it was stopped")
+        #expect(started.exits.reported == [5])
+    }
+
+    @Test("after a stopped child has been ended and reaped, every send is refused")
+    func sendAfterAStoppedChildWasReapedIsRefused() async throws {
+        let started = try await spawnAnnounced(Self.stopTarget)
+        defer { endNow(started) }
+
+        #expect(kill(started.pid, SIGSTOP) == 0)
+        try #require(StoppedChildSupport.waitUntilStopped(pid: started.pid), "child \(started.pid) never showed as stopped")
+        #expect(kill(started.pid, SIGKILL) == 0)
+        try #require(started.exits.waitForExit(), "child \(started.pid) did not report its exit")
+        #expect(started.exits.reported == [-SIGKILL])
+        let signaller = started.child.signaller
+        for signal in [SIGTERM, SIGKILL, SIGCONT, 0] {
+            #expect(signaller.send(signal) == false, "send(\(signal)) after the reap")
+        }
+    }
 }

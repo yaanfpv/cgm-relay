@@ -452,4 +452,97 @@ struct EngineSupervisorTests {
 
         #expect(!secret.isArmed)
     }
+
+    // MARK: A stopped engine
+
+    /// RecordingRealLauncher launches real children and keeps the one process
+    /// and every exit it reported, so a test can stop that child by its pid.
+    private final class RecordingRealLauncher: ProcessLauncher, @unchecked Sendable {
+        private let inner = RealProcessLauncher(engineLog: { _ in })
+        private let lock = NSLock()
+        private var launched: (any RunningProcess)?
+        private var codes: [Int32] = []
+        let ready = DispatchSemaphore(value: 0)
+        let exited = DispatchSemaphore(value: 0)
+
+        var process: (any RunningProcess)? { lock.withLock { launched } }
+        var exitCodes: [Int32] { lock.withLock { codes } }
+
+        /// endEngineIfLeftRunning kills the child this test started if no
+        /// exit was reported, then waits for the report.
+        func endEngineIfLeftRunning(pid: Int32) {
+            if exitCodes.isEmpty { kill(pid, SIGKILL) }
+            _ = exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds)))
+        }
+
+        func launch(
+            executableURL: URL,
+            arguments: [String],
+            standardInputData: Data,
+            onReady: @escaping @Sendable () -> Void,
+            onExit: @escaping @Sendable (Int32) -> Void
+        ) throws -> any RunningProcess {
+            let process = try inner.launch(
+                executableURL: executableURL,
+                arguments: arguments,
+                standardInputData: standardInputData,
+                onReady: { [self] in
+                    ready.signal()
+                    onReady()
+                },
+                onExit: { [self] code in
+                    lock.withLock { codes.append(code) }
+                    exited.signal()
+                    onExit(code)
+                }
+            )
+            lock.withLock { launched = process }
+            return process
+        }
+    }
+
+    @Test("stopAndWait ends an engine that something else stopped, even one that ignores the request to exit")
+    func stopAndWaitEndsAStoppedEngine() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("engine-stopped-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = dir.appendingPathComponent("engine")
+        try """
+        #!/usr/bin/perl
+        $SIG{TERM} = 'IGNORE';
+        $| = 1;
+        print "ready\n";
+        while (1) { sleep 30 }
+        """.write(to: engine, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
+
+        let launcher = RecordingRealLauncher()
+        let supervisor = EngineSupervisor(engineURL: engine, launcher: launcher, clock: FakeVirtualClock())
+        await supervisor.start(configuration: .fixture())
+        let process = try #require(launcher.process)
+        let pid = process.processIdentifier
+        defer {
+            // Only reached with the child still alive when the test failed.
+            launcher.endEngineIfLeftRunning(pid: pid)
+        }
+        let isReady = await StoppedChildSupport.withinBlocking {
+            launcher.ready.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
+        }
+        try #require(isReady == true, "engine pid \(pid) never reported ready")
+
+        // Stopped by someone else, not by the app.
+        #expect(kill(pid, SIGSTOP) == 0)
+        try #require(StoppedChildSupport.waitUntilStopped(pid: pid), "engine pid \(pid) never showed as stopped")
+
+        let returned: Void? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .seconds(1)) }
+        try #require(returned != nil, "stopAndWait did not return for the stopped engine pid \(pid)")
+
+        let reaped = await StoppedChildSupport.withinBlocking {
+            launcher.exited.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
+        }
+        try #require(reaped == true, "stopped engine pid \(pid) was never reported as ended")
+        #expect(launcher.exitCodes == [-SIGKILL])
+        #expect(StoppedChildSupport.isGone(pid: pid))
+        #expect(await supervisor.state == .stopped)
+    }
 }
