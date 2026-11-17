@@ -839,7 +839,10 @@ struct ProcessSuiteCleanupSourceTests {
         let body = try #require(SourceText.functionBody("lstart", in: runner), "no lstart in the runner tests")
         #expect(body.inner.contains("ObservedHelper."), "lstart does not read through ObservedHelper")
         for file in Self.threeFiles {
-            #expect(!(try SourceText.load(file)).contains("Process()"), "\(file) starts a Process by hand")
+            // `Process()` with no identifier character before it, so a name that merely ends in
+            // "Process" (a test called stopTerminatesRunningProcess) is not read as one.
+            let started = try SourceText.load(file).range(of: #"(?<![A-Za-z0-9_])Process\(\)"#, options: .regularExpression)
+            #expect(started == nil, "\(file) starts a Process by hand")
         }
     }
 
