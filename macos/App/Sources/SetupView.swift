@@ -370,7 +370,7 @@ struct SetupStayAwakeStep: View {
                 SetupStatusRow(
                     name: "stay-awake",
                     title: StayAwakeCopy.title,
-                    caption: model.stayAwakeNotice ?? StayAwakeCopy.explanation(isLaptop: model.isLaptop),
+                    caption: model.stayAwakeNotice ?? stayAwakeCaption,
                     captionIsError: model.stayAwakeNotice != nil,
                     wrapsCaption: true,
                     slot: slot
@@ -379,6 +379,13 @@ struct SetupStayAwakeStep: View {
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// stayAwakeCaption is the explanation, plus the password line on a
+    /// laptop so the prompt is not a surprise.
+    private var stayAwakeCaption: String {
+        let explanation = StayAwakeCopy.explanation(isLaptop: model.isLaptop)
+        return model.isLaptop ? explanation + " " + StayAwakeCopy.permissionNote : explanation
     }
 
     private var slot: SetupStatusRow.Slot {
