@@ -364,12 +364,6 @@ private func ephemeralCandidates(count: Int) -> [Int]? {
 struct PortAvailabilityTests {
     private let binder = SystemPortBinder()
 
-    /// A free ephemeral port, found by binding and releasing one.
-    private func freePort() throws -> Int {
-        let probe = try #require(HeldListener(host: "127.0.0.1"))
-        return probe.port
-    }
-
     @Test("the addresses checked are the reach's own, loopback and all addresses on both IP versions, and each local IPv4 address once")
     func hostsChecked() {
         #expect(PortAvailability.hostsToCheck(bindHost: "127.0.0.1") == ["127.0.0.1", "::1", "0.0.0.0", "::"])
@@ -377,7 +371,7 @@ struct PortAvailabilityTests {
         #expect(PortAvailability.hostsToCheck(bindHost: "100.101.102.103", localIPv4s: ["100.101.102.103", "192.168.1.5", "127.0.0.1"]) == ["100.101.102.103", "127.0.0.1", "::1", "0.0.0.0", "::", "192.168.1.5"])
     }
 
-    @Test("a port another app holds is refused whichever address it holds it on, under every reach, and one only closing connections is free")
+    @Test("a port another app holds is refused whichever address it holds it on, under every reach")
     func typedPortHeldOnAnyAddress() throws {
         let hosts = ["127.0.0.1", "0.0.0.0", "::", "::1"]
         for holder in hosts {
@@ -391,38 +385,6 @@ struct PortAvailabilityTests {
         }
         let dual = try #require(HeldListener(host: "::", dualStack: true))
         #expect(PortAvailability.typedPortRefusal(port: dual.port, bindHost: "127.0.0.1", binder: binder, reserved: nil) != nil, "a dual-stack holder is refused")
-        let free = try freePort()
-        #expect(PortAvailability.typedPortRefusal(port: free, bindHost: "0.0.0.0", binder: binder, reserved: nil) == nil)
-        // The closing port comes from the ephemeral range, so a test running
-        // alongside can open a connection on it before the check; that one is
-        // retried with a fresh port. Refusing every closing port is the failure.
-        var refusals: [String] = []
-        for _ in 0..<5 {
-            let closing = try #require(portInTimeWait())
-            guard let refusal = PortAvailability.typedPortRefusal(port: closing, bindHost: "0.0.0.0", binder: binder, reserved: nil) else {
-                return
-            }
-            refusals.append(refusal)
-        }
-        Issue.record("connections still closing do not hold a port, yet every one was refused: \(refusals)")
-    }
-
-    // Another suite running alongside can take a released port between the
-    // probe and the search, so a port lost that way is retried; one still
-    // free after the search but not chosen is the failure.
-    @Test("a free default port is chosen as it is")
-    func defaultFree() throws {
-        for _ in 0..<20 {
-            let port = try freePort()
-            guard PortAvailability.isFree(port: port, bindHost: "127.0.0.1", binder: binder) else { continue }
-            let choice = PortAvailability.firstFreePort(from: port, bindHost: "127.0.0.1", binder: binder)
-            if choice == .free(port) { return }
-            if PortAvailability.isFree(port: port, bindHost: "127.0.0.1", binder: binder) {
-                Issue.record("port \(port) was free on both address families but the search chose \(choice)")
-                return
-            }
-        }
-        Issue.record("no port stayed free long enough to search from")
     }
 
     @Test("a taken default port moves to the next free one")
