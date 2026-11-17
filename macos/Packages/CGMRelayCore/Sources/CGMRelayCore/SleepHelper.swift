@@ -90,8 +90,9 @@ public enum SleepResetHelper {
 
     /// resetTimeout is how long the command may run before the runner ends
     /// it. pmset writes one setting and returns in well under a second, so
-    /// 10 s is generous; with the runner's grace after it, a stuck run still
-    /// ends well inside the helper's 20 s look interval.
+    /// 10 s is generous; with the runner's grace and its bound on the wait
+    /// after a kill, a stuck run still returns well inside the helper's 20 s
+    /// look interval.
     public static let resetTimeout: Duration = .seconds(10)
 
     /// ResetOutcome is how one run of the command ended.
