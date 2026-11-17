@@ -10,24 +10,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Keep this Mac awake, in setup and in Settings: while CGM Relay runs and the Mac is plugged in it doesn't sleep, lid closed included on a laptop, and on battery it sleeps as usual. On a laptop, turning it on asks for your Mac's password once and for you to allow a small helper once in System Settings under Login Items; the helper lets the Mac sleep again whenever CGM Relay is not running, however it ended, a crash or a force quit included. Both stay once granted.
-- Use the Tailscale built into CGM Relay, in setup and in Settings. If you already have Tailscale you choose between yours and the built-in one; if not, you choose it with a button and sign in once in a window CGM Relay opens, and get a public https address that only your token opens, so your phone needs nothing installed. CGM Relay tests the address every two minutes and says Ready only while it answers, with the time it last did; it says when the address stops answering and repairs it by itself, waits quietly while your Mac is offline, and has a Try Again button. A new address shows as publishing while Tailscale makes its name exist, Tailscale's own error appears when it gives one, and Settings warns you before your Tailscale sign-in expires, with a button to sign in again. Setup lets you continue only once the address works, unless you choose Set Up Later. Moving away from the built-in Tailscale, to your own or to This Mac only, logs this Mac out of your Tailscale account and deletes its sign-in, trying again later if Tailscale can't be reached; Tailscale keeps the Mac in your machine list, marked expired, until you remove it there. Signing out of LibreLinkUp leaves the built-in Tailscale in place, so your address stays the same when you sign in again. The Tailscale sign-in is kept out of Time Machine backups.
-- Sweet Dreams and Zukka join the follower apps in Connect. Sweet Dreams reads from its own servers, so it needs the built-in Tailscale address, and Connect offers to switch if you are on your own Tailscale. Zukka, the App Store build of xDrip4iOS, gets the same Connect steps as xDrip4iOS.
-- People updating from an earlier version see only the new steps, in a short "What's new in this update" window, instead of the whole setup again. Each answer is saved as you give it, and Later closes the window until the next launch.
-- Copy Diagnostics includes counts of what went wrong with the built-in address.
+- Keep this Mac awake, in setup and Settings. It stays awake while plugged in, lid closed too, and sleeps as usual on battery. It asks for your password once, and for Login Items approval so the Mac can sleep after a crash.
+- Use the Tailscale built into CGM Relay: choose it with a button and sign in once. Your phone gets a public https address that needs your token for your readings, and nothing to install.
+- Settings warns you before your Tailscale sign-in expires. Switching to your own Tailscale or to This Mac only logs this Mac out of your Tailscale account, where it stays listed as expired until you remove it.
+- Signing out of LibreLinkUp keeps the built-in address, so it works again when you sign back in.
+- Sweet Dreams and Zukka join the follower apps in Connect. Sweet Dreams needs the built-in address, and Connect offers to switch.
+- Updating from an earlier version opens a short "What's new in this update" window with only the new steps. Later closes it until the next launch.
 
 ### Changed
 
-- Follower apps that ask for Nightscout's insulin and carbs on board now get Nightscout's own empty answer, and a refused request gets Nightscout's error body.
-- A follower app that checks the connection with a wrong token now gets Nightscout's "unauthorized" answer instead of a success, so a mistyped token shows up at setup. A token sent twice counts if either copy is right, and a wrong one is caught even after a blank one. Asking without a token still works as before.
-- The local network route is removed in favour of Tailscale. If you used it, CGM Relay keeps the relay on this Mac only until you choose a Tailscale way to reach it, and deletes the certificate it had saved.
-- The libraries CGM Relay is built on are up to date, the Go SQLite, compression and system packages among them. Nothing changes in how it works.
+- A follower app that checks the connection with a wrong token now gets Nightscout's "unauthorized" answer, so a mistyped token shows up at setup.
+- Follower apps that ask for insulin and carbs on board get Nightscout's own empty answer.
+- The local network route is removed in favour of Tailscale. If you used it, the relay stays on this Mac only until you choose a Tailscale way, and the saved certificate is deleted.
+- The libraries CGM Relay is built on are up to date.
 
 ### Fixed
 
-- Opening CGM Relay while it is already running brings the running copy forward instead of starting a second one.
+- Opening CGM Relay while it is already running brings the running copy forward.
 - A second copy started at the same moment can no longer undo the sign-in or keys the first one saved.
-- Stopping the relay, or giving up on a check that took too long, now signals only the process CGM Relay started and the processes it started in turn. CGM Relay keeps hold of each process until it has ended, so its number cannot pass to another process while a stop could still be sent, and nothing is sent once it has ended.
+- Stopping the relay signals only the processes CGM Relay started.
 
 ## [1.0.2] - 2026-10-14
 
