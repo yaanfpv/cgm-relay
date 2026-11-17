@@ -262,6 +262,80 @@ struct EngineSupervisorTests {
         #expect(await supervisor.state == .failed(.storeDamaged))
     }
 
+    @Test("status unknown fails permanently: no backoff, no second engine through any restart path, and the state says why")
+    func statusUnknownExitStartsNoSecondEngine() async throws {
+        let launcher = FakeProcessLauncher()
+        let clock = FakeVirtualClock()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock)
+        await supervisor.start(configuration: .fixture())
+
+        launcher.finishLaunch(at: 0, exitCode: ProcessExitCode.statusUnknown)
+        #expect(await waitUntil { await supervisor.state == .failed(.engineStatusUnknown) })
+
+        // The backoff path: time passes and nothing is scheduled or started.
+        await clock.advance(by: .seconds(120))
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(await clock.sleepRequests.isEmpty, "an engine that may still run must never enter the backoff wait")
+        #expect(launcher.launchCount == 1, "must never start a second engine while the first may still run")
+
+        // The caller's own start path: a failed supervisor ignores it.
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "start must not launch while the engine's status is unknown")
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+    }
+
+    @Test("the engine's own exit codes still map as before: store and port codes fail permanently, any other code restarts with backoff")
+    func exitCodesStillMapAsBefore() async throws {
+        let permanent: [(Int32, EngineSupervisor.FailureReason)] = [
+            (EngineSupervisor.storeKeyMismatchExitCode, .storeKeyMismatch),
+            (EngineSupervisor.storeInUseExitCode, .storeInUse),
+            (EngineSupervisor.storeDamagedExitCode, .storeDamaged),
+            (EngineSupervisor.portInUseExitCode, .portInUse),
+        ]
+        for (code, reason) in permanent {
+            let launcher = FakeProcessLauncher()
+            let clock = FakeVirtualClock()
+            let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock)
+            await supervisor.start(configuration: .fixture())
+            launcher.finishLaunch(at: 0, exitCode: code)
+            #expect(await waitUntil { await supervisor.state == .failed(reason) }, "exit code \(code)")
+            #expect(launcher.launchCount == 1)
+        }
+        // 255 is what the holder reports when the reap finds the child
+        // already gone: an ordinary crash, restarted.
+        for code in [Int32(1), ChildSpawner.exitCodeWhenUnknown, -9] {
+            let launcher = FakeProcessLauncher()
+            let clock = FakeVirtualClock()
+            let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock)
+            await supervisor.start(configuration: .fixture())
+            launcher.finishLaunch(at: 0, exitCode: code)
+            #expect(await waitUntil { await clock.sleepRequests.count == 1 }, "exit code \(code)")
+            await clock.advance(by: .seconds(2))
+            #expect(await waitUntil { launcher.launchCount == 2 }, "exit code \(code)")
+        }
+    }
+
+    @Test("stopAndWait returns false and fails with status unknown when the ended engine is never confirmed reaped, and starts nothing")
+    func stopAndWaitWithAnEngineThatIsNeverReapedReturnsFalse() async throws {
+        let launcher = FakeProcessLauncher()
+        launcher.processesIgnoreTerminate = true // its waitUntilExit never turns true
+        let clock = FakeVirtualClock()
+        let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock)
+        await supervisor.start(configuration: .fixture())
+
+        let confirmed: Bool? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .zero) }
+        try #require(confirmed != nil, "stopAndWait did not return")
+        #expect(confirmed == false)
+        #expect(launcher.wasKilled(at: 0))
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+
+        await clock.advance(by: .seconds(120))
+        try await Task.sleep(for: .milliseconds(30))
+        await supervisor.start(configuration: .fixture())
+        #expect(launcher.launchCount == 1, "no second engine while the first may still run")
+        #expect(await supervisor.state == .failed(.engineStatusUnknown))
+    }
+
     @Test("clearFailure resets a failed supervisor to stopped, and a fresh start begins a clean backoff schedule")
     func clearFailureAllowsAFreshStart() async throws {
         let launcher = FakeProcessLauncher()
@@ -600,8 +674,9 @@ struct EngineSupervisorTests {
 
             // A zero timeout leaves no time for the engine to exit on its own,
             // so the stop has to end it by force.
-            let returned: Void? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .zero) }
+            let returned: Bool? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .zero) }
             try #require(returned != nil, "round \(round): stopAndWait did not return for engine pid \(pid)")
+            #expect(returned == true, "round \(round): stopAndWait did not confirm the engine ended")
 
             // Read at the instant of return, with no wait for any report.
             let reported = launcher.exitCodes
