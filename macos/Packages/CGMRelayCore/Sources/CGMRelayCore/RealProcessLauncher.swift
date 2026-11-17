@@ -28,7 +28,11 @@ final class RealProcess: RunningProcess, @unchecked Sendable {
         let deadline = ContinuousClock.now + timeout
         while !child.hasReportedExit {
             if ContinuousClock.now >= deadline { return false }
-            try? await Task.sleep(for: .milliseconds(25))
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                return child.hasReportedExit
+            }
         }
         return true
     }
