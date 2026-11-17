@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+@testable import CGMRelayCore
 
 /// These checks are the contract of TestChild (Support/TestChild.swift), the
 /// test-target routine the credential lock test uses to end its child: it ends the child by
@@ -26,7 +27,7 @@ import Foundation
 /// bound. It may be called again after an unknown result and then reports
 /// ended once the child has exited. `endRecordingUnknown` calls `end` and, for
 /// an unknown result, records a test failure whose comment names the pid.
-@Suite("TestChild ends a child by end of input")
+@Suite("TestChild ends a child by end of input", .noSurvivingChildren)
 struct ChildEndingTests {
     private static let python = "/usr/bin/python3"
 
@@ -202,43 +203,27 @@ private final class CallLog: @unchecked Sendable {
     var isGone: Bool { lock.withLock { goneFlag } }
 }
 
-/// HeldSleeper is a real /bin/sleep child this test holds and ends itself.
+/// HeldSleeper is a real /bin/sleep child, started through ChildSpawner so it
+/// is held from birth, which this test ends through that handle.
 private final class HeldSleeper: @unchecked Sendable {
-    let pid: Int32
-    private let process: Process
-    private let exited: DispatchSemaphore
-    private let lock = NSLock()
-    private var observed = false
+    let held: HeldChild
 
     init() throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
-        process.arguments = ["30"]
-        let exited = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in exited.signal() }
-        try process.run()
-        self.process = process
-        self.exited = exited
-        self.pid = process.processIdentifier
+        held = try HeldChild.start(executable: "/bin/sleep", arguments: ["30"])
     }
 
-    var isRunning: Bool { process.isRunning }
+    var pid: Int32 { held.processIdentifier }
 
-    func terminate() { process.terminate() }
+    var isRunning: Bool { !held.hasExited }
 
-    /// waitForEnd waits on the exit event for at most the given bound.
-    func waitForEnd(milliseconds: Int32) -> Bool {
-        if lock.withLock({ observed }) { return true }
-        guard exited.wait(timeout: .now() + .milliseconds(Int(max(0, milliseconds)))) == .success else { return false }
-        lock.withLock { observed = true }
-        return true
-    }
+    func terminate() { held.send(SIGTERM) }
 
-    /// endNow ends the child this test holds and says whether its exit was seen.
-    func endNow() -> Bool {
-        if !lock.withLock({ observed }) && process.isRunning { process.terminate() }
-        return waitForEnd(milliseconds: TestChild.hangCeilingMilliseconds)
-    }
+    /// waitForEnd waits for the confirmed reap, at most the given bound.
+    func waitForEnd(milliseconds: Int32) -> Bool { held.waitReaped(milliseconds: milliseconds) }
+
+    /// endNow ends the child through its held signaller and says whether its
+    /// reap was confirmed.
+    func endNow() -> Bool { held.end(signals: [SIGKILL]) == .ended }
 }
 
 private func namesPidAndStart(pid: Int32, start: String) -> @Sendable (Issue) -> Bool {
@@ -401,7 +386,7 @@ struct ChildCleanupTests {
     }
 }
 
-@Suite("ChildCleanup ends a child the caller holds and says plainly when it could not confirm the end")
+@Suite("ChildCleanup ends a child the caller holds and says plainly when it could not confirm the end", .noSurvivingChildren)
 struct HeldChildCleanupTests {
     private static let start = "Mon Jan  1 00:00:00 2001"
     private static let fakePid: Int32 = 70_002
@@ -491,7 +476,7 @@ struct HeldChildCleanupTests {
     }
 }
 
-@Suite("ObservedHelper ends and collects the helper process it starts, whatever the observation returns")
+@Suite("ObservedHelper holds the helper it starts from birth and says when it could not confirm its end", .noSurvivingChildren)
 struct ObservedHelperTests {
     @Test("a helper that finishes in time gives its output and is collected")
     func finishedHelperGivesOutput() throws {
@@ -522,32 +507,60 @@ struct ObservedHelperTests {
         #expect(StoppedChildSupport.isGone(pid: pid), "helper \(pid) was not collected")
     }
 
-    @Test("a helper whose start time changed since launch is sent nothing and is not confirmed ended")
-    func changedIdentityIsNeverSignalled() throws {
-        let log = CallLog()
-        let reads = CallLog()
-        // The number shows one start at launch and another before the send. The
-        // sleep ends by itself after 3 seconds, so nothing here has to end it.
-        let observation = ObservedHelper.read(
-            executable: "/bin/sleep", arguments: ["3"], waitingMilliseconds: 100,
-            readStart: { _ in reads.event("read"); return reads.events.count == 1 ? "launch" : "other" },
-            send: { log.send($0, $1) }
-        )
-        #expect(observation.helperPid != nil)
-        #expect(observation.output == nil)
-        #expect(!observation.helperEnded, "a helper whose end was not seen was reported ended")
-        #expect(log.sends.isEmpty, "a signal went to a number that shows another start time")
+    /// IdentityGate scripts what the process table shows for a helper after its
+    /// birth read, and counts the reads.
+    private final class IdentityGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reads = 0
+        private var other = true
+        func read(_ pid: pid_t, real: ProcessRecord?) -> ProcessRecord? {
+            lock.withLock {
+                reads += 1
+                guard reads > 1, other, let real else { return real }
+                return ProcessRecord(pid: real.pid, parentPID: real.parentPID, start: ProcessStart(seconds: real.start.seconds, microseconds: real.start.microseconds + 1))
+            }
+        }
+        func showRealAgain() { lock.withLock { other = false } }
     }
 
-    @Test("a helper whose start time cannot be read is sent nothing and is not confirmed ended")
-    func unreadableIdentityIsNeverSignalled() throws {
-        let log = CallLog()
+    enum UnboundIdentity: String, Sendable, CaseIterable, CustomTestStringConvertible {
+        case nothingAtBirth, replacementAtBirth, changedAfterBirth
+        var testDescription: String { rawValue }
+    }
+
+    @Test("a helper whose identity does not hold is sent nothing and is not confirmed ended, and its sleep is ended through the test's own handle", arguments: UnboundIdentity.allCases)
+    func unboundIdentityIsNeverSignalled(_ identity: UnboundIdentity) {
+        let gate = IdentityGate()
+        // The sleep ends by itself after 2 seconds, so it cannot outlive the test
+        // whatever happens here, and the short bound below always expires first.
         let observation = ObservedHelper.read(
-            executable: "/bin/sleep", arguments: ["3"], waitingMilliseconds: 100,
-            readStart: { _ in nil }, send: { log.send($0, $1) }
+            executable: "/bin/sleep", arguments: ["2"], waitingMilliseconds: 100,
+            readProcessTable: { pid in
+                let real = LaunchedChildSignaller.systemProcessTable(pid)
+                switch identity {
+                case .nothingAtBirth: return nil
+                case .replacementAtBirth: return ProcessRecord(pid: pid, parentPID: getpid() + 1, start: ProcessStart(seconds: 1, microseconds: 0))
+                case .changedAfterBirth: return gate.read(pid, real: real)
+                }
+            }
         )
-        #expect(!observation.helperEnded)
-        #expect(log.sends.isEmpty, "a signal was sent on an identity that could not be read")
+        let helper = observation.helper
+        // Ended through the test's own handle on every path from here.
+        defer {
+            if let helper {
+                gate.showRealAgain()
+                ChildCleanup.endHeldRecordingNotConfirmed(
+                    pid: helper.processIdentifier, start: helper.birthStart, alreadyEnded: helper.hasReportedExit,
+                    send: { helper.send(SIGKILL) },
+                    waitForEnd: { helper.waitReaped(milliseconds: $0) },
+                    waitingMilliseconds: TestChild.hangCeilingMilliseconds
+                )
+            }
+        }
+        #expect(helper != nil && observation.helperPid == helper?.processIdentifier)
+        #expect(observation.output == nil)
+        #expect(!observation.helperEnded, "a helper whose end was not seen was reported ended")
+        #expect(helper?.hasExited == false, "a helper whose identity did not hold was ended anyway")
     }
 
     @Test("a helper that cannot be started gives no output and has no process to end")
@@ -558,7 +571,7 @@ struct ObservedHelperTests {
     }
 }
 
-@Suite("ChildSurvivors names every child the suites started and left alive")
+@Suite("ChildSurvivors names every child the suites started and left alive", .noSurvivingChildren)
 struct ChildSurvivorsTests {
     private final class Census: @unchecked Sendable {
         private let lock = NSLock()

@@ -28,11 +28,20 @@ enum ChildCleanup {
         "pid \(pid) (start \(start ?? "not recorded"))"
     }
 
-    /// launchStart reads the start time of a child just launched and still
-    /// held, as text, for the failure message of a held child.
-    static func launchStart(pid: Int32) -> String? {
-        LaunchedChildSignaller.systemProcessTable(pid).map { "\($0.start.seconds).\($0.start.microseconds)" }
+    /// startText writes a process-table start time as text.
+    static func startText(_ record: ProcessRecord) -> String {
+        "\(record.start.seconds).\(record.start.microseconds)"
     }
+
+    /// startNow reads the start time the process table shows for a pid now, as
+    /// text. It names whatever holds the number at this moment, so it is only
+    /// ever a reading to compare or to print, never what licenses a send.
+    static func startNow(pid: Int32) -> String? {
+        LaunchedChildSignaller.systemProcessTable(pid).map(startText)
+    }
+
+    /// launchStart is startNow under its earlier name.
+    static func launchStart(pid: Int32) -> String? { startNow(pid: pid) }
 
     // MARK: A child the caller holds
 
@@ -128,20 +137,31 @@ enum ChildCleanup {
     /// pid on the first line and its start text on the second, and ends it as
     /// endRecorded does. It deletes `directory` only when the child is
     /// confirmed ended; otherwise it fails the test naming the child and keeps
-    /// the record. A directory with no record file holds no known child and is
-    /// deleted.
+    /// the record.
+    ///
+    /// A directory with no record file is not proof that no child was started:
+    /// the child may write its record later than this runs. It is treated as
+    /// "no child" only when the caller says the launch itself failed
+    /// (`launchFailed`); otherwise it is not confirmed, a failure is recorded
+    /// and the directory is kept.
     @discardableResult
     static func endRecordedChild(
         pidFile: URL,
         removingOnEnd directory: URL,
+        launchFailed: Bool = false,
         readStart: (Int32) -> String?,
         exists: (Int32) -> Bool,
         send: (Int32, Int32) -> Void,
         waitingMilliseconds: Int32
     ) -> Outcome {
         guard FileManager.default.fileExists(atPath: pidFile.path) else {
-            try? FileManager.default.removeItem(at: directory)
-            return .ended
+            if launchFailed {
+                try? FileManager.default.removeItem(at: directory)
+                return .ended
+            }
+            let outcome = Outcome.notConfirmed(pid: 0, start: nil)
+            recordIfNotConfirmed(outcome, detail: "no record exists at \(pidFile.path) and the launch was not reported failed, so a child may still be running and may write it later; the directory was kept")
+            return outcome
         }
         let lines = (try? String(contentsOf: pidFile, encoding: .utf8))
             .map { $0.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) } ?? []
@@ -152,6 +172,25 @@ enum ChildCleanup {
             recordIfNotConfirmed(outcome, detail: "its record at \(pidFile.path) could not be read, so no child could be ended; the record was kept")
             return outcome
         }
+        return endRecordedRemovingOnEnd(
+            pid: pid, start: start, removingOnEnd: directory,
+            readStart: readStart, exists: exists, send: send, waitingMilliseconds: waitingMilliseconds
+        )
+    }
+
+    /// endRecordedRemovingOnEnd ends a child known by the identity recorded at
+    /// its launch, deletes `directory` only when the end is confirmed, and
+    /// otherwise fails the test naming the child and keeps the directory.
+    @discardableResult
+    static func endRecordedRemovingOnEnd(
+        pid: Int32,
+        start: String,
+        removingOnEnd directory: URL,
+        readStart: (Int32) -> String?,
+        exists: (Int32) -> Bool,
+        send: (Int32, Int32) -> Void,
+        waitingMilliseconds: Int32
+    ) -> Outcome {
         let outcome = endRecorded(
             pid: pid, start: start, readStart: readStart, exists: exists,
             send: send, waitingMilliseconds: waitingMilliseconds
@@ -159,7 +198,7 @@ enum ChildCleanup {
         if outcome == .ended {
             try? FileManager.default.removeItem(at: directory)
         } else {
-            recordIfNotConfirmed(outcome, detail: "its record at \(pidFile.path) was kept")
+            recordIfNotConfirmed(outcome, detail: "its record in \(directory.path) was kept")
         }
         return outcome
     }
