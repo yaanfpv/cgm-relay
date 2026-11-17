@@ -211,7 +211,9 @@ final class AppModel: ObservableObject {
         return LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: true)
     }
 
-    var canStart: Bool { credentialsConfigured && engineState == .stopped }
+    /// canStart is false while a stop is still waiting for the engine's end, since the supervisor
+    /// starts nothing until that end is confirmed and a press then would do nothing.
+    var canStart: Bool { credentialsConfigured && engineState == .stopped && lifetimes.engine != .confirming }
 
     /// canStop is true only while stopping would actually change
     /// something: a running engine, one still starting, or one waiting on
