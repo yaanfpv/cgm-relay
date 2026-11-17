@@ -1497,7 +1497,9 @@ final class AppModel: ObservableObject {
         }
         boundHost = ReachAddressResolver.bindHost(for: settings.effectiveReach, interfaces: interfaces)
         engineUsesKeptFolder = stateDirectory != nil
-        // A status from before this start must not read as this node's.
+        // A status from before this start must not read as this node's,
+        // including one still being fetched.
+        await statusPoller.discardPending()
         latestStatus?.builtIn = nil
         refreshBuiltInRoute()
         await alertEngine.resumeAfterEngineStart()
