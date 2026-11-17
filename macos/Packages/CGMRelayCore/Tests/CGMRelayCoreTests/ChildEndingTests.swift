@@ -1448,6 +1448,61 @@ struct LaunchAccountTests {
         #expect(read.asked == testCase.reads, "the read after the release looked at \(read.asked)")
     }
 
+    /// OracleCase is a list of calls with the positions the oracle must name and
+    /// the identities it must have been asked about.
+    struct OracleCase: Sendable, CustomTestStringConvertible {
+        let label: String
+        let results: [BoundedProcessResult?]
+        let identities: [Int32?]
+        /// the identities whose typed read shows them gone now
+        var gone: Set<Int32> = []
+        var named: [Int] = []
+        var reads: [Int32] = []
+        var testDescription: String { label }
+
+        var calls: [LaunchCall] {
+            zip(results, identities).map { result, pid in
+                LaunchCall(result: result, identity: pid.map(LaunchAccountTests.identity))
+            }
+        }
+    }
+
+    static let oracleCases: [OracleCase] = [
+        OracleCase(label: "a timed-out run whose identity still reads present is named",
+                   results: [.timedOut], identities: [101], named: [0], reads: [101]),
+        OracleCase(label: "a timed-out run whose identity reads gone is not named",
+                   results: [.timedOut], identities: [101], gone: [101], reads: [101]),
+        OracleCase(label: "exited(0) whose identity still reads present is named",
+                   results: [.exited(0)], identities: [101], named: [0], reads: [101]),
+        OracleCase(label: "exited(0) whose identity reads gone is not named",
+                   results: [.exited(0)], identities: [101], gone: [101], reads: [101]),
+        OracleCase(label: "an unconfirmed call whose identity reads gone is not named",
+                   results: [.notConfirmedEnded], identities: [101], gone: [101], reads: [101]),
+        OracleCase(label: "an unconfirmed call whose identity reads present is named",
+                   results: [.notConfirmedEnded], identities: [101], named: [0], reads: [101]),
+        OracleCase(label: "a call with no result yet whose identity reads present is named",
+                   results: [nil], identities: [101], named: [0], reads: [101]),
+        OracleCase(label: "no identity with a confirmed end fails nothing and reads nothing",
+                   results: [.exited(0), .timedOut, .exited(255), .failedToLaunch], identities: [nil, nil, nil, nil]),
+        OracleCase(label: "no identity and unconfirmed is named",
+                   results: [.notConfirmedEnded], identities: [nil], named: [0]),
+        OracleCase(label: "no identity and no result is named",
+                   results: [nil], identities: [nil], named: [0]),
+        OracleCase(label: "no calls: nothing is named and nothing is read",
+                   results: [], identities: []),
+        OracleCase(label: "every identified call is read, whatever its result, and no call without an identity is",
+                   results: [.exited(0), .timedOut, .notConfirmedEnded, .exited(1), nil], identities: [101, 102, 103, nil, 105],
+                   gone: [101, 103], named: [1, 4], reads: [101, 102, 103, 105]),
+    ]
+
+    @Test("the oracle names every call whose identity does not read gone now, whatever its result, and every unbound call without a confirmed end", arguments: oracleCases)
+    func oraclePerCall(_ testCase: OracleCase) {
+        let read = AccountedRead(gone: testCase.gone)
+        let named = LaunchAccount.notShownEnded(testCase.calls, gone: read.isGone)
+        #expect(named == testCase.named)
+        #expect(read.asked == testCase.reads, "the typed read looked at \(read.asked)")
+    }
+
     @Test("the signalling route signals only a call that has an identity and no confirmed end")
     func signalTargets() {
         let calls = [
@@ -2126,7 +2181,7 @@ struct ProcessSuiteReapFactSourceTests {
         ReapFactRule(file: "Support/RunnerLaunch.swift", function: "endChildrenAfterRelease",
                      requires: ["release()", "LaunchAccount.decide(", "DescendantCheck.requireGone(", "Issue.record("], forbids: ["signal(", "kill(", "launchFailed", "unknownLaunch("]),
         ReapFactRule(file: "Support/RunnerLaunch.swift", function: "requireEnded",
-                     requires: ["LaunchAccount.decide(", "Issue.record("], forbids: ["signal(", "kill("]),
+                     requires: ["LaunchAccount.notShownEnded(", "Issue.record("], forbids: ["signal(", "kill(", "LaunchAccount.decide("]),
         ReapFactRule(file: "BoundedProcessRunnerTests.swift", function: "stoppedChildEndsTheRunAsTimedOut",
                      requires: ["launchFailed:"], forbids: []),
     ]
