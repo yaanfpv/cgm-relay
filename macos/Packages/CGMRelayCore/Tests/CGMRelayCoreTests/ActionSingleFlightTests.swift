@@ -522,6 +522,16 @@ enum FlagPlant: CaseIterable, Sendable, CustomTestStringConvertible {
 enum EngineStartSource {
     static let slot = "startInFlight"
 
+    /// waiters are the callers that must await a stored start, each with the
+    /// first point it must not reach before that await.
+    static let waiters: [(name: String, anchor: String, before: String)] = [
+        ("restartEngineIfRunning", #"\bengineState\b"#, "first reads engineState"),
+        ("updatePort", #"\bengineState\b"#, "first reads engineState"),
+        ("stop", #"\bstopEngineAndWait\("#, "stops the engine"),
+        ("signOut", #"\bstopEngineAndWait\("#, "stops the engine"),
+        ("shutDown", #"\bstopEngineAndWait\("#, "stops the engine"),
+    ]
+
     /// problems lists what keeps the engine start from being single-flight,
     /// over a set of source files by name.
     static func problems(in files: [String: String]) -> [String] {
@@ -570,18 +580,20 @@ enum EngineStartSource {
         }
 
         // A caller that needs the start after the one in flight awaits it
-        // before its first read of engineState.
+        // before its first read of engineState; a caller that stops the
+        // engine awaits it before the stop, or the start would launch the
+        // engine it just stopped.
         let waits = #"\bif\s+let\s+(\w+)\s*=\s*"# + slot + #"\s*\{\s*await\s+\1\.value\s*\}"#
-        for name in ["restartEngineIfRunning", "updatePort"] {
-            guard let function = functions.first(where: { $0.name == name }) else {
-                found.append("\(name) is not declared in AppModel.swift")
+        for waiter in waiters {
+            guard let function = functions.first(where: { $0.name == waiter.name }) else {
+                found.append("\(waiter.name) is not declared in AppModel.swift")
                 continue
             }
             let body = NSRange(location: function.open + 1, length: function.close - function.open - 1)
-            let readAt = regex(#"\bengineState\b"#).firstMatch(in: parsed.text, range: body)?.range.location ?? function.close
+            let readAt = regex(waiter.anchor).firstMatch(in: parsed.text, range: body)?.range.location ?? function.close
             let waitAt = regex(waits).firstMatch(in: parsed.text, range: body)?.range.location
             if waitAt == nil || waitAt! >= readAt {
-                found.append("\(name) does not await a stored start before it first reads engineState")
+                found.append("\(waiter.name) does not await a stored start before it \(waiter.before)")
             }
         }
         return found
@@ -630,6 +642,27 @@ enum EngineStartSource {
             stopRequested = false
             await supervisor.start()
         }
+
+        func stop() {
+            stopRequested = true
+            Task {
+                if let start = startInFlight { await start.value }
+                _ = await stopEngineAndWait()
+            }
+        }
+
+        func signOut() async -> Bool {
+            stopRequested = true
+            if let start = startInFlight { await start.value }
+            _ = await stopEngineAndWait()
+            return true
+        }
+
+        func shutDown() async {
+            stopRequested = true
+            if let start = startInFlight { await start.value }
+            _ = await stopEngineAndWait()
+        }
     }
     """
 }
@@ -644,6 +677,8 @@ enum EnginePlant: CaseIterable, Sendable, CustomTestStringConvertible {
     case restartAwaitMissing
     case updatePortAwaitMissing
     case restartAwaitAfterRead
+    case stopAwaitMissing
+    case signOutAwaitAfterStop
 
     var testDescription: String {
         switch self {
@@ -655,6 +690,8 @@ enum EnginePlant: CaseIterable, Sendable, CustomTestStringConvertible {
         case .restartAwaitMissing: "restartEngineIfRunning's await missing"
         case .updatePortAwaitMissing: "updatePort's await missing"
         case .restartAwaitAfterRead: "restartEngineIfRunning awaits after it reads engineState"
+        case .stopAwaitMissing: "stop's await missing"
+        case .signOutAwaitAfterStop: "signOut awaits only after it stops the engine"
         }
     }
 
@@ -690,6 +727,14 @@ enum EnginePlant: CaseIterable, Sendable, CustomTestStringConvertible {
             out.replaceSubrange(range, with: "")
             guard let read = out.range(of: "switch engineState {", range: function.upperBound..<out.endIndex) else { return nil }
             out.replaceSubrange(read, with: "let seen = engineState\n        \(wait)\n        switch seen {")
+        case .stopAwaitMissing:
+            guard let function = out.range(of: "func stop()"),
+                  let range = out.range(of: wait, range: function.upperBound..<out.endIndex) else { return nil }
+            out.replaceSubrange(range, with: "")
+        case .signOutAwaitAfterStop:
+            guard let function = out.range(of: "func signOut()"),
+                  let range = out.range(of: "\(wait)\n        _ = await stopEngineAndWait()", range: function.upperBound..<out.endIndex) else { return nil }
+            out.replaceSubrange(range, with: "_ = await stopEngineAndWait()\n        \(wait)")
         }
         return out
     }
@@ -737,7 +782,7 @@ struct ActionSingleFlightTests {
         #expect(EngineStartSource.problems(in: ["AppModel.swift": EngineStartSource.fixtureAppModel]) == [])
     }
 
-    @Test("the app's own startEngine stores one start task before its first await and clears it after, and restart and updatePort await a stored start before reading engineState")
+    @Test("the app's own startEngine stores one start task before its first await and clears it after; restart and updatePort await a stored start before reading engineState, and stop, signOut and shutDown before they stop the engine")
     func appEngineStartIsSingleFlight() throws {
         let found = EngineStartSource.problems(in: try SingleFlightSource.sources())
         #expect(found == [])

@@ -435,6 +435,10 @@ final class AppModel: ObservableObject {
     func stop() {
         stopRequested = true
         Task {
+            // A start still under way would launch the engine after this
+            // stop; it is waited for first, then stopped with the rest.
+            if let start = startInFlight { await start.value }
+            stopRequested = true
             _ = await stopEngineAndWait()
             if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
             if lifetimes.mayReleaseBoundAddress { boundHost = nil }
@@ -511,6 +515,8 @@ final class AppModel: ObservableObject {
         builtInSession.cancel()
         await stayAwake.willQuitInBackground()
         await statusPoller.stop()
+        if let start = startInFlight { await start.value }
+        stopRequested = true
         if !(await stopEngineAndWait()) {
             recoveryLogger.error("the engine could not be confirmed stopped at quit")
         }
@@ -545,6 +551,8 @@ final class AppModel: ObservableObject {
     /// were gone.
     @discardableResult
     func signOut() async -> Bool {
+        stopRequested = true
+        if let start = startInFlight { await start.value }
         stopRequested = true
         _ = await stopEngineAndWait()
         if lifetimes.keepAwakeMayBeReleased { stayAwake.relayStopped() }
