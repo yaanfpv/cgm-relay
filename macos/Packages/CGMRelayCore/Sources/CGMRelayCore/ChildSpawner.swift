@@ -100,7 +100,6 @@ enum ChildSpawner {
     /// ReapResult is what one non-blocking reap attempt found.
     private enum ReapResult {
         case reaped(Int32)
-        case notYet
         case unavailable
     }
 
@@ -132,6 +131,11 @@ enum ChildSpawner {
                 repeat {
                     observed = waitid(P_PID, id_t(pid), &consumed, WSTOPPED | WCONTINUED | WNOHANG)
                 } while observed != 0 && errno == EINTR
+                if observed != 0 || consumed.si_pid != pid {
+                    // Nothing was consumed, so the next wait would report the
+                    // same state at once. Pause so this does not spin.
+                    usleep(50_000)
+                }
                 continue
             }
 
@@ -145,7 +149,7 @@ enum ChildSpawner {
                 return reaped == 0 ? nil : .unavailable
             }
             switch result {
-            case nil, .notYet?:
+            case nil:
                 continue
             case .reaped(let status)?:
                 child.markExited()
