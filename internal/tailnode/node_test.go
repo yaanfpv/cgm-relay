@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -28,6 +32,7 @@ import (
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/logtail"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
 	"tailscale.com/net/portmapper"
@@ -36,6 +41,7 @@ import (
 	"tailscale.com/tstest/integration/testcontrol"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/logid"
 	"tailscale.com/util/eventbus"
 )
 
@@ -2649,4 +2655,134 @@ func stateSavedAsLoggedOut(t *testing.T, dir string) bool {
 		}
 	}
 	return false
+}
+
+// recordingBuffer is a log buffer that remembers every line written to it and
+// never hands one to the uploader.
+type recordingBuffer struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (b *recordingBuffer) TryReadLine() ([]byte, error) { return nil, nil }
+
+func (b *recordingBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lines = append(b.lines, string(p))
+	return len(p), nil
+}
+
+func (b *recordingBuffer) saw(marker string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, l := range b.lines {
+		if strings.Contains(l, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+const prepareEnvHelperVar = "CGM_RELAY_PREPARE_ENV_HELPER"
+
+// TestPrepareNodeEnvStopsTheNodeLogsLeavingTheMac protects the person's node
+// logs: every tsnet start calls prepareNodeEnv first, so after it runs no
+// logger in the process may buffer or upload an entry. The switch is
+// process-wide and cannot be undone, so the check runs in a child copy of this
+// test binary. It first shows the logger does record an entry before the call
+// (the control), then that it records none after.
+func TestPrepareNodeEnvStopsTheNodeLogsLeavingTheMac(t *testing.T) {
+	if os.Getenv(prepareEnvHelperVar) == "1" {
+		buf := &recordingBuffer{}
+		id, err := logid.NewPrivateID()
+		if err != nil {
+			fmt.Println("RESULT no-id")
+			return
+		}
+		lg := logtail.NewLogger(logtail.Config{
+			Collection:   logtail.CollectionNode,
+			PrivateID:    id,
+			BaseURL:      "http://127.0.0.1:1",
+			Buffer:       buf,
+			Stderr:       io.Discard,
+			FlushDelayFn: func() time.Duration { return time.Hour },
+		}, func(string, ...any) {})
+		defer lg.Shutdown(context.Background())
+		fmt.Fprintln(lg, "entry-before-prepare")
+		if !buf.saw("entry-before-prepare") {
+			fmt.Println("RESULT control-blind")
+			return
+		}
+		prepareNodeEnv()
+		fmt.Fprintln(lg, "entry-after-prepare")
+		if buf.saw("entry-after-prepare") {
+			fmt.Println("RESULT entry-buffered")
+			return
+		}
+		fmt.Println("RESULT ok")
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPrepareNodeEnvStopsTheNodeLogsLeavingTheMac$")
+	cmd.Env = append(os.Environ(), prepareEnvHelperVar+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper run failed: %v\n%s", err, out)
+	}
+	switch {
+	case strings.Contains(string(out), "RESULT ok"):
+	case strings.Contains(string(out), "RESULT entry-buffered"):
+		t.Errorf("prepareNodeEnv left log entries flowing to the log buffer, where they would upload")
+	default:
+		t.Fatalf("the check could not see the logger (control failed):\n%s", out)
+	}
+}
+
+// TestEveryTsnetStartCallsPrepareNodeEnvBeforeStart reads the source of the two
+// production tsnet starts, the serving node's realStart and LeaveKeptFolder,
+// and fails when either stops calling prepareNodeEnv before it starts the
+// server. It is a source reading because the start itself needs a live
+// network; the behaviour of prepareNodeEnv is checked above.
+func TestEveryTsnetStartCallsPrepareNodeEnvBeforeStart(t *testing.T) {
+	for file, fn := range map[string]string{"node.go": "realStart", "leave_kept_folder.go": "LeaveKeptFolder"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		var decl *ast.FuncDecl
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == fn {
+				decl = fd
+			}
+		}
+		if decl == nil {
+			t.Fatalf("%s has no %s", file, fn)
+		}
+		var prepare, start token.Pos
+		ast.Inspect(decl, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fun := c.Fun.(type) {
+			case *ast.Ident:
+				if fun.Name == "prepareNodeEnv" && prepare == token.NoPos {
+					prepare = c.Pos()
+				}
+			case *ast.SelectorExpr:
+				if fun.Sel.Name == "Start" && start == token.NoPos {
+					start = c.Pos()
+				}
+			}
+			return true
+		})
+		if start == token.NoPos {
+			t.Errorf("%s: %s no longer starts a server; update this check", file, fn)
+			continue
+		}
+		if prepare == token.NoPos || prepare > start {
+			t.Errorf("%s: %s does not call prepareNodeEnv before it starts the server", file, fn)
+		}
+	}
 }
