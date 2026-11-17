@@ -1,7 +1,8 @@
 import Foundation
 
 /// TailscaleStatus is what this Mac's Tailscale can currently do for the
-/// relay. `unknown` is only the state before the first check has finished.
+/// relay. `unknown` is the state before the first check has finished, and the
+/// answer of a check whose process was not confirmed ended.
 public enum TailscaleStatus: Sendable, Equatable {
     case unknown
     /// absent: no Tailscale command line tool was found on this Mac.
@@ -486,7 +487,9 @@ public struct RealTailscaleController: TailscaleControlling {
         switch run.result {
         case .failedToLaunch:
             return .absent
-        case .timedOut, .notConfirmedEnded:
+        case .notConfirmedEnded:
+            return .unknown
+        case .timedOut:
             return .stopped
         case .exited(0):
             return TailscaleStatusParser.parse(run.output)
