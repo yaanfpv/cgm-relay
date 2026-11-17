@@ -330,9 +330,9 @@ enum AppModelSource {
     static let callers: [Caller] = [
         Caller(declaration: #"func\s+restartEngineIfRunning\s*\("#, name: "restartEngineIfRunning", releases: ["startEngine()"], optional: false),
         Caller(declaration: #"func\s+shutDown\s*\("#, name: "shutDown", releases: ["boundHost = nil"], optional: false),
-        Caller(declaration: #"func\s+stop\s*\(\s*\)"#, name: "stop", releases: ["stayAwake.relayStopped"], optional: false),
-        Caller(declaration: #"func\s+signOut\s*\("#, name: "signOut", releases: ["stayAwake.relayStopped"], optional: false),
-        Caller(declaration: #"func\s+handleEngineStateChange\s*\("#, name: "handleEngineStateChange", releases: ["stayAwake.relayStopped"], optional: false),
+        Caller(declaration: #"func\s+stop\s*\(\s*\)"#, name: "stop", releases: ["stayAwake.relayStopped", "boundHost = nil"], optional: false),
+        Caller(declaration: #"func\s+signOut\s*\("#, name: "signOut", releases: ["stayAwake.relayStopped", "boundHost = nil"], optional: false),
+        Caller(declaration: #"func\s+handleEngineStateChange\s*\("#, name: "handleEngineStateChange", releases: ["boundHost = nil", "stayAwake.relayStopped"], optional: false),
         Caller(declaration: #"func\s+leaveBuiltInRoute\s*\("#, name: "leaveBuiltInRoute", releases: ["applyChoice()"], optional: false),
         Caller(declaration: #"func\s+chooseBuiltInTailscale\s*\("#, name: "chooseBuiltInTailscale", releases: ["settings.useBuiltInTailscale = true"], optional: false),
         Caller(declaration: #"func\s+runPendingLeaveChild\s*\("#, name: "runPendingLeaveChild", releases: ["leaveRunner.run("], optional: false),
@@ -580,6 +580,10 @@ struct AppModelConsultTests {
         }
         private func handleEngineStateChange(_ state: EngineSupervisor.RunState) {
             switch state {
+            case .stopped:
+                if lifetimes.keepAwakeMayBeReleased {
+                    boundHost = nil
+                }
             case .failed:
                 if lifetimes.keepAwakeMayBeReleased {
                     stayAwake.relayStopped()
@@ -624,6 +628,25 @@ struct AppModelConsultTests {
         let violations = AppModelSource.violations(in: planted)
         #expect(violations.count == 1, Comment(rawValue: "\(callerName) \(fault): \(violations)"))
         #expect(violations.first?.hasPrefix("\(callerName):") == true, Comment(rawValue: "\(callerName) \(fault): \(violations)"))
+    }
+
+    @Test("a stopped callback that clears the bound address without asking the owner is caught, even beside a guarded failed branch")
+    func unguardedStoppedReleaseIsCaught() {
+        let source = Self.conformingSource.replacingOccurrences(
+            of: """
+            case .stopped:
+                        if lifetimes.keepAwakeMayBeReleased {
+                            boundHost = nil
+                        }
+            """,
+            with: """
+            case .stopped:
+                        boundHost = nil
+            """
+        )
+        #expect(source != Self.conformingSource)
+        let violations = AppModelSource.violations(in: source)
+        #expect(violations.count == 1 && violations.first?.hasPrefix("handleEngineStateChange:") == true, Comment(rawValue: "\(violations)"))
     }
 
     @Test("the check goes red when AppModel declares no owner at all")
