@@ -1,5 +1,13 @@
 import Foundation
 
+/// ProcessExitCode names the one value onExit can carry that is not an exit.
+public enum ProcessExitCode {
+    /// statusUnknown is reported instead of an exit code when the child's exit
+    /// could not be observed, so the child may still be running. No exit
+    /// status (0 to 255) and no negated signal number can equal it.
+    public static let statusUnknown = Int32.min
+}
+
 /// RunningProcess is the subset of a live child process EngineSupervisor
 /// needs: enough to terminate it, and to identify it for a caller that
 /// wants to prove no engine process is left behind.
@@ -34,7 +42,9 @@ public protocol ProcessLauncher: Sendable {
     /// the process terminates for any reason, with its exit code -- or,
     /// if it was killed by a signal rather than exiting on its own, the
     /// negative of that signal number, so a signal number can never be
-    /// mistaken for one of the engine's own defined exit codes. The
+    /// mistaken for one of the engine's own defined exit codes. If the exit
+    /// could not be observed, it is called with
+    /// ProcessExitCode.statusUnknown instead. The
     /// started process gets an explicit, minimal environment rather than
     /// this app's own: nothing it needs ever arrives that way, since its
     /// whole configuration is exactly standardInputData.

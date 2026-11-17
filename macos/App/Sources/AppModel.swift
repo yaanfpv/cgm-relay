@@ -235,7 +235,7 @@ final class AppModel: ObservableObject {
         switch engineState {
         case .failed(.storeKeyMismatch), .failed(.recoveryMoveFailed), .failed(.storeDamaged):
             return true
-        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort), .stopped, .starting, .running, .waitingToRestart:
+        case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort), .failed(.engineStatusUnknown), .stopped, .starting, .running, .waitingToRestart:
             return false
         }
     }
@@ -252,7 +252,7 @@ final class AppModel: ObservableObject {
         switch engineState {
         case .failed(.configurationUnreadable), .failed(.storeInUse), .failed(.portInUse), .failed(.httpsOnStatusPort):
             return true
-        case .failed(.storeKeyMismatch), .failed(.storeDamaged), .failed(.recoveryMoveFailed), .stopped, .starting, .running, .waitingToRestart:
+        case .failed(.storeKeyMismatch), .failed(.storeDamaged), .failed(.recoveryMoveFailed), .failed(.engineStatusUnknown), .stopped, .starting, .running, .waitingToRestart:
             return false
         }
     }
@@ -477,13 +477,16 @@ final class AppModel: ObservableObject {
 
     /// shutDown stops the status poller and the engine and waits, briefly,
     /// for the engine process to be gone, so a relaunch never meets a store
-    /// the old engine still holds.
+    /// the old engine still holds. If its end cannot be confirmed the app is
+    /// quitting anyway, so shutDown goes on and logs it.
     func shutDown() async {
         stopRequested = true
         builtInSession.cancel()
         await stayAwake.willQuitInBackground()
         await statusPoller.stop()
-        await supervisor.stopAndWait(timeout: .seconds(3))
+        if !(await supervisor.stopAndWait(timeout: .seconds(3))) {
+            recoveryLogger.error("the engine could not be confirmed stopped at quit")
+        }
         boundHost = nil
     }
 
@@ -787,6 +790,9 @@ final class AppModel: ObservableObject {
         builtInSession.cancel()
         Task {
             switch engineState {
+            case .failed(.engineStatusUnknown):
+                // The engine may still run: no second one is started.
+                return
             case .failed:
                 await supervisor.clearFailure()
                 await startEngine()
@@ -1405,7 +1411,10 @@ final class AppModel: ObservableObject {
         case .starting, .running, .waitingToRestart:
             // Wait for the old process to be gone, so its own listener never
             // reads as another app holding the port when the new start checks.
-            await supervisor.stopAndWait(timeout: .seconds(3))
+            guard await supervisor.stopAndWait(timeout: .seconds(3)) else {
+                recoveryLogger.error("the engine could not be confirmed stopped, so no new one was started")
+                return
+            }
             await startEngine()
         case .stopped, .failed:
             return

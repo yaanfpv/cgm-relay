@@ -115,7 +115,10 @@ final class LaunchedChildSignaller: @unchecked Sendable {
 
     /// systemProcessTable reads pid's record from the system, or returns nil
     /// when there is none. A process that has exited but is not yet reaped
-    /// has none either.
+    /// has none either: on macOS 27.0.1, proc_pidinfo with PROC_PIDTBSDINFO
+    /// returns 0 with ESRCH for an exited, unreaped child, the same as after
+    /// the reap. So a send after the exit is observed is refused by the read
+    /// as well as by the terminated mark.
     static let systemProcessTable: ProcessTableReader = { pid in
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)

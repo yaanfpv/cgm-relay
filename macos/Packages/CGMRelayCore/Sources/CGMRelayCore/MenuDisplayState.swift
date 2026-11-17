@@ -331,6 +331,8 @@ public struct MenuDisplayState: Sendable, Equatable {
             // short as every other status; detailLine below carries the
             // fuller explanation and the retry instruction.
             return "Couldn't start fresh"
+        case .engineStatusUnknown:
+            return "Couldn't confirm it stopped"
         }
     }
 
@@ -353,6 +355,8 @@ public struct MenuDisplayState: Sendable, Equatable {
             return "Tailscale HTTPS is set on the port CGM Relay keeps for itself. Turn Tailscale HTTPS off in Settings, under Advanced, with Tailscale running, and CGM Relay moves to a free port."
         case .recoveryMoveFailed:
             return "Check that CGM Relay can write to its own folder, then try Start Fresh again."
+        case .engineStatusUnknown:
+            return "CGM Relay's background process may still be running. Quit and reopen CGM Relay."
         }
     }
 

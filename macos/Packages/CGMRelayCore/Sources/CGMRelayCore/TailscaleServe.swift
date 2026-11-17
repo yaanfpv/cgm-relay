@@ -408,7 +408,7 @@ public enum TailscaleServeOutcome: Sendable, Equatable {
         switch run.result {
         case .timedOut:
             return .timedOut
-        case .failedToLaunch:
+        case .failedToLaunch, .notConfirmedEnded:
             return .other
         case .exited(0):
             return .succeeded
@@ -486,7 +486,7 @@ public struct RealTailscaleController: TailscaleControlling {
         switch run.result {
         case .failedToLaunch:
             return .absent
-        case .timedOut:
+        case .timedOut, .notConfirmedEnded:
             return .stopped
         case .exited(0):
             return TailscaleStatusParser.parse(run.output)

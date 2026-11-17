@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A second copy started at the same moment can no longer undo the sign-in or keys the first one saved.
 - Stopping the relay signals only the processes CGM Relay started.
 - Stopping the relay, or retrying a Tailscale logout, no longer waits forever when something outside CGM Relay has paused one of its background processes.
+- CGM Relay never starts a second background process while one it could not confirm stopped may still be running. It tells you to quit and reopen the app instead.
 
 ## [1.0.2] - 2026-10-14
 

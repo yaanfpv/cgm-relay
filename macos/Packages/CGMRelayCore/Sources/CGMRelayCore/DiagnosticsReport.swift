@@ -96,6 +96,7 @@ public enum DiagnosticsReport {
         case .portInUse: return "port in use by another app"
         case .httpsOnStatusPort: return "Tailscale HTTPS on the status port"
         case .recoveryMoveFailed: return "recovery move failed"
+        case .engineStatusUnknown: return "engine could not be confirmed stopped"
         }
     }
 

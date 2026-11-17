@@ -36,10 +36,25 @@ enum ChildSpawner {
     /// missing executable or EACCES for one that cannot be run.
     struct SpawnError: Error, Equatable { let code: Int32 }
 
-    /// exitCodeWhenUnknown is reported if the child's exit was never observed
-    /// or its status cannot be collected, which only happens if something
-    /// else reaped it.
+    /// exitCodeWhenUnknown is reported if the exit was observed but the status
+    /// cannot be collected, which only happens if something else reaped the
+    /// child: it is gone, so a restart is safe. An exit that could not be
+    /// observed at all is ProcessExitCode.statusUnknown instead.
     static let exitCodeWhenUnknown: Int32 = 255
+
+    /// WaitForExit waits for a child's exit without reaping it and returns
+    /// waitid's own result and the siginfo it filled in.
+    typealias WaitForExit = @Sendable (pid_t) -> (rc: Int32, info: siginfo_t)
+
+    /// systemWaitForExit is waitid(P_PID, pid, WEXITED | WNOWAIT), waiting
+    /// again when the wait is interrupted: an interrupted wait observed
+    /// nothing.
+    static let systemWaitForExit: WaitForExit = { pid in
+        var info = siginfo_t()
+        var observed: Int32
+        repeat { observed = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) } while observed != 0 && errno == EINTR
+        return (observed, info)
+    }
 
     /// spawn starts executableURL with exactly arguments and environment, its
     /// stdin, stdout and stderr being the given descriptors (or /dev/null for
@@ -47,7 +62,10 @@ enum ChildSpawner {
     /// descriptor this process has open being closed in the child. The caller
     /// keeps its own copies of the descriptors and closes the child's ends.
     /// onExit gets the exit code, or the negative of the signal number for a
-    /// death by signal, from the holder thread once the child has been reaped.
+    /// death by signal, from the holder thread once the child has been reaped;
+    /// or ProcessExitCode.statusUnknown, with nothing reaped, when the wait
+    /// for the exit fails. readProcessTable and waitForExit default to the
+    /// system's.
     static func spawn(
         executableURL: URL,
         arguments: [String],
@@ -55,6 +73,8 @@ enum ChildSpawner {
         standardInput: Int32?,
         standardOutput: Int32?,
         standardError: Int32?,
+        readProcessTable: @escaping LaunchedChildSignaller.ProcessTableReader = LaunchedChildSignaller.systemProcessTable,
+        waitForExit: @escaping WaitForExit = ChildSpawner.systemWaitForExit,
         onExit: @escaping @Sendable (Int32) -> Void
     ) throws -> SpawnedChild {
         var fileActions: posix_spawn_file_actions_t?
@@ -96,8 +116,8 @@ enum ChildSpawner {
 
         // The child cannot have been reaped: only the holder below reaps it,
         // and it starts after this read.
-        let child = SpawnedChild(processIdentifier: pid, signaller: LaunchedChildSignaller(pid: pid))
-        let holder = Thread { hold(child, onExit: onExit) }
+        let child = SpawnedChild(processIdentifier: pid, signaller: LaunchedChildSignaller(pid: pid, readProcessTable: readProcessTable))
+        let holder = Thread { hold(child, waitForExit: waitForExit, onExit: onExit) }
         holder.name = "child-holder-\(pid)"
         holder.start()
         return child
@@ -112,20 +132,20 @@ enum ChildSpawner {
     /// hold waits for the child's exit without reaping it, refuses further
     /// sends, then reaps. A child that is only stopped (or continued) has not
     /// exited: that state is consumed without reaping and the wait goes on.
-    private static func hold(_ child: SpawnedChild, onExit: @Sendable (Int32) -> Void) {
+    private static func hold(_ child: SpawnedChild, waitForExit: WaitForExit, onExit: @Sendable (Int32) -> Void) {
         let pid = child.processIdentifier
         while true {
-            var info = siginfo_t()
-            var observed: Int32
-            // An interrupted wait observed nothing: wait again.
-            repeat { observed = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) } while observed != 0 && errno == EINTR
+            let (rc, info) = waitForExit(pid)
+            var observed = rc
 
             guard observed == 0, info.si_pid == pid else {
-                // The exit was never observed, so its state is unknown. Nothing is
-                // reaped on that, no further signal goes out, and the caller is
-                // told the status could not be had.
+                // The exit was never observed, so the child may still be
+                // running. Nothing is reaped on that, no further signal goes
+                // out, the child is marked neither exited nor reported, and
+                // the caller is told the status is unknown, which is not an
+                // exit code.
                 child.signaller.markTerminated()
-                onExit(exitCodeWhenUnknown)
+                onExit(ProcessExitCode.statusUnknown)
                 return
             }
 
