@@ -312,8 +312,9 @@ private final class OutputCollection: @unchecked Sendable {
     }
 }
 
-/// BoundedProcessExitSignal lets RealBoundedProcessRunner await a
-/// termination handler that fires on an arbitrary thread, for a limited time.
+/// BoundedProcessExitSignal lets RealBoundedProcessRunner await the child's
+/// exit report, which arrives from the thread that holds the child, for a
+/// limited time.
 /// It remembers the result for any later waiter; one wait at a time.
 private actor BoundedProcessExitSignal {
     private var continuation: CheckedContinuation<Int32?, Never>?

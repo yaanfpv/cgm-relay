@@ -8,8 +8,7 @@ import Foundation
 /// start after it is allowed while that process may still be ending. It is an
 /// actor because every field below is
 /// mutated from both the caller's own calls (start, stop) and from the
-/// child process's own termination handler, which fires on an arbitrary
-/// thread.
+/// child's exit report, which arrives from the thread that holds the child.
 public actor EngineSupervisor {
     /// RunState is the supervisor's own view of the engine, independent of
     /// anything the engine's /status endpoint reports.

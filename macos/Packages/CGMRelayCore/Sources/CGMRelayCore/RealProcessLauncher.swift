@@ -141,8 +141,8 @@ public struct RealProcessLauncher: ProcessLauncher {
                 // The child exited or closed its stdin before the write
                 // landed. disableSIGPIPE above is what keeps this a
                 // plain thrown error rather than a fatal signal; the
-                // child's own exit still reaches onExit normally through
-                // terminationHandler, so nothing further is needed here.
+                // child's own exit still reaches onExit normally from its
+                // holder, so nothing further is needed here.
             }
         }
 
