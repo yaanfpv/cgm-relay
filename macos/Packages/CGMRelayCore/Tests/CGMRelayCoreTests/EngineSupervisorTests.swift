@@ -138,7 +138,7 @@ struct EngineSupervisorTests {
     }
 
     @Test("stop terminates the running process and leaves it stopped")
-    func stopTerminatesRunningProcess() async throws {
+    func stopTerminatesTheRunningEngine() async throws {
         let launcher = FakeProcessLauncher()
         let clock = FakeVirtualClock()
         let supervisor = EngineSupervisor(engineURL: Self.engineURL, launcher: launcher, clock: clock)
