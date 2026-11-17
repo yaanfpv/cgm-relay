@@ -549,4 +549,65 @@ struct EngineSupervisorTests {
         #expect(StoppedChildSupport.isGone(pid: pid))
         #expect(await supervisor.state == .stopped)
     }
+
+    /// RoundsCase names one way the engine is running when it is stopped.
+    struct ReapCase: Sendable, CustomTestStringConvertible {
+        let label: String
+        let stopsItself: Bool
+        var testDescription: String { label }
+    }
+
+    @Test(
+        "stopAndWait returns only once the engine it ended has been reaped: at the instant of return its exit is reported and its number no longer names it",
+        arguments: [
+            ReapCase(label: "an engine that ignores the request to exit", stopsItself: false),
+            ReapCase(label: "an engine that something stopped", stopsItself: true),
+        ]
+    )
+    func stopAndWaitReturnsOnlyAfterTheReap(_ testCase: ReapCase) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("engine-reap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = dir.appendingPathComponent("engine")
+        try """
+        #!/usr/bin/perl
+        $SIG{TERM} = 'IGNORE';
+        $| = 1;
+        print "ready\n";
+        \(testCase.stopsItself ? "kill 'STOP', $$;" : "")
+        while (1) { sleep 30 }
+        """.write(to: engine, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
+
+        // Each round is a fresh engine: a stop that returned before the reap
+        // is a race the holder thread usually loses only narrowly.
+        for round in 1...10 {
+            let launcher = RecordingRealLauncher()
+            let supervisor = EngineSupervisor(engineURL: engine, launcher: launcher, clock: FakeVirtualClock())
+            await supervisor.start(configuration: .fixture())
+            defer { launcher.endEngineIfLeftRunning() }
+            let process = try #require(launcher.process)
+            let pid = process.processIdentifier
+            let isReady = await StoppedChildSupport.withinBlocking {
+                launcher.ready.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
+            }
+            try #require(isReady == true, "round \(round): engine pid \(pid) never reported ready")
+            if testCase.stopsItself {
+                try #require(StoppedChildSupport.waitUntilStopped(pid: pid), "round \(round): engine pid \(pid) never showed as stopped")
+            }
+            // Nothing has ended or reaped this engine, so the number is still its own.
+            let recorded = try #require(StoppedChildSupport.record(pid: pid), "round \(round): no record of the running engine pid \(pid)")
+
+            // A zero timeout leaves no time for the engine to exit on its own,
+            // so the stop has to end it by force.
+            let returned: Void? = await StoppedChildSupport.withinAsync { await supervisor.stopAndWait(timeout: .zero) }
+            try #require(returned != nil, "round \(round): stopAndWait did not return for engine pid \(pid)")
+
+            // Read at the instant of return, with no wait for any report.
+            let reported = launcher.exitCodes
+            let stillNamed = StoppedChildSupport.namesRecorded(recorded)
+            #expect(reported == [-SIGKILL], "round \(round): stopAndWait returned before the engine's exit was reported (reported \(reported))")
+            #expect(!stillNamed, "round \(round): stopAndWait returned while pid \(pid) still named the engine")
+        }
+    }
 }
