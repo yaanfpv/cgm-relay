@@ -687,3 +687,75 @@ struct RealProcessLauncherTests {
         }
     }
 }
+
+@Suite("ChildSpawner holder when the exit wait fails")
+struct ChildSpawnerUnobservedExitTests {
+    /// ExitReports collects what the holder hands to onExit and lets a test
+    /// wait for the first report, bounded by the hang ceiling.
+    private final class ExitReports: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [Int32] = []
+        private let arrived = DispatchSemaphore(value: 0)
+        var reported: [Int32] { lock.withLock { stored } }
+        func add(_ code: Int32) {
+            lock.withLock { stored.append(code) }
+            arrived.signal()
+        }
+        func waitForReport() -> Bool {
+            arrived.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success
+        }
+    }
+
+    @Test("an exit wait that fails reports status unknown, not an exit code, and marks the child neither exited nor reported")
+    func failedExitWaitReportsStatusUnknown() async throws {
+        let input = Pipe()
+        let reports = ExitReports()
+        // The wait fails outright: the holder cannot observe the exit.
+        let child = try ChildSpawner.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/cat"),
+            arguments: [],
+            environment: ["PATH": "/usr/bin:/bin"],
+            standardInput: input.fileHandleForReading.fileDescriptor,
+            standardOutput: nil,
+            standardError: nil,
+            waitForExit: { _ in (-1, siginfo_t()) }
+        ) { reports.add($0) }
+        try? input.fileHandleForReading.close()
+        let pid = child.processIdentifier
+        defer {
+            // The holder reaps nothing on this path, so this test, the
+            // child's parent, ends it: closing its input is the whole
+            // request, and collecting it is the confirmation.
+            try? input.fileHandleForWriting.close()
+            var status: Int32 = 0
+            let collected = StoppedChildSupportBridge.collect(pid: pid, status: &status)
+            #expect(collected, "test child \(pid) may still be running, it was not confirmed ended")
+        }
+
+        try #require(reports.waitForReport(), "the holder reported nothing for a failed exit wait")
+        #expect(reports.reported == [ProcessExitCode.statusUnknown])
+        #expect(reports.reported != [ChildSpawner.exitCodeWhenUnknown])
+        #expect(!child.hasExited, "a child whose exit was never observed must not be marked exited")
+        #expect(!child.hasReportedExit, "a child whose exit was never observed must not be marked reported")
+        // The holder is done after one report.
+        #expect(reports.reported.count == 1)
+    }
+}
+
+/// StoppedChildSupportBridge collects a direct child this test holds.
+private enum StoppedChildSupportBridge {
+    /// collect waits for the held child to end and be collected, on a plain
+    /// thread, bounded by the hang ceiling. It returns false when the child
+    /// had not been collected by then.
+    static func collect(pid: Int32, status: inout Int32) -> Bool {
+        let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+        while DispatchTime.now() < deadline {
+            var s: Int32 = 0
+            let r = waitpid(pid, &s, WNOHANG)
+            if r == pid { status = s; return true }
+            if r < 0 && errno != EINTR { return false }
+            usleep(20_000)
+        }
+        return false
+    }
+}
