@@ -2,6 +2,16 @@ import Testing
 import Foundation
 @testable import CGMRelayCore
 
+/// LaunchRecorder keeps the identity a launch recorded for its child.
+private final class LaunchRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: StoppedChildSupport.RecordedProcess?
+    var recorded: StoppedChildSupport.RecordedProcess? { lock.withLock { stored } }
+    func set(pid: Int32, start: ProcessStart) {
+        lock.withLock { if stored == nil { stored = StoppedChildSupport.RecordedProcess(pid: pid, start: start) } }
+    }
+}
+
 @Suite("RealBoundedProcessRunner")
 struct RealBoundedProcessRunnerTests {
     @Test("reports an ordinary exit code")
@@ -156,12 +166,14 @@ struct RealBoundedProcessRunnerTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let pidFile = dir.appendingPathComponent("pid")
         var hung = false
-        var recorded: StoppedChildSupport.RecordedProcess?
+        // The identity the runner's own launch recorded, before any reap
+        // was possible.
+        let launch = LaunchRecorder()
         defer {
-            // Only a run that never returned leaves its child behind. The
-            // number from the file is signalled only while it still shows the
-            // start time recorded when the child was seen stopped.
-            if hung, let recorded { StoppedChildSupport.signal(recorded, SIGKILL) }
+            // Only a run that never returned leaves its child behind. Its
+            // number is signalled only while it still shows the start time
+            // recorded at launch.
+            if hung, let recorded = launch.recorded { StoppedChildSupport.signal(recorded, SIGKILL) }
             try? FileManager.default.removeItem(at: dir)
         }
         // The child records its pid, then stops itself: the same state as a
@@ -170,8 +182,7 @@ struct RealBoundedProcessRunnerTests {
         let executable = URL(fileURLWithPath: "/usr/bin/perl")
         let arguments = ["-e", script, pidFile.path]
 
-        let runner = RealBoundedProcessRunner()
-        async let recording = StoppedChildSupport.withinBlocking { StoppedChildSupport.recordWhenStopped(pidFile: pidFile) }
+        let runner = RealBoundedProcessRunner(onLaunched: { pid, start in launch.set(pid: pid, start: start) })
         let result: BoundedProcessResult?
         switch mode {
         case .run:
@@ -188,12 +199,69 @@ struct RealBoundedProcessRunnerTests {
             }
         }
         hung = result == nil
-        recorded = await recording ?? nil
         try #require(result != nil, "the run did not end for a stopped child")
         #expect(result == .timedOut)
 
         let pid = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8)))
         #expect(StoppedChildSupport.isGone(pid: pid), "child \(pid) was not reaped")
+    }
+
+    @Test(
+        "a child that cannot be signalled ends the run as notConfirmedEnded, never as timedOut",
+        arguments: [StoppedRunMode.run, StoppedRunMode.runOnCallingThread]
+    )
+    func unsignallableChildIsNotConfirmedEnded(_ mode: StoppedRunMode) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-refused-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pidFile = dir.appendingPathComponent("pid")
+        // The reader sees the launch's own read of the child first, while the
+        // child is necessarily unreaped, and keeps that identity; it then
+        // reports no record, so no identity is accepted and every send is
+        // refused.
+        let launch = LaunchRecorder()
+        defer {
+            // The child stopped itself, so it cannot end by its own and the
+            // runner sent it nothing. It is ended here, and only while its
+            // number still shows the start time recorded at launch. Waiting
+            // for it to go is bounded by the hang ceiling.
+            if let recorded = launch.recorded {
+                StoppedChildSupport.signal(recorded, SIGKILL)
+                let deadline = DispatchTime.now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))
+                while StoppedChildSupport.namesRecorded(recorded), DispatchTime.now() < deadline {
+                    usleep(20_000)
+                }
+                #expect(!StoppedChildSupport.namesRecorded(recorded), "test child \(recorded.pid) may still be running, it was not confirmed ended")
+            }
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let script = "open(my $f,\">\",$ARGV[0]) or die; print $f $$; close($f) or die; kill 'STOP', $$; sleep 30"
+        let executable = URL(fileURLWithPath: "/usr/bin/perl")
+        let arguments = ["-e", script, pidFile.path]
+
+        let runner = RealBoundedProcessRunner(readProcessTable: { pid in
+            if let entry = LaunchedChildSignaller.systemProcessTable(pid), entry.parentPID == getpid() {
+                launch.set(pid: entry.pid, start: entry.start)
+            }
+            return nil
+        })
+        let result: BoundedProcessResult?
+        switch mode {
+        case .run:
+            result = await StoppedChildSupport.withinAsync {
+                await runner.run(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .milliseconds(500))
+            }
+        case .runCapturingOutput:
+            result = await StoppedChildSupport.withinAsync {
+                await runner.runCapturingOutput(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .milliseconds(500)).result
+            }
+        case .runOnCallingThread:
+            result = await StoppedChildSupport.withinBlocking {
+                runner.runOnCallingThread(executableURL: executable, arguments: arguments, standardInputData: Data(), timeout: .milliseconds(500))
+            }
+        }
+        try #require(result != nil, "the run did not return for a child that could not be signalled")
+        try #require(launch.recorded != nil, "no identity was recorded for the launched child")
+        #expect(result == .notConfirmedEnded)
     }
 }
 
