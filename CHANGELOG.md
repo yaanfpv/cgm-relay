@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-19
+
 ### Fixed
 
 - Keep this Mac awake now works on a laptop where another app, such as Amphetamine, already allows the sleep setting: turning it on asks for your password and sets up CGM Relay's own permission.
