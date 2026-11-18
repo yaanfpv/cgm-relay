@@ -1,23 +1,54 @@
 import Foundation
 
 /// RealProcess wraps a live spawned child and the write end of its stdin
-/// lifeline pipe. Access to both is never shared outside this file:
-/// EngineSupervisor only ever sees it through the RunningProcess protocol,
-/// so the @unchecked Sendable below is safe -- nothing here reads or
-/// writes this state from more than one place at a time.
+/// lifeline pipe. EngineSupervisor only ever sees it through the
+/// RunningProcess protocol. Every write to the pipe and its close run one at
+/// a time on stdinQueue, and the lock orders sendInput against terminate(),
+/// so a write never reaches a handle that is already closed. The remaining
+/// state is immutable, which is what makes the @unchecked Sendable below
+/// safe.
 final class RealProcess: RunningProcess, @unchecked Sendable {
     private let child: SpawnedChild
     private let stdinHandle: FileHandle
+    private let stdinQueue = DispatchQueue(label: "cgmrelay.process.stdin", qos: .utility)
+    private let lock = NSLock()
+    private var stdinClosed = false
 
     init(child: SpawnedChild, stdinHandle: FileHandle) {
         self.child = child
         self.stdinHandle = stdinHandle
     }
 
+    /// sendInput queues data to be written to the child's stdin and returns
+    /// at once, so a stalled child never blocks the caller. Input sent after
+    /// terminate() is dropped. A write the child can no longer take (it
+    /// exited or closed its stdin) fails as an ordinary thrown error, since
+    /// launch() turns SIGPIPE off for this pipe; the error is ignored: the
+    /// child's own exit is reported by its holder. The flag is checked and
+    /// the write queued under one lock hold, so terminate() cannot queue its
+    /// close between them.
+    func sendInput(_ data: Data) {
+        lock.withLock {
+            guard !stdinClosed else { return }
+            stdinQueue.async { [stdinHandle] in
+                try? stdinHandle.write(contentsOf: data)
+            }
+        }
+    }
+
     var processIdentifier: Int32 { child.processIdentifier }
 
+    /// terminate signals the child at once and never waits on a write. The
+    /// close is queued behind any input already accepted, so it can never
+    /// land under a running write.
     func terminate() {
-        try? stdinHandle.close()
+        lock.withLock {
+            guard !stdinClosed else { return }
+            stdinClosed = true
+            stdinQueue.async { [stdinHandle] in
+                try? stdinHandle.close()
+            }
+        }
         child.signaller.send(SIGTERM)
     }
 
@@ -127,26 +158,13 @@ public struct RealProcessLauncher: ProcessLauncher {
         try? outputPipe.fileHandleForWriting.close()
         Self.watchForReady(on: outputPipe.fileHandleForReading, onReady: onReady)
 
-        // The write happens off the calling thread so a stalled or slow
-        // child (never expected for a small JSON handshake, but not ruled
-        // out) can never block launch() itself. The handle is not closed
-        // here: RealProcess.terminate() closes it, tying the pipe's life
-        // to the app's own intent to stop the engine rather than to this
-        // one write.
-        let writeHandle = inputPipe.fileHandleForWriting
-        DispatchQueue.global(qos: .utility).async {
-            do {
-                try writeHandle.write(contentsOf: standardInputData)
-            } catch {
-                // The child exited or closed its stdin before the write
-                // landed. disableSIGPIPE above is what keeps this a
-                // plain thrown error rather than a fatal signal; the
-                // child's own exit still reaches onExit normally from its
-                // holder, so nothing further is needed here.
-            }
-        }
-
-        return RealProcess(child: child, stdinHandle: writeHandle)
+        // The input is sent off the calling thread so a stalled child can
+        // never block launch() itself. The handle stays open here:
+        // RealProcess.terminate() closes it, tying the pipe's life to the
+        // app's own intent to stop the engine rather than to this write.
+        let process = RealProcess(child: child, stdinHandle: inputPipe.fileHandleForWriting)
+        process.sendInput(standardInputData)
+        return process
     }
 
     /// watchForReady reads handle until its writer closes it, calling onReady
