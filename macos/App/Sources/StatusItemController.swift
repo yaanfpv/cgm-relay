@@ -1,6 +1,7 @@
 import AppKit
 import CGMRelayCore
 import Combine
+import os
 import SwiftUI
 
 /// StatusItemController owns CGM Relay's menu bar item: the mark, the
@@ -35,6 +36,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         self.sceneActions = sceneActions
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
+        sceneActions.closePanel = { [weak self] in
+            guard let self, self.popover.isShown else { return }
+            self.popover.performClose(nil)
+        }
 
         statusItem.autosaveName = "CGMRelayStatusItem"
         if let button = statusItem.button {
@@ -45,7 +50,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         }
 
         let panelActions = MenuPanelActions(
-            openSettings: { [weak self] in self?.openSettings() },
+            openSettings: { [weak self] in self?.sceneActions.requestSettings(from: .panel) },
             openSetup: { [weak self] in self?.openSetup() },
             openConnect: { [weak self] in self?.openConnect() },
             performUpdate: { [weak self] in self?.performUpdate() }
@@ -211,14 +216,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func openSettings() {
-        popover.performClose(nil)
-        WindowActivation.bringAppForward()
-        sceneActions.openSettings?()
+        sceneActions.requestSettings(from: .contextMenu)
     }
 
     private func openConnect() {
-        popover.performClose(nil)
-        sceneActions.showSettings(tab: .connect)
+        sceneActions.showSettings(tab: .connect, from: .connect)
     }
 
     @objc private func performUpdate() {
@@ -228,13 +230,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func openSetup() {
         popover.performClose(nil)
-        WindowActivation.bringAppForward()
         if model.needsSetup {
+            WindowActivation.bringAppForward()
             sceneActions.openWindow?(id: SetupWindow.id)
         } else if !model.updateWindowSteps.isEmpty {
+            WindowActivation.bringAppForward()
             sceneActions.openWindow?(id: UpdateStepsWindow.id)
         } else {
-            sceneActions.showSettings(tab: .advanced)
+            sceneActions.showSettings(tab: .advanced, from: .finishSetup)
         }
     }
 
@@ -307,18 +310,114 @@ enum MenuBarMark {
 /// SceneActions holds the two ways SwiftUI opens a scene, captured from
 /// the one view that lives in the app's scene hierarchy from launch (see
 /// SceneBridgeView), so AppKit code such as the status item can open
-/// Settings and setup, and which Settings pane opens.
+/// Settings and setup, and which Settings pane opens. The panel, the
+/// right-click menu, About and setup open Settings through it.
 @MainActor
 final class SceneActions {
+    /// SettingsOrigin names where an open of Settings came from, for the log.
+    enum SettingsOrigin: String {
+        case panel, contextMenu, connect, finishSetup, about, setup
+    }
+
     var openWindow: OpenWindowAction?
     var openSettings: (() -> Void)?
+    /// closePanel closes the menu bar panel when it is shown.
+    var closePanel: (() -> Void)?
+    /// settingsWindow is Settings' window, handed over by SettingsView.
+    weak var settingsWindow: NSWindow?
     let settingsNavigation = SettingsNavigation()
 
-    /// showSettings brings the app forward and opens Settings on one pane.
-    func showSettings(tab: SettingsView.SettingsTab) {
+    private let logger = Logger(subsystem: "com.yaanfpv.cgmrelay", category: "settings")
+    private var openGeneration = 0
+    /// settleDelay is how long an open has to put its window on screen
+    /// before it counts as missed.
+    private static let settleDelay: Duration = .milliseconds(400)
+
+    /// showSettings opens Settings on one pane.
+    func showSettings(tab: SettingsView.SettingsTab, from origin: SettingsOrigin) {
         settingsNavigation.tab = tab
+        requestSettings(from: origin)
+    }
+
+    /// requestSettings opens Settings. The panel closes first and the open
+    /// starts on a later turn, never inside the panel's own action.
+    func requestSettings(from origin: SettingsOrigin) {
+        logger.info("Settings requested from \(origin.rawValue, privacy: .public)")
+        closePanel?()
+        openGeneration += 1
+        let generation = openGeneration
+        DispatchQueue.main.async { [weak self] in
+            self?.attemptOpen(attempt: 1, generation: generation)
+        }
+    }
+
+    private func attemptOpen(attempt: Int, generation: Int) {
+        guard generation == openGeneration else { return }
         WindowActivation.bringAppForward()
+        let hasAction = openSettings != nil
+        logger.info("Settings open attempt \(attempt, privacy: .public), open action \(hasAction ? "present" : "missing", privacy: .public)")
         openSettings?()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.settleDelay)
+            self?.checkOpened(attempt: attempt, generation: generation)
+        }
+    }
+
+    private func checkOpened(attempt: Int, generation: Int) {
+        guard generation == openGeneration else { return }
+        let onScreen = settingsWindow?.isVisible ?? false
+        switch SettingsOpenPolicy.next(attempt: attempt, windowOnScreen: onScreen) {
+        case .done:
+            logger.info("Settings on screen after attempt \(attempt, privacy: .public)")
+            frontSettingsWindow()
+        case .retry:
+            logger.info("Settings not on screen after attempt \(attempt, privacy: .public), retrying")
+            attemptOpen(attempt: attempt + 1, generation: generation)
+        case .gaveUp:
+            logger.error("Settings not on screen after attempt \(attempt, privacy: .public), giving up")
+        }
+    }
+
+    private func frontSettingsWindow() {
+        #if DEBUG
+        if WindowActivation.keepWindowsBehind { return }
+        #endif
+        // One turn later, as WindowFronting does: SwiftUI orders a newly
+        // opened window itself and that would land it behind again.
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.settingsWindow else { return }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+    }
+}
+
+/// SettingsWindowMarker hands the window it sits in to a closure, so the
+/// app finds Settings' window without matching on its title.
+struct SettingsWindowMarker: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        MarkerView(onWindow: onWindow)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class MarkerView: NSView {
+        let onWindow: (NSWindow?) -> Void
+
+        init(onWindow: @escaping (NSWindow?) -> Void) {
+            self.onWindow = onWindow
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindow(window)
+        }
     }
 }
 

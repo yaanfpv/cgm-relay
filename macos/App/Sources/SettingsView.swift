@@ -1,3 +1,4 @@
+import AppKit
 import CGMRelayCore
 import SwiftUI
 
@@ -26,6 +27,7 @@ struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var updates: UpdatesModel
     @ObservedObject var navigation: SettingsNavigation
+    let onWindow: (NSWindow?) -> Void
     @State private var paneHeights: [SettingsTab: CGFloat] = [:]
 
     var body: some View {
@@ -70,6 +72,7 @@ struct SettingsView: View {
         // from the window's own edge.
         .frame(width: Self.paneWidth, height: paneHeights[navigation.tab])
         .cgmWindowBackground()
+        .background(SettingsWindowMarker(onWindow: onWindow))
     }
 }
 

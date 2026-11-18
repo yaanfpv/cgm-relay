@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - CGM Relay keeps your settings, and opens normally, when macOS fails to hand them back, instead of starting setup again.
+- When Settings doesn't open from the menu bar panel, CGM Relay tries once more.
 - CGM Relay no longer quits when you press Stop just after Start.
 
 ## [1.1.0] - 2026-11-16
