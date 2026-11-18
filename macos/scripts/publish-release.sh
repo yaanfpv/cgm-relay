@@ -4,8 +4,10 @@
 # This is the one irreversible step, so it shows the plan and waits for the
 # version to be typed before it runs anything.
 #
-# Usage: scripts/publish-release.sh [--dry-run] X.Y.Z
+# Usage: scripts/publish-release.sh [--dry-run] [--confirm X.Y.Z] X.Y.Z
 #   --dry-run  print every command that would run, run none of them
+#   --confirm  the version again, in place of typing it on the terminal; a
+#              value that is not the version, or is empty, refuses
 #
 # Safe to run again after a partial failure: each surface is asked whether it
 # already landed, and only what has not landed is done.
@@ -18,18 +20,22 @@ REPO_ROOT="$(cd "${MACOS_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/release-lib.sh"
 
 usage() {
-  echo "usage: $(basename "$0") [--dry-run] X.Y.Z" >&2
+  echo "usage: $(basename "$0") [--dry-run] [--confirm X.Y.Z] X.Y.Z" >&2
   exit 2
 }
 
 DRY_RUN=no
 VERSION=""
-for arg in "$@"; do
-  case "$arg" in
+CONFIRM_GIVEN=no
+CONFIRM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY_RUN=yes ;;
+    --confirm) [ $# -ge 2 ] || usage; CONFIRM_GIVEN=yes; CONFIRM="$2"; shift ;;
     -*) usage ;;
-    *) [ -z "$VERSION" ] || usage; VERSION="$arg" ;;
+    *) [ -z "$VERSION" ] || usage; VERSION="$1" ;;
   esac
+  shift
 done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
 
@@ -105,6 +111,8 @@ echo "Each step is skipped when a query shows it already landed. This cannot be 
 if [ "$DRY_RUN" = yes ]; then
   echo
   echo "Dry run. Commands, in order:"
+elif [ "$CONFIRM_GIVEN" = yes ]; then
+  [ "$CONFIRM" = "$VERSION" ] || die "--confirm \"${CONFIRM}\" is not ${VERSION}; nothing was done" "run again with --confirm ${VERSION}"
 else
   ANSWER=""
   if ! read -r -p "Type ${VERSION} to publish: " ANSWER </dev/tty 2>/dev/null; then

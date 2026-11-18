@@ -243,11 +243,10 @@ struct AppSettingsTests {
 
     /// load() on a throwaway suite holding the given settings JSON.
     private func loadFromThrowawaySuite(_ json: String) -> AppSettings {
-        let suite = "cgmrelay.tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set(Data(json.utf8), forKey: "com.yaanfpv.cgmrelay.settings")
-        return UserDefaultsSettingsStore(suiteName: suite).load()
+        let suite = ThrowawaySuite()
+        defer { suite.remove() }
+        suite.defaults.set(Data(json.utf8), forKey: "com.yaanfpv.cgmrelay.settings")
+        return UserDefaultsSettingsStore(suiteName: suite.name).load()
     }
 
     @Test("a stored reach of the removed local-network choice becomes this-Mac-only, notes the move, and keeps every other field")
@@ -639,16 +638,15 @@ struct UpdateStepsTests {
 
     @Test("an interrupted update resumes with only the unanswered step after a save and load")
     func interruptedUpdateResumes() {
-        let suite = "cgmrelay.tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = ThrowawaySuite()
+        defer { suite.remove() }
 
         var settings = Self.oneZero
         settings.movedFromLocalRoute = true
-        let store = UserDefaultsSettingsStore(suiteName: suite)
+        let store = UserDefaultsSettingsStore(suiteName: suite.name)
         store.save(settings.answering(.movedToBuiltIn))
 
-        let relaunched = UserDefaultsSettingsStore(suiteName: suite).load()
+        let relaunched = UserDefaultsSettingsStore(suiteName: suite.name).load()
         #expect(relaunched.answeredUpdateSteps == [.movedToBuiltIn])
         #expect(relaunched.setupVersion == 1, "the update is not finished until finishingUpdate")
         #expect(SetupPlan.make(settings: relaunched, tailscaleInstalled: false) == .updateSteps([.stayAwake]))
@@ -857,5 +855,282 @@ struct UpdateStepsTests {
         #expect(LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: true) == LeaveTailnetOutcome.loggingOutNotice)
         #expect(LeaveTailnetOutcome.loggingOutNotice == "Logging this Mac out of Tailscale\u{2026}")
         #expect(LeaveTailnetOutcome.builtInChoiceBlockedReason(leaveChildRunning: false) == nil)
+    }
+}
+
+@Suite("Settings load outcome")
+struct SettingsLoadOutcomeTests {
+    static let key = "com.yaanfpv.cgmrelay.settings"
+
+    /// Settings that differ from the defaults in the fields setup and the
+    /// safety notice depend on.
+    private static var saved: AppSettings {
+        var s = AppSettings.default
+        s.port = 4242
+        s.retentionDays = 45
+        s.units = .mmolL
+        s.setupFinished = true
+        s.setupVersion = AppSettings.currentSetupVersion
+        s.safetyNoticeAcceptance = SafetyNotice.acceptance(appVersion: "1.1.0")
+        return s
+    }
+
+    private static var other: AppSettings {
+        var s = AppSettings.default
+        s.port = 5001
+        s.units = .mmolL
+        return s
+    }
+
+    private static func json(_ settings: AppSettings) throws -> Data {
+        try JSONEncoder().encode(settings)
+    }
+
+    /// A real throwaway suite that holds no value: from the app's side that
+    /// reads the same as a preference service that answered nothing.
+    private func withEmptySuite(_ body: (String, UserDefaults) throws -> Void) rethrows {
+        let suite = ThrowawaySuite()
+        defer { suite.remove() }
+        try body(suite.name, suite.defaults)
+    }
+
+    private func withTempDir(_ body: (URL) throws -> Void) throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cgmrelay-settings-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.appendingPathComponent("prefs.plist").path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        try body(dir)
+    }
+
+    private func writePlist(_ dict: [String: Any], to url: URL, format: PropertyListSerialization.PropertyListFormat = .binary) throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: dict, format: format, options: 0)
+        try data.write(to: url)
+    }
+
+    // MARK: - the decision on each outcome
+
+    struct OutcomeCase: Sendable, CustomTestStringConvertible {
+        let name: String
+        let outcome: SettingsLoadOutcome
+        let settings: AppSettings
+        let allowsSaving: Bool
+        let mayShowSetup: Bool
+        let mayStartRelay: Bool
+        var testDescription: String { name }
+    }
+
+    static let outcomeCases: [OutcomeCase] = [
+        OutcomeCase(name: "normal", outcome: .normal(saved), settings: saved,
+                    allowsSaving: true, mayShowSetup: true, mayStartRelay: true),
+        OutcomeCase(name: "fresh", outcome: .fresh, settings: .default,
+                    allowsSaving: true, mayShowSetup: true, mayStartRelay: true),
+        OutcomeCase(name: "recovered", outcome: .recovered(saved), settings: saved,
+                    allowsSaving: false, mayShowSetup: false, mayStartRelay: true),
+        OutcomeCase(name: "unreadable", outcome: .unreadable, settings: .default,
+                    allowsSaving: false, mayShowSetup: false, mayStartRelay: false),
+    ]
+
+    @Test("each load outcome carries its settings and says whether saving, setup and the relay start are allowed", arguments: outcomeCases)
+    func outcomeDecision(_ c: OutcomeCase) {
+        #expect(c.outcome.settings == c.settings)
+        #expect(c.outcome.allowsSaving == c.allowsSaving)
+        #expect(c.outcome.mayShowSetup == c.mayShowSetup)
+        #expect(c.outcome.mayStartRelay == c.mayStartRelay)
+    }
+
+    // MARK: - what the store decides from the service and the file
+
+    @Test("a value the preference service returns is used as it is, and the file is not consulted")
+    func serviceValueWinsOverTheFile() throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, defaults in
+                let file = dir.appendingPathComponent("prefs.plist")
+                // A different, decodable value in the file: reading it would give the wrong settings.
+                try writePlist([Self.key: try Self.json(Self.other)], to: file)
+                defaults.set(try Self.json(Self.saved), forKey: Self.key)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                #expect(store.loadOutcome() == .normal(Self.saved))
+                #expect(store.load() == Self.saved)
+            }
+            try withEmptySuite { suite, defaults in
+                let file = dir.appendingPathComponent("garbage.plist")
+                try Data("not a property list".utf8).write(to: file)
+                defaults.set(try Self.json(Self.saved), forKey: Self.key)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                #expect(store.loadOutcome() == .normal(Self.saved), "an unreadable file does not matter when the service answered")
+            }
+        }
+    }
+
+    @Test("a change saves and reads back when the service answered, and when it is a fresh install")
+    func savingWorksOnNormalAndFreshLoads() throws {
+        try withTempDir { dir in
+            let missing = dir.appendingPathComponent("absent.plist")
+            try withEmptySuite { suite, defaults in
+                defaults.set(try Self.json(Self.saved), forKey: Self.key)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: missing)
+                #expect(store.loadOutcome() == .normal(Self.saved))
+                #expect(store.savingAllowed)
+                store.save(Self.other)
+                #expect(UserDefaultsSettingsStore(suiteName: suite, preferencesFile: missing).load() == Self.other)
+            }
+            try withEmptySuite { suite, _ in
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: missing)
+                #expect(store.loadOutcome() == .fresh)
+                #expect(store.savingAllowed)
+                store.save(Self.saved)
+                #expect(UserDefaultsSettingsStore(suiteName: suite, preferencesFile: missing).load() == Self.saved)
+            }
+        }
+    }
+
+    @Test("a store that has not loaded yet saves as before")
+    func neverLoadedStoreSaves() throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, _ in
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: dir.appendingPathComponent("absent.plist"))
+                #expect(store.savingAllowed)
+                store.save(Self.saved)
+                #expect(UserDefaultsSettingsStore(suiteName: suite, preferencesFile: dir.appendingPathComponent("absent.plist")).load() == Self.saved)
+            }
+        }
+    }
+
+    enum NoKeyFile: String, CaseIterable, Sendable, CustomTestStringConvertible {
+        case absent
+        case withoutTheKey
+        var testDescription: String { rawValue }
+    }
+
+    @Test("nothing from the service and no file, or a file without the key, is a fresh install", arguments: NoKeyFile.allCases)
+    func noValueAndNoSettingsInTheFileIsFresh(_ shape: NoKeyFile) throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, _ in
+                let file = dir.appendingPathComponent("prefs.plist")
+                if shape == .withoutTheKey {
+                    try writePlist(["SUHasLaunchedBefore": true, "SUEnableAutomaticChecks": true], to: file)
+                }
+                let before = try? Data(contentsOf: file)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                #expect(store.loadOutcome() == .fresh)
+                #expect(store.load() == AppSettings.default)
+                #expect((try? Data(contentsOf: file)) == before, "the file is only read")
+            }
+        }
+    }
+
+    @Test("nothing from the service and a file holding decodable settings runs on the file's settings, read only", arguments: [PropertyListSerialization.PropertyListFormat.binary, .xml])
+    func fileSettingsAreRecovered(_ format: PropertyListSerialization.PropertyListFormat) throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, defaults in
+                let file = dir.appendingPathComponent("prefs.plist")
+                try writePlist([Self.key: try Self.json(Self.saved), "SUHasLaunchedBefore": true], to: file, format: format)
+                let before = try Data(contentsOf: file)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                let outcome = store.loadOutcome()
+                #expect(outcome == .recovered(Self.saved))
+                #expect(outcome.settings != AppSettings.default)
+                #expect(outcome.settings.setupFinished)
+                #expect(!SafetyNotice.needsAcceptance(outcome.settings.safetyNoticeAcceptance))
+                #expect(store.load() == Self.saved, "load() hands back the same settings")
+                #expect(try Data(contentsOf: file) == before, "the file is never written back")
+                #expect(defaults.object(forKey: Self.key) == nil, "the domain is not written either")
+            }
+        }
+    }
+
+    enum UnreadableShape: String, CaseIterable, Sendable, CustomTestStringConvertible {
+        case notAPropertyList
+        case aDirectoryInItsPlace
+        case noReadPermission
+        case valueIsNotJSON
+        case valueIsWrongShape
+        case valueIsNotData
+        var testDescription: String { rawValue }
+    }
+
+    private func makeUnreadable(_ shape: UnreadableShape, at file: URL) throws {
+        switch shape {
+        case .notAPropertyList:
+            try Data("this is not a property list".utf8).write(to: file)
+        case .aDirectoryInItsPlace:
+            try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        case .noReadPermission:
+            try writePlist([Self.key: try Self.json(Self.saved)], to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        case .valueIsNotJSON:
+            try writePlist([Self.key: Data("not json at all".utf8)], to: file)
+        case .valueIsWrongShape:
+            try writePlist([Self.key: Data("[1, 2, 3]".utf8)], to: file)
+        case .valueIsNotData:
+            try writePlist([Self.key: "a string, not the stored data"], to: file)
+        }
+    }
+
+    @Test("nothing from the service and a file that cannot be read, or whose value does not decode, is unreadable and carries no settings", arguments: UnreadableShape.allCases)
+    func unreadableFile(_ shape: UnreadableShape) throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, defaults in
+                let file = dir.appendingPathComponent("prefs.plist")
+                try makeUnreadable(shape, at: file)
+                let before = shape == .aDirectoryInItsPlace || shape == .noReadPermission ? nil : try Data(contentsOf: file)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                let outcome = store.loadOutcome()
+                #expect(outcome == .unreadable)
+                #expect(outcome != .fresh, "never mistaken for a fresh install")
+                #expect(store.load() == AppSettings.default)
+                #expect(!store.savingAllowed)
+                if let before {
+                    #expect(try Data(contentsOf: file) == before, "the file's bytes are unchanged")
+                }
+                #expect(defaults.object(forKey: Self.key) == nil)
+            }
+        }
+    }
+
+    // MARK: - nothing is saved unless the load allows it
+
+    @Test("after running on the file's settings every save is refused: the domain stays empty and the file keeps its bytes")
+    func recoveredStoreRefusesEverySave() throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, defaults in
+                let file = dir.appendingPathComponent("prefs.plist")
+                try writePlist([Self.key: try Self.json(Self.saved)], to: file)
+                let before = try Data(contentsOf: file)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                #expect(store.loadOutcome() == .recovered(Self.saved))
+                #expect(!store.savingAllowed)
+
+                var finished = Self.saved.finishingUpdate()
+                finished.answeredUpdateSteps = [.stayAwake]
+                for attempt in [Self.other, AppSettings.default, finished, Self.saved] {
+                    store.save(attempt)
+                    #expect(defaults.object(forKey: Self.key) == nil, "the domain still holds nothing")
+                    #expect(try Data(contentsOf: file) == before, "the file's bytes are unchanged")
+                }
+                #expect(store.load() == Self.saved, "a later load still reads the file, not what was refused")
+            }
+        }
+    }
+
+    @Test("after settings that could not be read every save is refused, so defaults never replace them")
+    func unreadableStoreRefusesEverySave() throws {
+        try withTempDir { dir in
+            try withEmptySuite { suite, defaults in
+                let file = dir.appendingPathComponent("prefs.plist")
+                try Data("this is not a property list".utf8).write(to: file)
+                let before = try Data(contentsOf: file)
+                let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
+                #expect(store.loadOutcome() == .unreadable)
+                for attempt in [AppSettings.default, Self.saved, Self.other] {
+                    store.save(attempt)
+                    #expect(defaults.object(forKey: Self.key) == nil, "the domain still holds nothing")
+                    #expect(try Data(contentsOf: file) == before, "the file's bytes are unchanged")
+                }
+            }
+        }
     }
 }

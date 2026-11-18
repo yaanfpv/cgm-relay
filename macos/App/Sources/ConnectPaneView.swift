@@ -51,6 +51,7 @@ struct ConnectPaneView<Extra: View>: View {
 
     var body: some View {
         Form {
+            SettingsSavingOffNotice(model: model)
             switch model.connectPaneAddressState {
             case .thisMacOnly:
                 blockedSection(
@@ -212,6 +213,7 @@ struct ConnectPaneView<Extra: View>: View {
         .labelsHidden()
         .frame(maxWidth: .infinity)
         .accessibilityLabel("Follower app")
+        .disabled(model.settingsSavingOff)
     }
 
     /// stepsSection is where the chosen app keeps its fields, in its own
@@ -244,7 +246,7 @@ struct ConnectPaneView<Extra: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 12)
                     AccessibleButton("Use Built-In Tailscale", style: .primary) { model.chooseBuiltInTailscale() }
-                        .disabled(model.builtInChoiceBlockedReason != nil)
+                        .disabled(model.builtInChoiceBlockedReason != nil || model.settingsSavingOff)
                         .fixedSize()
                 }
                 .padding(.top, 4)

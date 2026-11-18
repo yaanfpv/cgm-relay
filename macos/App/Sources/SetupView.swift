@@ -70,7 +70,9 @@ struct SetupView: View {
 
     var body: some View {
         Group {
-            if model.needsSafetyNotice {
+            if model.settingsUnreadable {
+                unreadableScreen
+            } else if model.needsSafetyNotice {
                 noticeScreen
             } else {
                 VStack(spacing: 0) {
@@ -106,6 +108,21 @@ struct SetupView: View {
             SafetyNoticeText(font: .body)
                 .multilineTextAlignment(.center)
             AccessibleButton("I Understand", style: .primary, action: acceptSafetyNotice)
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 32)
+        .padding(.vertical, 28)
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// unreadableScreen is the only thing shown when the saved settings could
+    /// not be read: nothing else in setup can lead to a save.
+    private var unreadableScreen: some View {
+        VStack(spacing: 16) {
+            Text("CGM Relay couldn't read its settings. Restart your Mac, then open it again.")
+                .multilineTextAlignment(.center)
+            AccessibleButton("Quit", style: .primary) { model.quit() }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 32)

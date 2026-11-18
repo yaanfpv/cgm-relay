@@ -38,7 +38,7 @@ struct CGMRelayApp: App {
         let model = AppModel(
             engineURL: CGMRelayApp.engineURL(),
             credentialStore: store,
-            settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride),
+            settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride, preferencesFile: CGMRelayApp.settingsFileOverride()),
             statusAddr: CGMRelayApp.statusAddr(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
             databasePath: CGMRelayApp.databasePath(keychainServiceOverride: keychainServiceOverride),
             librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL(),
@@ -81,7 +81,7 @@ struct CGMRelayApp: App {
         // finds setup incomplete, and by the menu's "Finish Setup…", never
         // by the system on its own.
         Window("Set Up CGM Relay", id: SetupWindow.id) {
-            SetupView(model: model, openAdvanced: { sceneActions.showSettings(tab: .advanced) })
+            SetupView(model: model, openAdvanced: { sceneActions.showSettings(tab: .advanced, from: .setup) })
         }
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
@@ -106,7 +106,7 @@ struct CGMRelayApp: App {
         // own openSettings() call, which makes the app a regular one while
         // the window is open (AppDelegate returns it to the menu bar).
         Settings {
-            SettingsView(model: model, updates: updates, navigation: sceneActions.settingsNavigation)
+            SettingsView(model: model, updates: updates, navigation: sceneActions.settingsNavigation, onWindow: { sceneActions.settingsWindow = $0 })
         }
         .windowResizability(.contentSize)
         // A starting guess only: matches SettingsView's own fixed pane
@@ -147,6 +147,18 @@ struct CGMRelayApp: App {
     private static func explicitKeychainServiceOverride() -> String? {
         #if DEBUG
         return UserDefaults.standard.string(forKey: "CGMRelayKeychainService")
+        #else
+        return nil
+        #endif
+    }
+
+    /// settingsFileOverride is the path `-CGMRelaySettingsFile` gives for the
+    /// preferences file the settings store falls back to, so a Debug walk can
+    /// point it at a file of its own. Always nil in Release.
+    private static func settingsFileOverride() -> URL? {
+        #if DEBUG
+        guard let path = UserDefaults.standard.string(forKey: "CGMRelaySettingsFile") else { return nil }
+        return URL(fileURLWithPath: path)
         #else
         return nil
         #endif
@@ -418,7 +430,7 @@ struct AppMenuCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
-            Button("About CGM Relay") { sceneActions.showSettings(tab: .about) }
+            Button("About CGM Relay") { sceneActions.showSettings(tab: .about, from: .about) }
             Button(updates.menuTitle) { updates.perform() }
                 .disabled(!updates.canPerformAction)
         }

@@ -16,7 +16,9 @@ public protocol RunningProcess: Sendable {
     /// terminate asks the process to exit (SIGTERM), which the engine
     /// treats as a request for a clean shutdown, and closes its stdin
     /// lifeline: either is enough on its own to stop the engine, and
-    /// doing both costs nothing.
+    /// doing both costs nothing. It never waits for input still being
+    /// written, and input not yet written when it is called is still
+    /// delivered before the close; none is written after it.
     func terminate()
     /// waitUntilExit returns true once the process has exited, or false if
     /// it is still running after timeout.
@@ -32,7 +34,8 @@ public protocol RunningProcess: Sendable {
 /// fake process exits.
 public protocol ProcessLauncher: Sendable {
     /// launch starts executableURL with arguments, writes
-    /// standardInputData to its stdin, and keeps stdin open for as long as
+    /// standardInputData to its stdin (in the background, so it may still be
+    /// in flight when launch returns), and keeps stdin open for as long as
     /// the process runs: it is a lifeline the engine watches for EOF, so
     /// this process's own end -- however it happens -- reaches the engine
     /// even with no signal involved. terminate() on the returned

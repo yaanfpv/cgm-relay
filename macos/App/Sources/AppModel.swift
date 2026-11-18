@@ -70,6 +70,7 @@ final class AppModel: ObservableObject {
     /// adds, and once the safety notice has been accepted if it was in the way.
     @Published private(set) var updatePresentationRequest = 0
     private var launchChecked = false
+    private let settingsOutcome: SettingsLoadOutcome
     /// networkAddressesRead is whether this launch has read this Mac's
     /// network addresses at least once.
     private var networkAddressesRead = false
@@ -179,15 +180,25 @@ final class AppModel: ObservableObject {
     /// has finished the last setup step. It is false before launch has read
     /// the Keychain, so nothing flashes before the real answer is known.
     var needsSetup: Bool {
-        launchChecked && !(settings.setupFinished && credentialsConfigured)
+        launchChecked && settingsOutcome.mayShowSetup && !(settings.setupFinished && credentialsConfigured)
     }
 
     /// needsSafetyNotice is true until the current wording of the safety
     /// notice has been accepted; like needsSetup it waits for launch to have
     /// read the saved settings.
     var needsSafetyNotice: Bool {
-        launchChecked && SafetyNotice.needsAcceptance(settings.safetyNoticeAcceptance)
+        launchChecked && settingsOutcome.mayShowSetup && SafetyNotice.needsAcceptance(settings.safetyNoticeAcceptance)
     }
+
+    /// settingsSavingOff is true while this run cannot save a change, because
+    /// the settings it runs on were read from the preferences file or could
+    /// not be read. Every control that changes a setting is off then.
+    var settingsSavingOff: Bool { !settingsOutcome.allowsSaving }
+
+    /// settingsUnreadable is true when the saved settings could not be read at
+    /// all: nothing starts, and the setup window says so instead of showing
+    /// setup.
+    var settingsUnreadable: Bool { !settingsOutcome.mayStartRelay }
 
     /// httpsState is where Tailscale HTTPS stands for the relay's current
     /// port, from Tailscale's own report.
@@ -221,7 +232,7 @@ final class AppModel: ObservableObject {
 
     /// canStart is false while a stop is still waiting for the engine's end, since the supervisor
     /// starts nothing until that end is confirmed and a press then would do nothing.
-    var canStart: Bool { credentialsConfigured && engineState == .stopped && lifetimes.engine != .confirming }
+    var canStart: Bool { settingsOutcome.mayStartRelay && credentialsConfigured && engineState == .stopped && lifetimes.engine != .confirming }
 
     /// canStop is true only while stopping would actually change
     /// something: a running engine, one still starting, or one waiting on
@@ -318,7 +329,9 @@ final class AppModel: ObservableObject {
         routeLeaver = URLSessionBuiltInRouteLeaver(url: AppModel.engineURL(for: statusAddr, path: "tailscale/leave"), secret: statusSecret)
         self.databasePath = databasePath
         self.librelinkupBaseURL = librelinkupBaseURL
-        let loaded = settingsStore.load()
+        let outcome = settingsStore.loadOutcome()
+        settingsOutcome = outcome
+        let loaded = outcome.settings
         settings = loaded
         stayAwake = StayAwakeController(
             choice: loaded.stayAwake,
@@ -381,7 +394,7 @@ final class AppModel: ObservableObject {
         refreshTailscaleAppInstalled()
         tailnetAvailable = ReachAddressResolver.tailscaleIPv4(among: SystemNetworkInterfaces.currentIPv4Addresses()) != nil
         networkAddressesRead = true
-        if needsSetup || needsSafetyNotice {
+        if settingsUnreadable || needsSetup || needsSafetyNotice {
             setupPresentationRequest += 1
         } else {
             presentUpdateStepsIfNeeded()
@@ -390,7 +403,11 @@ final class AppModel: ObservableObject {
         await alertEngine.setSignInFailingAlert(enabled: settings.signInFailingAlertEnabled)
         // A leave that did not reach Tailscale is tried again here whether or
         // not the engine can start: the child needs no LibreLinkUp sign-in.
-        Task { await runPendingLeaveChild() }
+        // It records its outcome in the settings, so it waits for a launch
+        // that can save them.
+        if settingsOutcome.allowsSaving {
+            Task { await runPendingLeaveChild() }
+        }
         async let pollerStarted: Void = statusPoller.start()
         async let tailscaleRead: Void = refreshTailscale()
         if canStart, lifetimes.mayStartEngine(onKeptFolder: startsOnKeptFolder) {
@@ -1167,11 +1184,12 @@ final class AppModel: ObservableObject {
     /// offersFinishSetup is whether the menu panel offers "Finish Setup…":
     /// while setup is unfinished, and while the chosen route cannot reach a
     /// phone.
-    var offersFinishSetup: Bool { needsSetup || phonesCannotReachYet }
+    var offersFinishSetup: Bool { settingsOutcome.mayShowSetup && (needsSetup || phonesCannotReachYet) }
 
     /// updateWindowSteps are the steps the "What's new" window shows now, in
     /// order: the plan's own, with the move first while it is still owed.
     var updateWindowSteps: [UpdateStep] {
+        guard settingsOutcome.mayShowSetup else { return [] }
         var steps: [UpdateStep] = []
         if case .updateSteps(let planned) = updatePlan { steps = planned }
         if movedStepOwed, !steps.contains(.movedToBuiltIn) {
@@ -1482,6 +1500,7 @@ final class AppModel: ObservableObject {
     /// Start Fresh itself reports keeps that recovery path the only way
     /// forward, exactly as if the move had just failed.
     private func startEngine() async {
+        guard settingsOutcome.mayStartRelay else { return }
         if startInFlight != nil { return }
         let run = Task { [self] in
             stopRequested = false

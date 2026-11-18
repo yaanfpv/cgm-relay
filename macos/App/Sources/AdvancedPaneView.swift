@@ -23,6 +23,7 @@ struct AdvancedPaneView: View {
 
     var body: some View {
         Form {
+            SettingsSavingOffNotice(model: model)
             Section {
                 HStack {
                     Text("Port")
@@ -37,7 +38,7 @@ struct AdvancedPaneView: View {
                         .multilineTextAlignment(.trailing)
                         .focused($portFieldFocused)
                         .onSubmit { commitPort() }
-                        .disabled(model.isPortLocked)
+                        .disabled(model.isPortLocked || model.settingsSavingOff)
                 }
                 if let portErrorMessage {
                     Text(portErrorMessage)
@@ -62,43 +63,46 @@ struct AdvancedPaneView: View {
                 }
             }
 
-            if model.tailscaleAppInstalled {
-                TailscaleChoiceView(model: model)
-            } else if !model.settings.useBuiltInTailscale {
-                UseBuiltInTailscaleSection(model: model)
-            }
-
-            if model.settings.useBuiltInTailscale {
-                BuiltInRouteView(model: model)
-                Section {
-                    ChoiceRow(
-                        title: "Your public address",
-                        description: "Anyone with your token, from anywhere.",
-                        selected: true
-                    ) {}
-                    ChoiceRow(
-                        title: "This Mac only",
-                        description: "Only apps on this Mac can connect. This Mac is logged out of your Tailscale account.",
-                        selected: false
-                    ) { model.chooseWay(.thisMacOnly) }
-                } header: {
-                    Text("Who can reach it")
+            Group {
+                if model.tailscaleAppInstalled {
+                    TailscaleChoiceView(model: model)
+                } else if !model.settings.useBuiltInTailscale {
+                    UseBuiltInTailscaleSection(model: model)
                 }
-            } else {
-                if model.settings.tailscaleHTTPSEnabled || isTailscaleRunning {
+
+                if model.settings.useBuiltInTailscale {
+                    BuiltInRouteView(model: model)
                     Section {
-                        TailscaleHTTPSControl(model: model, part: .statusRow)
-                    } footer: {
-                        TailscaleHTTPSControl(model: model, part: .notes)
+                        ChoiceRow(
+                            title: "Your public address",
+                            description: "Anyone with your token, from anywhere.",
+                            selected: true
+                        ) {}
+                        ChoiceRow(
+                            title: "This Mac only",
+                            description: "Only apps on this Mac can connect. This Mac is logged out of your Tailscale account.",
+                            selected: false
+                        ) { model.chooseWay(.thisMacOnly) }
+                    } header: {
+                        Text("Who can reach it")
+                    }
+                } else {
+                    if model.settings.tailscaleHTTPSEnabled || isTailscaleRunning {
+                        Section {
+                            TailscaleHTTPSControl(model: model, part: .statusRow)
+                        } footer: {
+                            TailscaleHTTPSControl(model: model, part: .notes)
+                        }
+                    }
+
+                    Section {
+                        ReachChoicesView(model: model)
+                    } header: {
+                        Text("Who can reach it")
                     }
                 }
-
-                Section {
-                    ReachChoicesView(model: model)
-                } header: {
-                    Text("Who can reach it")
-                }
             }
+            .disabled(model.settingsSavingOff)
         }
         .formStyle(.grouped)
         .frame(maxWidth: .infinity, alignment: .top)
