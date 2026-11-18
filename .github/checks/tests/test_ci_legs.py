@@ -74,8 +74,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / ".github" / "checks" / "ci-legs.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
-# The repo's one hang ceiling for a check, in seconds.
-HANG = 120
+from hang_ceiling import HANG  # noqa: E402
 
 LEGS = ["checks", "go-checks", "go-test-macos", "swift-test", "mac-app-build"]
 

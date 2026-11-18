@@ -243,11 +243,10 @@ struct AppSettingsTests {
 
     /// load() on a throwaway suite holding the given settings JSON.
     private func loadFromThrowawaySuite(_ json: String) -> AppSettings {
-        let suite = "cgmrelay.tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set(Data(json.utf8), forKey: "com.yaanfpv.cgmrelay.settings")
-        return UserDefaultsSettingsStore(suiteName: suite).load()
+        let suite = ThrowawaySuite()
+        defer { suite.remove() }
+        suite.defaults.set(Data(json.utf8), forKey: "com.yaanfpv.cgmrelay.settings")
+        return UserDefaultsSettingsStore(suiteName: suite.name).load()
     }
 
     @Test("a stored reach of the removed local-network choice becomes this-Mac-only, notes the move, and keeps every other field")
@@ -639,16 +638,15 @@ struct UpdateStepsTests {
 
     @Test("an interrupted update resumes with only the unanswered step after a save and load")
     func interruptedUpdateResumes() {
-        let suite = "cgmrelay.tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = ThrowawaySuite()
+        defer { suite.remove() }
 
         var settings = Self.oneZero
         settings.movedFromLocalRoute = true
-        let store = UserDefaultsSettingsStore(suiteName: suite)
+        let store = UserDefaultsSettingsStore(suiteName: suite.name)
         store.save(settings.answering(.movedToBuiltIn))
 
-        let relaunched = UserDefaultsSettingsStore(suiteName: suite).load()
+        let relaunched = UserDefaultsSettingsStore(suiteName: suite.name).load()
         #expect(relaunched.answeredUpdateSteps == [.movedToBuiltIn])
         #expect(relaunched.setupVersion == 1, "the update is not finished until finishingUpdate")
         #expect(SetupPlan.make(settings: relaunched, tailscaleInstalled: false) == .updateSteps([.stayAwake]))
@@ -891,10 +889,9 @@ struct SettingsLoadOutcomeTests {
     /// A real throwaway suite that holds no value: from the app's side that
     /// reads the same as a preference service that answered nothing.
     private func withEmptySuite(_ body: (String, UserDefaults) throws -> Void) rethrows {
-        let suite = "cgmrelay.tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        try body(suite, defaults)
+        let suite = ThrowawaySuite()
+        defer { suite.remove() }
+        try body(suite.name, suite.defaults)
     }
 
     private func withTempDir(_ body: (URL) throws -> Void) throws {
@@ -1020,7 +1017,7 @@ struct SettingsLoadOutcomeTests {
                 let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
                 #expect(store.loadOutcome() == .fresh)
                 #expect(store.load() == AppSettings.default)
-                #expect(try? Data(contentsOf: file) == before, "the file is only read")
+                #expect((try? Data(contentsOf: file)) == before, "the file is only read")
             }
         }
     }
@@ -1055,14 +1052,13 @@ struct SettingsLoadOutcomeTests {
         var testDescription: String { rawValue }
     }
 
-    private func makeUnreadable(_ shape: UnreadableShape, at file: URL) throws -> Bool {
+    private func makeUnreadable(_ shape: UnreadableShape, at file: URL) throws {
         switch shape {
         case .notAPropertyList:
             try Data("this is not a property list".utf8).write(to: file)
         case .aDirectoryInItsPlace:
             try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
         case .noReadPermission:
-            if getuid() == 0 { return false }
             try writePlist([Self.key: try Self.json(Self.saved)], to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
         case .valueIsNotJSON:
@@ -1072,7 +1068,6 @@ struct SettingsLoadOutcomeTests {
         case .valueIsNotData:
             try writePlist([Self.key: "a string, not the stored data"], to: file)
         }
-        return true
     }
 
     @Test("nothing from the service and a file that cannot be read, or whose value does not decode, is unreadable and carries no settings", arguments: UnreadableShape.allCases)
@@ -1080,7 +1075,7 @@ struct SettingsLoadOutcomeTests {
         try withTempDir { dir in
             try withEmptySuite { suite, defaults in
                 let file = dir.appendingPathComponent("prefs.plist")
-                guard try makeUnreadable(shape, at: file) else { return }
+                try makeUnreadable(shape, at: file)
                 let before = shape == .aDirectoryInItsPlace || shape == .noReadPermission ? nil : try Data(contentsOf: file)
                 let store = UserDefaultsSettingsStore(suiteName: suite, preferencesFile: file)
                 let outcome = store.loadOutcome()

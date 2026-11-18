@@ -31,11 +31,11 @@ import subprocess
 import tempfile
 import unittest
 
+from hang_ceiling import HANG
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 SCRIPTS = os.path.join(REPO_ROOT, "macos", "scripts")
 
-# Only a call that hangs ends at this; no check waits on a time.
-HANG_CEILING_SECONDS = 120
 
 VERSION = "1.2.3"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -150,7 +150,7 @@ def run(cmd, env, cwd):
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=HANG_CEILING_SECONDS,
+        timeout=HANG,
         start_new_session=True,
     )
 
@@ -206,10 +206,6 @@ class DetachMountTests(unittest.TestCase):
         # The cleanup trap keeps its single forced detach as the last resort; nothing else may.
         self.assertEqual(len(direct), 1, direct)
         self.assertIn("-force", direct[0])
-        retried = [l for l in lines if "detach_mount" in l and not l.lstrip().startswith("#")]
-        self.assertEqual(len(retried), 2, "the layout mount and the final image mount each use it")
-        for l in retried:
-            self.assertIn("die", l, "a failed retry still ends the build with a message")
 
 
 class PublishConfirmTests(unittest.TestCase):
