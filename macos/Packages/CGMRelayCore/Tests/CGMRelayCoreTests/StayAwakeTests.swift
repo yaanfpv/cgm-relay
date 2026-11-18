@@ -47,6 +47,13 @@ struct StayAwakePolicyTests {
 
 // MARK: - Controller
 
+private final class FailureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [StayAwakeFailure] = []
+    func add(_ failure: StayAwakeFailure) { lock.withLock { seen.append(failure) } }
+    var all: [StayAwakeFailure] { lock.withLock { seen } }
+}
+
 @Suite("StayAwakeController")
 struct StayAwakeControllerTests {
     private struct Rig {
@@ -336,6 +343,20 @@ struct StayAwakeControllerTests {
         #expect(seen == [.sleepSettingNotChanged])
     }
 
+    @Test("the failure the writer threw is the one reported; any other error is sleepSettingNotChanged", arguments: [
+        (StayAwakeFailure.permissionNotInstalled as any Error, StayAwakeFailure.permissionNotInstalled),
+        (StayAwakeFailure.sleepSettingNotChanged as any Error, StayAwakeFailure.sleepSettingNotChanged),
+        (FakeWriteFailure() as any Error, StayAwakeFailure.sleepSettingNotChanged),
+    ])
+    func reportsTheWritersFailure(thrown: any Error, expected: StayAwakeFailure) {
+        let rig = Rig(choice: .on, power: laptopOnAC)
+        let seen = FailureBox()
+        rig.controller.onFailure = { seen.add($0) }
+        rig.sleep.throwError = thrown
+        rig.controller.relayStarted()
+        #expect(seen.all == [expected], "threw \(thrown)")
+    }
+
     @Test("a failed hold does not stop the sleep setting following the target")
     func failedHold() {
         let rig = Rig(choice: .on, power: laptopOnAC)
@@ -431,9 +452,11 @@ private final class CountingRunner: BoundedProcessRunning, @unchecked Sendable {
     private var threads: [mach_port_t] = []
     private var asyncRunCount = 0
     private let syncResult: BoundedProcessResult
+    private let asyncResult: BoundedProcessResult
 
-    init(syncResult: BoundedProcessResult = .exited(0)) {
+    init(syncResult: BoundedProcessResult = .exited(0), asyncResult: BoundedProcessResult = .exited(0)) {
         self.syncResult = syncResult
+        self.asyncResult = asyncResult
     }
 
     var calls: [[String]] { lock.withLock { recorded.map(\.arguments) } }
@@ -446,7 +469,7 @@ private final class CountingRunner: BoundedProcessRunning, @unchecked Sendable {
             asyncRunCount += 1
             recorded.append(Call(executableURL: executableURL, arguments: arguments, standardInputData: standardInputData, timeout: timeout))
         }
-        return .exited(0)
+        return asyncResult
     }
 
     func runOnCallingThread(executableURL: URL, arguments: [String], standardInputData: Data, timeout: Duration) -> BoundedProcessResult {
@@ -554,6 +577,89 @@ struct PrivilegedSleepSettingWriterTests {
             .init(executableURL: sudo, arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"], standardInputData: Data(), timeout: .seconds(7)),
             .init(executableURL: sudo, arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"], standardInputData: Data(), timeout: .seconds(7)),
         ])
+    }
+}
+
+@Suite("SleepRuleAdministrator installed check")
+struct SleepRuleAdministratorInstalledTests {
+    private func administrator(
+        _ runner: CountingRunner, sudoers: Bool, plist: Bool
+    ) -> SleepRuleAdministrator {
+        SleepRuleAdministrator(runner: runner, userName: "tester", fileExists: { path in
+            if path == SleepRuleInstaller.sudoersPath { return sudoers }
+            if path == SleepRuleInstaller.bootResetPlistPath { return plist }
+            return false
+        })
+    }
+
+    @Test("sudo passes but CGM Relay's rule file is absent: not installed")
+    func ruleFileAbsent() async {
+        let runner = CountingRunner(asyncResult: .exited(0))
+        let installed = await administrator(runner, sudoers: false, plist: true).isInstalled()
+        #expect(!installed)
+    }
+
+    @Test("sudo passes, rule file present, boot reset job absent: not installed")
+    func bootJobAbsent() async {
+        let runner = CountingRunner(asyncResult: .exited(0))
+        let installed = await administrator(runner, sudoers: true, plist: false).isInstalled()
+        #expect(!installed)
+    }
+
+    @Test("both files present and sudo passes: installed")
+    func bothAndSudoPasses() async {
+        let runner = CountingRunner(asyncResult: .exited(0))
+        let installed = await administrator(runner, sudoers: true, plist: true).isInstalled()
+        #expect(installed)
+        #expect(runner.fullCalls.map(\.arguments) == [["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "0"]])
+    }
+
+    @Test("both files present and sudo fails: not installed", arguments: [
+        BoundedProcessResult.exited(1), .timedOut, .failedToLaunch,
+    ])
+    func bothAndSudoFails(_ result: BoundedProcessResult) async {
+        let runner = CountingRunner(asyncResult: result)
+        let installed = await administrator(runner, sudoers: true, plist: true).isInstalled()
+        #expect(!installed, "\(result)")
+    }
+
+    @Test("with either file absent sudo is not launched at all", arguments: [
+        (false, false), (false, true), (true, false),
+    ])
+    func sudoNotRunWhenAFileIsMissing(sudoers: Bool, plist: Bool) async {
+        let runner = CountingRunner(asyncResult: .exited(0))
+        _ = await administrator(runner, sudoers: sudoers, plist: plist).isInstalled()
+        #expect(runner.fullCalls.isEmpty, "sudoers \(sudoers) plist \(plist)")
+        #expect(runner.asyncRuns == 0)
+    }
+}
+
+// MARK: - Install decision
+
+@Suite("SleepRuleSetup")
+struct SleepRuleSetupTests {
+    @Test("rules that read as not installed get exactly one install, and its outcome comes back", arguments: [
+        SleepRuleOutcome.done, .cancelled, .failed,
+    ])
+    func installsOnceWhenMissing(_ outcome: SleepRuleOutcome) async {
+        let rules = FakeSleepRules()
+        rules.installed = false
+        rules.installOutcome = outcome
+        let result = await SleepRuleSetup.ensureInstalled(rules)
+        #expect(result == outcome)
+        #expect(rules.installCount == 1)
+    }
+
+    @Test("rules that read as installed get no install and .done, whatever install would have said", arguments: [
+        SleepRuleOutcome.done, .cancelled, .failed,
+    ])
+    func noInstallWhenPresent(_ outcome: SleepRuleOutcome) async {
+        let rules = FakeSleepRules()
+        rules.installed = true
+        rules.installOutcome = outcome
+        let result = await SleepRuleSetup.ensureInstalled(rules)
+        #expect(result == .done)
+        #expect(rules.installCount == 0)
     }
 }
 
@@ -861,7 +967,7 @@ struct StayAwakeCopyTests {
     @Test("the Settings footer with keep-awake off is exactly the explanation then the password line")
     func footerText() {
         let footer = StayAwakeCopy.explanation(isLaptop: true) + " " + StayAwakeCopy.permissionNote
-        #expect(footer == "Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. Asks for your password once.")
+        #expect(footer == "Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. Asks for your password to set this up.")
         #expect(StayAwakeCopy.approvalNeeded == "Allow CGM Relay in Login Items so this Mac can sleep after a crash.")
         #expect(!footer.contains(StayAwakeCopy.approvalNeeded))
     }
@@ -880,11 +986,12 @@ struct StayAwakeCopyTests {
         #expect(StayAwakeCopy.explanation(isLaptop: false) == "This Mac won't sleep while CGM Relay runs.")
     }
 
-    @Test("the permission note says the password is asked once and offers no way to remove it")
+    @Test("the permission note says the password sets it up, promises no single prompt, and offers no way to remove it")
     func permissionNote() {
         let note = StayAwakeCopy.permissionNote.lowercased()
         #expect(note.contains("password"))
-        #expect(note.contains("once"))
+        #expect(note.contains("set this up"))
+        #expect(!note.contains("once"))
         #expect(!note.contains("remove"))
         #expect(!note.contains("revoke"))
         #expect(!note.contains("take that permission away"))

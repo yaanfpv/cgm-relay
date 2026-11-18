@@ -61,7 +61,7 @@ public final class SystemIdleSleepAssertion: IdleSleepAsserting {
 /// sudoers rule SleepRuleInstaller put in place, using `sudo -n` so a
 /// missing rule is an error at once and never a password prompt waiting for
 /// a keyboard. Without the rule file sudo is not run at all: turning the
-/// setting off then needs nothing (nothing could have turned it on), and
+/// setting off then needs nothing (CGM Relay could not have turned it on), and
 /// turning it on is an error. Otherwise the call blocks until the command
 /// finishes or its time is up: at most the timeout, plus the runner's 2 s
 /// to end a child that ignores the request.
@@ -149,24 +149,46 @@ public protocol SleepRuleManaging: Sendable {
     func install() async -> SleepRuleOutcome
 }
 
+/// SleepRuleSetup decides whether the permission has to be installed.
+public enum SleepRuleSetup {
+    /// ensureInstalled installs the permission once when it is missing, and
+    /// returns the install's outcome; when it is there it installs nothing
+    /// and returns done.
+    public static func ensureInstalled(_ rules: any SleepRuleManaging) async -> SleepRuleOutcome {
+        if await rules.isInstalled() { return .done }
+        return await rules.install()
+    }
+}
+
 /// SleepRuleAdministrator runs SleepRuleInstaller's scripts as root through
 /// one administrator prompt, and only when called, which the app does on the
 /// person's click.
 public struct SleepRuleAdministrator: SleepRuleManaging {
     private let runner: any BoundedProcessRunning
     private let userName: String
+    private let fileExists: @Sendable (String) -> Bool
 
     /// The prompt waits for a person to type, so its time is generous.
     private static let promptTimeout: Duration = .seconds(180)
 
-    public init(runner: any BoundedProcessRunning = RealBoundedProcessRunner(), userName: String = NSUserName()) {
+    public init(
+        runner: any BoundedProcessRunning = RealBoundedProcessRunner(),
+        userName: String = NSUserName(),
+        fileExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) {
         self.runner = runner
         self.userName = userName
+        self.fileExists = fileExists
     }
 
-    /// isInstalled asks sudo, without a password, whether it would run the
-    /// command the app uses.
+    /// isInstalled is true only when CGM Relay's own rule file and boot
+    /// reset job both exist and sudo, asked without a password, would run
+    /// the command the app uses; so another app's rule alone cannot stand in
+    /// for CGM Relay's missing files, and sudo is not asked while a file is
+    /// missing.
     public func isInstalled() async -> Bool {
+        guard fileExists(SleepRuleInstaller.sudoersPath),
+              fileExists(SleepRuleInstaller.bootResetPlistPath) else { return false }
         let result = await runner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/sudo"),
             arguments: ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "0"],

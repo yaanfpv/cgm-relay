@@ -62,12 +62,12 @@ Sign Out of LibreLinkUp does only that. The node and the address stay, so after 
 
 ## Keeping the Mac awake
 
-On a desktop Mac the app only holds an idle-sleep assertion while the relay runs, and installs nothing. On a laptop, staying awake with the lid closed needs the root-only `pmset` setting `disablesleep`. Setup installs a rule file and a boot job with one administrator prompt. The rule lets your user run the two `pmset` commands that switch the setting on and off without a password, and nothing else. The app also asks you to approve a background item once under System Settings > General > Login Items. That item is the helper below.
+On a desktop Mac the app only holds an idle-sleep assertion while the relay runs, and installs nothing. On a laptop, staying awake with the lid closed needs the root-only `pmset` setting `disablesleep`. Setup installs a rule file and a boot job with one administrator prompt. The rule lets your user run the two `pmset` commands that switch the setting on and off without a password, and nothing else. The app counts this permission as set up only when its own rule file and boot job are both there and sudo confirms, without a password, that it allows the command. So it installs them even when another app's rule already allows the same `pmset` commands, and it never touches another app's rules. macOS also asks once to allow the app's background item, listed under System Settings > General > Login Items & Extensions. That item is the helper below.
 
 - The sleep setting is on only while you chose keep-awake, the relay is running and the Mac is on power. The lid-closed part applies to laptops only. On battery the Mac sleeps as usual.
 - The app turns the setting off when the relay stops, and a boot job turns it off at every restart.
 - If CGM Relay ends unexpectedly, the approved helper looks every 20 seconds and turns the setting off while the app is not running. A change of power source makes it look at once.
-- Turning keep-awake off keeps the permission, so turning it on again never asks again.
+- Turning keep-awake off leaves the permission in place. Turning it on again checks it, and asks for your password only if a file is missing or sudo cannot confirm the permission without one.
 
 ### What keep-awake leaves on your Mac
 
@@ -80,7 +80,7 @@ sudo rm /Library/LaunchDaemons/com.yaanfpv.cgmrelay.sleep-reset.plist
 sudo rm /etc/sudoers.d/cgm-relay-disablesleep
 ```
 
-The first line only matters if the app ended while the setting was on. The second may report an error if the job is not loaded, which is fine. The background item is listed under System Settings > General > Login Items. Switch it off there before you delete the app.
+The first line only matters if the app ended while the setting was on. The second may report an error if the job is not loaded, which is fine. The background item is listed under System Settings > General > Login Items & Extensions. Switch it off there before you delete the app.
 
 ## Updates
 

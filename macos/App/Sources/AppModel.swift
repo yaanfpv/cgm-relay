@@ -1359,8 +1359,8 @@ final class AppModel: ObservableObject {
     var stayAwakeChoice: StayAwakeChoice? { settings.stayAwake }
 
     /// turnOnStayAwake keeps this Mac awake while CGM Relay runs. A laptop
-    /// first needs the permission to change the sleep setting, which asks
-    /// for the Mac's password once; the answer is saved only when that
+    /// first needs the permission to change the sleep setting, whose install
+    /// asks for the Mac's password; the answer is saved only when that
     /// worked, so a closed prompt leaves things as they were.
     func turnOnStayAwake() {
         guard !isChangingStayAwake else { return }
@@ -1372,24 +1372,22 @@ final class AppModel: ObservableObject {
         isChangingStayAwake = true
         Task {
             defer { isChangingStayAwake = false }
-            if await !sleepRules.isInstalled() {
-                switch await sleepRules.install() {
-                case .done:
-                    break
-                case .cancelled:
-                    return
-                case .failed:
-                    stayAwakeNotice = "CGM Relay couldn't get permission to change the sleep setting, so it is still off."
-                    return
-                }
+            switch await SleepRuleSetup.ensureInstalled(sleepRules) {
+            case .done:
+                break
+            case .cancelled:
+                return
+            case .failed:
+                stayAwakeNotice = "CGM Relay couldn't get permission to change the sleep setting, so it is still off."
+                return
             }
             saveStayAwake(.on)
         }
     }
 
     /// turnOffStayAwake saves the answer and puts the Mac back to sleeping
-    /// as usual. The permission to change the sleep setting stays, so
-    /// turning keep-awake on again never asks for it again.
+    /// as usual. The permission to change the sleep setting stays; turning
+    /// keep-awake on again checks it and asks only when that check fails.
     func turnOffStayAwake() async {
         guard !isChangingStayAwake else { return }
         stayAwakeNotice = nil

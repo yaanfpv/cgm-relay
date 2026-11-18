@@ -43,11 +43,14 @@ final class FakeSleepSettingWriter: SleepSettingWriting {
     var failNextWrite = false
     var failNextWriteAfterEffect = false
     var failEveryWrite = false
+    /// When set, every write throws this error instead of FakeWriteFailure.
+    var throwError: (any Error)?
     private(set) var setting = false
     private(set) var attempts = 0
     init(log: StayAwakeCallLog) { self.log = log }
     func setDisableSleep(_ on: Bool) throws {
         attempts += 1
+        if let throwError { throw throwError }
         if failEveryWrite {
             throw FakeWriteFailure()
         }
@@ -85,9 +88,13 @@ final class FakeSleepHelperRegistration: SleepHelperRegistering, @unchecked Send
 final class FakeSleepRules: SleepRuleManaging, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [String] = []
+    /// What isInstalled() answers, and what install() returns.
+    var installed = true
+    var installOutcome: SleepRuleOutcome = .done
     var calls: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    var installCount: Int { calls.filter { $0 == "install" }.count }
     private func note(_ call: String) { lock.lock(); recorded.append(call); lock.unlock() }
-    func isInstalled() async -> Bool { note("isInstalled"); return true }
-    func install() async -> SleepRuleOutcome { note("install"); return .done }
+    func isInstalled() async -> Bool { note("isInstalled"); return installed }
+    func install() async -> SleepRuleOutcome { note("install"); return installOutcome }
     func remove() async -> SleepRuleOutcome { note("remove"); return .done }
 }
