@@ -278,7 +278,7 @@ public final class StayAwakeController: @unchecked Sendable {
         } catch {
             appliedDisableSleep = nil
             lastWriteThrew = true
-            report(.sleepSettingNotChanged)
+            report(error as? StayAwakeFailure ?? .sleepSettingNotChanged)
         }
     }
 

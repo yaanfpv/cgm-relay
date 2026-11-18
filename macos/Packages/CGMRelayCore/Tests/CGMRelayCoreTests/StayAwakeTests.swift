@@ -967,7 +967,7 @@ struct StayAwakeCopyTests {
     @Test("the Settings footer with keep-awake off is exactly the explanation then the password line")
     func footerText() {
         let footer = StayAwakeCopy.explanation(isLaptop: true) + " " + StayAwakeCopy.permissionNote
-        #expect(footer == "Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. Asks for your password once.")
+        #expect(footer == "Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. Asks for your password to set this up.")
         #expect(StayAwakeCopy.approvalNeeded == "Allow CGM Relay in Login Items so this Mac can sleep after a crash.")
         #expect(!footer.contains(StayAwakeCopy.approvalNeeded))
     }
@@ -986,11 +986,12 @@ struct StayAwakeCopyTests {
         #expect(StayAwakeCopy.explanation(isLaptop: false) == "This Mac won't sleep while CGM Relay runs.")
     }
 
-    @Test("the permission note says the password is asked once and offers no way to remove it")
+    @Test("the permission note says the password sets it up, promises no single prompt, and offers no way to remove it")
     func permissionNote() {
         let note = StayAwakeCopy.permissionNote.lowercased()
         #expect(note.contains("password"))
-        #expect(note.contains("once"))
+        #expect(note.contains("set this up"))
+        #expect(!note.contains("once"))
         #expect(!note.contains("remove"))
         #expect(!note.contains("revoke"))
         #expect(!note.contains("take that permission away"))

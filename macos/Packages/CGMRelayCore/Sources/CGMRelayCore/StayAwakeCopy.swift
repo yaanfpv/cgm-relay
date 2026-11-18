@@ -14,9 +14,9 @@ public enum StayAwakeCopy {
     }
 
     /// permissionNote is the password line: turning this on on a laptop asks
-    /// for the Mac's password once. Settings and the setup step show it
-    /// after the explanation.
-    public static let permissionNote = "Asks for your password once."
+    /// for the Mac's password to set up the permission. Settings and the
+    /// setup step show it after the explanation.
+    public static let permissionNote = "Asks for your password to set this up."
 
     /// approvalNeeded says why the helper still needs the person's approval:
     /// without it the Mac cannot go back to sleeping after a crash.
