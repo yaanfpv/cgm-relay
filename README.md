@@ -41,7 +41,7 @@ Your app now catches up whenever it wakes.
 
 ## What it asks of your Mac
 
-- **Keep awake, if you turn it on.** On a laptop, macOS asks for your password once, and you approve CGM Relay's background item under System Settings > General > Login Items, so the Mac can sleep again if the app ever stops unexpectedly. A desktop Mac needs neither.
+- **Keep awake, if you turn it on.** On a laptop, CGM Relay asks for your password to set up its permission to change the sleep setting. macOS also asks you to allow its background item, which then appears under System Settings > General > Login Items & Extensions. That item lets the Mac sleep again if the app ever stops unexpectedly. A desktop Mac needs neither.
 - **A Tailscale sign-in, if you pick the built-in route.** The app opens a sign-in window. A free Tailscale account works.
 - **A check for updates once a day.** It goes to GitHub, and you can turn it off in Settings > Updates. A downloaded update installs the next time CGM Relay quits, or when you choose Restart to Update.
 
@@ -52,7 +52,7 @@ The Mac has to stay on for CGM Relay to keep reaching LibreLinkUp.
 - **Your minutes, kept.** Readings are encrypted on your Mac and kept for 30 days. You can set anything from 1 to 90.
 - **A menu bar icon that stays out of your way.** It turns amber when readings are late and red when something stops, and it shows the number unless you turn that off.
 - **Set and forget.** It can open at login, and it recovers by itself after a LibreLinkUp outage or rate limit.
-- **A Mac that stays awake.** Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. On a laptop it asks for your password once.
+- **A Mac that stays awake.** Stays awake while plugged in, even with the lid closed. On battery it sleeps as usual. On a laptop it asks for your password to set this up.
 - **Yours to analyze.** The record answers the same Nightscout requests a follower app makes, so an AI agent or a script can read it with your token.
 - **Free and open source.** Read every line, build it yourself, or run it on a Linux server.
 
