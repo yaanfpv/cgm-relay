@@ -58,6 +58,72 @@ struct RealProcessLauncherTests {
         #expect(got == 9)
     }
 
+    /// PipeDrain reads a pipe's read end to its EOF on its own thread, so a
+    /// payload larger than a pipe buffer never blocks the writer, and says
+    /// what it read once the EOF arrives.
+    private final class PipeDrain: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = Data()
+        private let reachedEOF = DispatchSemaphore(value: 0)
+
+        init(_ readEnd: FileHandle) {
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let data = (try? readEnd.readToEnd()) ?? Data()
+                lock.withLock { stored = data }
+                reachedEOF.signal()
+            }
+        }
+
+        /// waitForEOF waits on the EOF, up to the hang ceiling, and returns
+        /// everything read, or nil when no EOF arrived.
+        func waitForEOF() -> Data? {
+            guard reachedEOF.wait(timeout: .now() + .milliseconds(Int(TestChild.hangCeilingMilliseconds))) == .success else { return nil }
+            return lock.withLock { stored }
+        }
+    }
+
+    /// heldProcess builds a RealProcess over a held child that blocks on
+    /// input the test holds, with a real pipe as its stdin handle. The
+    /// returned closure ends the child through its held handle.
+    private func heldProcess() throws -> (process: RealProcess, held: HeldChild, stdin: Pipe, end: () -> Void) {
+        let input = HeldInput()
+        let held = try HeldChild.startBlocked(on: input)
+        let stdin = Pipe()
+        let process = RealProcess(child: held.child, stdinHandle: stdin.fileHandleForWriting)
+        return (process, held, stdin, { held.endByReleasing(input) })
+    }
+
+    @Test("input sent after terminate() writes nothing, raises nothing, and the child's exit is reported once")
+    func inputSentAfterTerminateWritesNothing() throws {
+        let (process, held, stdin, end) = try heldProcess()
+        defer { end() }
+        let drain = PipeDrain(stdin.fileHandleForReading)
+
+        process.terminate()
+        process.sendInput(Data("engine configuration".utf8))
+
+        let got = try #require(drain.waitForEOF(), "the read end never reached EOF")
+        #expect(got.isEmpty, "\(got.count) bytes were written after the close")
+        #expect(held.waitReaped(), "the child's exit was not reported")
+        #expect(held.watch.reported.count == 1, "the exit was reported \(held.watch.reported.count) times")
+    }
+
+    @Test("input sent before terminate() is delivered whole, even when larger than a pipe buffer, before the stream ends")
+    func inputSentBeforeTerminateArrivesWhole() throws {
+        let (process, held, stdin, end) = try heldProcess()
+        defer { end() }
+        let drain = PipeDrain(stdin.fileHandleForReading)
+        let payload = Data((0..<200_000).map { UInt8($0 % 251) })
+
+        process.sendInput(payload)
+        process.terminate()
+
+        let got = try #require(drain.waitForEOF(), "the read end never reached EOF")
+        #expect(got == payload, "read \(got.count) of \(payload.count) bytes")
+        #expect(held.waitReaped(), "the child's exit was not reported")
+        #expect(held.watch.reported.count == 1)
+    }
+
     /// EnvironmentCase names one shell command that exits 0 when the
     /// child process's environment is exactly what it should be, and
     /// something else otherwise -- either an unlisted variable this test
