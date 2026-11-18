@@ -379,47 +379,147 @@ extension AppSettings: Codable {
     }
 }
 
+/// SettingsLoadOutcome is how a load of the saved settings went, and the
+/// pure decision on it: whether saving, setup and the relay start are
+/// allowed. Settings the preference service did not hand back are never
+/// treated as a fresh install while the preferences file still holds them.
+public enum SettingsLoadOutcome: Equatable, Sendable {
+    /// The preference service returned the settings.
+    case normal(AppSettings)
+    /// Nothing was saved yet: no value from the service and none in the file.
+    case fresh
+    /// The service returned nothing, but the preferences file holds
+    /// settings that decode. They are used, and nothing is saved.
+    case recovered(AppSettings)
+    /// The service returned nothing and the file cannot be read, or its
+    /// settings do not decode.
+    case unreadable
+
+    public var settings: AppSettings {
+        switch self {
+        case .normal(let settings), .recovered(let settings): settings
+        case .fresh, .unreadable: .default
+        }
+    }
+
+    public var allowsSaving: Bool {
+        switch self {
+        case .normal, .fresh: true
+        case .recovered, .unreadable: false
+        }
+    }
+
+    public var mayShowSetup: Bool {
+        switch self {
+        case .normal, .fresh: true
+        case .recovered, .unreadable: false
+        }
+    }
+
+    public var mayStartRelay: Bool {
+        switch self {
+        case .normal, .fresh, .recovered: true
+        case .unreadable: false
+        }
+    }
+}
+
 /// SettingsStoring reads and writes AppSettings. Production code uses
-/// UserDefaultsSettingsStore; tests use a fake that never touches
-/// UserDefaults at all.
+/// UserDefaultsSettingsStore; tests use throwaway UserDefaults suites.
 public protocol SettingsStoring: Sendable {
     func load() -> AppSettings
+    func loadOutcome() -> SettingsLoadOutcome
     func save(_ settings: AppSettings)
 }
 
 /// UserDefaultsSettingsStore keeps AppSettings as one JSON-encoded value
 /// under one key, the same one-item shape KeychainCredentialStore uses for
 /// its own secrets.
+///
+/// When the preference service returns nothing for the key, the store reads
+/// the domain's preferences file itself, read only, to tell a fresh install
+/// from settings the service failed to hand back. Its save writes nothing
+/// unless the latest load was normal or a fresh install.
 public final class UserDefaultsSettingsStore: SettingsStoring, @unchecked Sendable {
     private static let key = "com.yaanfpv.cgmrelay.settings"
 
     private let defaults: UserDefaults
+    private let preferencesFile: URL
+    private let lock = NSLock()
+    private var latestOutcome: SettingsLoadOutcome?
 
     /// init points at .standard, this Mac's one real settings domain,
     /// when suiteName is nil, or a suite scoped to it otherwise: passing
     /// the Debug build's own throwaway Keychain service override here
     /// too means a development walk driven against a throwaway account
-    /// never changes the owner's real settings either.
-    public init(suiteName: String? = nil) {
+    /// never changes the owner's real settings either. preferencesFile
+    /// defaults to the domain's file under ~/Library/Preferences.
+    public init(suiteName: String? = nil, preferencesFile: URL? = nil) {
+        let domain: String
         if let suiteName, let suite = UserDefaults(suiteName: suiteName) {
             defaults = suite
+            domain = suiteName
         } else {
             defaults = .standard
+            domain = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
         }
+        self.preferencesFile = preferencesFile
+            ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/\(domain).plist")
+    }
+
+    /// savingAllowed is false once a load came back recovered or unreadable.
+    /// A store that has not loaded saves as it always did.
+    public var savingAllowed: Bool {
+        lock.withLock { latestOutcome?.allowsSaving ?? true }
+    }
+
+    public func loadOutcome() -> SettingsLoadOutcome {
+        let outcome = readOutcome()
+        lock.withLock { latestOutcome = outcome }
+        return outcome
     }
 
     public func load() -> AppSettings {
-        guard let data = defaults.data(forKey: Self.key),
-              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data)
-        else {
-            return .default
-        }
-        return decoded
+        loadOutcome().settings
     }
 
     public func save(_ settings: AppSettings) {
-        guard let data = try? JSONEncoder().encode(settings) else { return }
+        guard savingAllowed, let data = try? JSONEncoder().encode(settings) else { return }
         defaults.set(data, forKey: Self.key)
+    }
+
+    private func readOutcome() -> SettingsLoadOutcome {
+        if let data = defaults.data(forKey: Self.key) {
+            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data)
+            return .normal(decoded ?? .default)
+        }
+        return readPreferencesFile()
+    }
+
+    private func readPreferencesFile() -> SettingsLoadOutcome {
+        let fileData: Data
+        do {
+            fileData = try Data(contentsOf: preferencesFile)
+        } catch let error as NSError {
+            let posix = error.userInfo[NSUnderlyingErrorKey] as? NSError
+            let noSuchFile = error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError
+                || error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT)
+                || posix?.domain == NSPOSIXErrorDomain && posix?.code == Int(ENOENT)
+            return noSuchFile ? .fresh : .unreadable
+        }
+        guard let plist = try? PropertyListSerialization.propertyList(from: fileData, options: [], format: nil),
+              let dictionary = plist as? [String: Any]
+        else {
+            return .unreadable
+        }
+        guard let value = dictionary[Self.key] else { return .fresh }
+        guard let data = value as? Data,
+              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data)
+        else {
+            return .unreadable
+        }
+        return .recovered(decoded)
     }
 }
 

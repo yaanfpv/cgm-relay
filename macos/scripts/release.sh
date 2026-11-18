@@ -333,7 +333,7 @@ osascript "$SCRIPT_DIR/dmg/layout.applescript" "CGM Relay" >/dev/null ||
   die "Finder could not lay out the installer window" "allow this terminal to control Finder in System Settings > Privacy & Security > Automation, then run again"
 [ -f "$MOUNT_POINT/.DS_Store" ] || die "Finder saved no window layout on the disk image" "run again"
 sync
-hdiutil detach -quiet "$MOUNT_POINT" || die "could not unmount the disk image after laying it out" "eject CGM Relay and run again"
+detach_mount "$MOUNT_POINT" || die "could not unmount the disk image after laying it out" "eject CGM Relay and run again"
 MOUNT_POINT=""
 hdiutil convert -quiet "$LAYOUT_DMG" -format ULFO -ov -o "$WORK_DIR/archives/${DMG_FILE}" ||
   die "hdiutil could not compress the disk image" "run again; check free disk space"
@@ -368,7 +368,7 @@ if [ "$SKIP_NOTARIZE" = no ]; then
 else
   echo "    Gatekeeper assessment skipped: an unnotarized test build is rejected by design"
 fi
-hdiutil detach -quiet "$MOUNT_POINT" || die "could not unmount the DMG" "eject ${MOUNT_POINT} and run again"
+detach_mount "$MOUNT_POINT" || die "could not unmount the DMG" "eject ${MOUNT_POINT} and run again"
 MOUNT_POINT=""
 
 # ------------------------------------------------------------------ appcast

@@ -176,6 +176,39 @@ detach_leftover() {
   [ -z "$dev" ] || hdiutil detach -quiet "$dev" >/dev/null 2>&1 || true
 }
 
+# mount_gone succeeds when neither mount nor hdiutil lists the mount point $1,
+# nor its resolved form $2.
+mount_gone() {
+  local mounted images
+  mounted="$(mount 2>/dev/null || true)"
+  images="$(hdiutil info 2>/dev/null || true)"
+  if grep -F -q -e " on $1 (" -e " on $2 (" <<<"$mounted"; then
+    return 1
+  fi
+  if grep -F -q -e "$1" -e "$2" <<<"$images"; then
+    return 1
+  fi
+  return 0
+}
+
+# detach_mount unmounts the volume at $1, trying again when it is busy. It
+# succeeds as soon as the detach works or the mount is gone, and fails after
+# the third failed try.
+detach_mount() {
+  local try real
+  real="$(cd "$1" 2>/dev/null && pwd -P)" || real="$1"
+  for try in 1 2 3; do
+    if hdiutil detach -quiet "$1"; then
+      return 0
+    fi
+    if mount_gone "$1" "$real"; then
+      return 0
+    fi
+    [ "$try" -eq 3 ] || sleep 2
+  done
+  return 1
+}
+
 # attach_dmg mounts $1 read-only at $2, trying again when the system is slow to
 # hand the image over.
 attach_dmg() {

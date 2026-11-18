@@ -38,7 +38,7 @@ struct CGMRelayApp: App {
         let model = AppModel(
             engineURL: CGMRelayApp.engineURL(),
             credentialStore: store,
-            settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride),
+            settingsStore: UserDefaultsSettingsStore(suiteName: keychainServiceOverride, preferencesFile: CGMRelayApp.settingsFileOverride()),
             statusAddr: CGMRelayApp.statusAddr(explicitKeychainServiceOverride: explicitKeychainServiceOverride),
             databasePath: CGMRelayApp.databasePath(keychainServiceOverride: keychainServiceOverride),
             librelinkupBaseURL: CGMRelayApp.librelinkupBaseURL(),
@@ -147,6 +147,18 @@ struct CGMRelayApp: App {
     private static func explicitKeychainServiceOverride() -> String? {
         #if DEBUG
         return UserDefaults.standard.string(forKey: "CGMRelayKeychainService")
+        #else
+        return nil
+        #endif
+    }
+
+    /// settingsFileOverride is the path `-CGMRelaySettingsFile` gives for the
+    /// preferences file the settings store falls back to, so a Debug walk can
+    /// point it at a file of its own. Always nil in Release.
+    private static func settingsFileOverride() -> URL? {
+        #if DEBUG
+        guard let path = UserDefaults.standard.string(forKey: "CGMRelaySettingsFile") else { return nil }
+        return URL(fileURLWithPath: path)
         #else
         return nil
         #endif

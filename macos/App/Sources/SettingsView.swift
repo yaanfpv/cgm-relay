@@ -73,6 +73,22 @@ struct SettingsView: View {
     }
 }
 
+/// SettingsSavingOffNotice is the line each pane that changes a setting shows,
+/// at the top of its own Form, while this run cannot save a change.
+struct SettingsSavingOffNotice: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if model.settingsSavingOff {
+            Section {
+                Text("Can't save right now. Restart your Mac to change settings.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private extension View {
     /// measuringHeight reports this pane's own natural content height
     /// under `tab` straight into SettingsView's paneHeights state.

@@ -20,6 +20,7 @@ struct GeneralPaneView: View {
 
     var body: some View {
         Form {
+            SettingsSavingOffNotice(model: model)
             Section {
                 Toggle("Open at Login", isOn: openAtLoginBinding)
                     .disabled(model.loginItemStatus == .notFound)
@@ -52,10 +53,12 @@ struct GeneralPaneView: View {
                     Text("mmol/L").tag(GlucoseUnit.mmolL)
                 }
                 .pickerStyle(.segmented)
+                .disabled(model.settingsSavingOff)
             }
 
             Section {
                 Toggle("Show the reading in the menu bar", isOn: showReadingBinding)
+                    .disabled(model.settingsSavingOff)
             } header: {
                 Text("Menu Bar")
             } footer: {
@@ -64,7 +67,7 @@ struct GeneralPaneView: View {
 
             Section {
                 Toggle(StayAwakeCopy.title, isOn: stayAwakeBinding)
-                    .disabled(model.isChangingStayAwake)
+                    .disabled(model.isChangingStayAwake || model.settingsSavingOff)
                 if let notice = model.stayAwakeNotice {
                     Text(notice)
                         .font(.caption)
@@ -100,11 +103,13 @@ struct GeneralPaneView: View {
                         .multilineTextAlignment(.trailing)
                         .focused($retentionFocus, equals: .field)
                         .onSubmit { commitRetention() }
+                        .disabled(model.settingsSavingOff)
                     Stepper("Days", value: retentionStepperBinding, in: AppSettings.retentionDaysRange)
                         .labelsHidden()
                         .accessibilityLabel("Days")
                         .accessibilityValue("\(retentionStepperBinding.wrappedValue)")
                         .focused($retentionFocus, equals: .stepper)
+                        .disabled(model.settingsSavingOff)
                     Text("days")
                 }
                 if let retentionErrorMessage {

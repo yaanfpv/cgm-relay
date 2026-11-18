@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- CGM Relay keeps your settings, and opens normally, when macOS fails to hand them back, instead of starting setup again.
+
 ## [1.1.0] - 2026-11-16
 
 ### Added

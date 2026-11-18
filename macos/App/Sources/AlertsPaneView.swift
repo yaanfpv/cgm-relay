@@ -11,14 +11,17 @@ struct AlertsPaneView: View {
 
     var body: some View {
         Form {
+            SettingsSavingOffNotice(model: model)
             Section {
                 Toggle("Alert when there's no new reading", isOn: noReadingEnabledBinding)
+                    .disabled(model.settingsSavingOff)
                 if model.settings.noReadingAlertEnabled {
                     Stepper(
                         "After \(model.settings.noReadingAlertMinutes) minutes",
                         value: noReadingMinutesBinding,
                         in: AppSettings.noReadingAlertMinutesRange
                     )
+                    .disabled(model.settingsSavingOff)
                 }
             } header: {
                 Text("No new readings")
@@ -26,6 +29,7 @@ struct AlertsPaneView: View {
 
             Section {
                 Toggle("Sign-in failing", isOn: signInFailingBinding)
+                    .disabled(model.settingsSavingOff)
             } header: {
                 Text("Sign-in")
             } footer: {
